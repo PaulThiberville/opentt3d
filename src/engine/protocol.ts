@@ -214,10 +214,22 @@ export type WorldEvent =
 export interface EngineInitOptions {
   /** URL du module WASM ou chemin local. */
   moduleUrl: string;
-  /** Mémoire initiale en MiB. */
+  /**
+   * Mémoire initiale demandée en MiB. Le module Emscripten actuel fige sa
+   * mémoire à la compilation (32 Mio) : la valeur est donc traitée comme une
+   * exigence, pas comme un redimensionnement à chaud. Le loader avertit si le
+   * module est plus petit que demandé.
+   */
   memoryMiB?: number;
   /** Active les logs de debug du pont C++. */
   debug?: boolean;
+  /** Progression du chargement, de 0 à 1 (facultatif). */
+  onProgress?: (progress: number, message: string) => void;
+  /**
+   * Avertissements non bloquants : options de partie ignorées par le pont,
+   * commandes indisponibles, mémoire insuffisante… (facultatif).
+   */
+  onWarning?: (message: string) => void;
 }
 
 export interface NewGameOptions {
@@ -271,6 +283,12 @@ export interface EngineStatus {
   paused: boolean;
   speed: number;
   lastError: string | null;
+  /**
+   * Avertissements cumulés depuis le dernier `newGame` : options de partie non
+   * appliquées, commandes ignorées, mémoire demandée indisponible. Les
+   * implémentations qui n'en produisent pas peuvent omettre ce champ.
+   */
+  warnings?: string[];
 }
 
 /**
