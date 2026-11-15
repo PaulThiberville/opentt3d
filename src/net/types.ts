@@ -332,6 +332,8 @@ const BUILD_TOOLS = new Set([
   'station',
   'depot',
   'signal',
+  'unsignal',
+  'convert',
   'bridge',
   'tunnel',
   'clear',

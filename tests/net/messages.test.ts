@@ -66,6 +66,25 @@ describe('guards du protocole réseau', () => {
       }),
     ).toBe(true);
     expect(
+      isEngineCommand({
+        type: 'build',
+        tool: 'convert',
+        company: 0,
+        from: { x: 1, y: 2 },
+        to: { x: 4, y: 2 },
+        options: { railType: 'electrified' },
+      }),
+    ).toBe(true);
+    expect(
+      isEngineCommand({
+        type: 'build',
+        tool: 'unsignal',
+        company: 0,
+        from: { x: 1, y: 2 },
+        options: { type: 'path' },
+      }),
+    ).toBe(true);
+    expect(
       isEngineCommand({ type: 'build', tool: 'laser', company: 0, from: { x: 0, y: 0 } }),
     ).toBe(false);
     expect(isEngineCommand({ type: 'console', command: 42 })).toBe(false);

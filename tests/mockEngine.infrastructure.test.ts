@@ -5,10 +5,12 @@ import {
   planBuild,
   planDepot,
   planStation,
+  railConvertCost,
   type BuildPoint,
   type StationSettings,
 } from '../src/game/buildRules';
 import { tileIndex } from '../src/game/mapGrid';
+import { SIGNAL_KIND_COST } from '../src/game/signalRules';
 
 async function createEngine(seed = 1234, size = 128): Promise<MockEngine> {
   const engine = new MockEngine();
@@ -345,5 +347,135 @@ describe('MockEngine : dépôts et signaux', () => {
       return engine.hash();
     };
     expect(await build()).toBe(await build());
+  });
+});
+
+describe('MockEngine : signaux avancés et types de rail (#156/#157)', () => {
+  it('pose un signal path bidirectionnel avec densité, puis le retire', async () => {
+    const engine = await createEngine(606);
+    const map = mapOf(engine);
+    const { from, to } = findPath(map, 'rail', 6);
+    engine.send({
+      type: 'build',
+      tool: 'rail',
+      company: 0,
+      from,
+      to,
+      options: { axis: 'x', railType: 'rail' },
+    });
+    engine.snapshot();
+
+    const before = engine.snapshot();
+    const moneyBefore = before.companies[0]?.money ?? 0;
+    engine.send({
+      type: 'build',
+      tool: 'signal',
+      company: 0,
+      from,
+      to,
+      options: { type: 'path', direction: 'both', spacing: 2 },
+    });
+    const after = engine.snapshot();
+    const signalTiles = after.signals ?? [];
+    expect(signalTiles.map((signal) => signal.x)).toEqual([from.x, from.x + 2, from.x + 4]);
+    expect(signalTiles.every((signal) => signal.kind === 'path')).toBe(true);
+    expect(signalTiles.every((signal) => signal.direction === 'both')).toBe(true);
+    expect((after.companies[0]?.money ?? 0) - moneyBefore).toBe(-3 * SIGNAL_KIND_COST.path);
+
+    engine.send({
+      type: 'build',
+      tool: 'unsignal',
+      company: 0,
+      from,
+      to,
+    });
+    const cleared = engine.snapshot();
+    expect(cleared.signals ?? []).toHaveLength(0);
+    const built = cleared.map;
+    if (!built) throw new Error('la démolition doit invalider la carte');
+    for (let x = from.x; x <= to.x; x += 1) {
+      const index = tileIndex(x, from.y, built.width);
+      expect(built.kind[index]).toBe(TILE_KIND_INDEX.rail);
+      expect((built.flags[index] ?? 0) & TILE_FLAG.SIGNAL).toBe(0);
+    }
+  });
+
+  it('convertit un tronçon en électrifié, débite le coût et conserve les signaux', async () => {
+    const engine = await createEngine(707);
+    const map = mapOf(engine);
+    const { from, to } = findPath(map, 'rail', 5);
+    engine.send({
+      type: 'build',
+      tool: 'rail',
+      company: 0,
+      from,
+      to,
+      options: { axis: 'x' },
+    });
+    engine.send({
+      type: 'build',
+      tool: 'signal',
+      company: 0,
+      from,
+      options: { type: 'block' },
+    });
+    engine.snapshot();
+    const moneyBefore = engine.snapshot().companies[0]?.money ?? 0;
+    const hashBefore = engine.hash();
+
+    engine.send({
+      type: 'build',
+      tool: 'convert',
+      company: 0,
+      from,
+      to,
+      options: { railType: 'electrified' },
+    });
+    const after = engine.snapshot();
+    const converted = after.map;
+    if (!converted) throw new Error('la conversion doit invalider la carte');
+    for (let x = from.x; x <= to.x; x += 1) {
+      const index = tileIndex(x, from.y, converted.width);
+      expect(converted.railTypes?.[index]).toBe(1);
+      expect((converted.flags[index] ?? 0) & TILE_FLAG.ELECTRIFIED).toBe(TILE_FLAG.ELECTRIFIED);
+    }
+    expect((after.companies[0]?.money ?? 0) - moneyBefore).toBe(
+      -5 * railConvertCost('electrified'),
+    );
+    expect(engine.hash()).not.toBe(hashBefore);
+    expect(after.signals ?? []).toHaveLength(1);
+    expect(after.depots.every((depot) => depot.kind !== 'rail' || depot.railType)).toBe(true);
+  });
+
+  it('reste déterministe après sauvegarde/rechargement des signaux et types de rail', async () => {
+    const engine = await createEngine(808);
+    const map = mapOf(engine);
+    const { from, to } = findPath(map, 'rail', 4);
+    engine.send({
+      type: 'build',
+      tool: 'rail',
+      company: 0,
+      from,
+      to,
+      options: { axis: 'x', railType: 'electrified' },
+    });
+    engine.send({
+      type: 'build',
+      tool: 'signal',
+      company: 0,
+      from,
+      options: { type: 'entry', direction: 'both' },
+    });
+    const hashBefore = engine.hash();
+    const saved = await engine.save();
+
+    const reloaded = new MockEngine();
+    await reloaded.init({ moduleUrl: 'mock://engine' });
+    await reloaded.load(saved);
+    expect(reloaded.hash()).toBe(hashBefore);
+    const snapshot = reloaded.snapshot();
+    expect(snapshot.signals?.[0]?.kind).toBe('entry');
+    const index = tileIndex(from.x, from.y, snapshot.map?.width ?? 0);
+    expect(snapshot.map?.railTypes?.[index]).toBe(1);
   });
 });

@@ -18,8 +18,14 @@
  * Le résultat est purement déterministe : mêmes tableaux → mêmes plans.
  */
 
-import { TILE_KIND_INDEX, type MapSnapshot, type StationSnapshot } from '../engine/protocol';
+import {
+  TILE_KIND_INDEX,
+  type MapSnapshot,
+  type RailType,
+  type StationSnapshot,
+} from '../engine/protocol';
 import { hashUnit2d } from '../game/prng';
+import { railTypeFromIndex } from '../game/railRules';
 
 /** Bits de connexion par les bords de la tuile. */
 export const TRACK_CONNECT = {
@@ -57,6 +63,8 @@ export interface TrackTilePlan {
   bridge: boolean;
   /** Variation déterministe 0..1 pour teinter la géométrie. */
   variation: number;
+  /** Type de rail de la tuile (#157), `rail` pour les routes. */
+  railType: RailType;
 }
 
 export interface TrackMasks {
@@ -311,6 +319,7 @@ export function inferTilePlan(
     station,
     bridge: (map.kind[index] ?? 0) === BRIDGE_INDEX,
     variation: hashUnit2d(map.width, x, y),
+    railType: network === 'rail' ? railTypeFromIndex(map.railTypes?.[index] ?? 0) : 'rail',
   };
 }
 

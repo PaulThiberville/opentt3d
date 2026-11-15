@@ -12,6 +12,45 @@ export const PROTOCOL_VERSION = 1;
 export type CompanyId = number;
 export const COMPANY_NONE: CompanyId = 255;
 
+/**
+ * Type de voie ferrée (#157). L'index est stable dans le snapshot et reprend
+ * l'ordre des types de base d'OpenTTD : rail, électrifié, monorail, maglev.
+ */
+export type RailType = 'rail' | 'electrified' | 'monorail' | 'maglev';
+
+export const RAIL_TYPE_INDEX: Record<RailType, number> = {
+  rail: 0,
+  electrified: 1,
+  monorail: 2,
+  maglev: 3,
+};
+
+export const RAIL_TYPES: readonly RailType[] = ['rail', 'electrified', 'monorail', 'maglev'];
+
+/** Type de signal avancé (#156). `path` correspond au signal PBS d'OpenTTD. */
+export type SignalKind = 'block' | 'path' | 'entry' | 'exit' | 'combo';
+
+/** Sens d'un signal : unique ou bidirectionnel. */
+export type SignalDirection = 'one-way' | 'both';
+
+/** État lumineux d'un signal. `yellow` n'est pas émis par le pont OpenTTD. */
+export type SignalAspect = 'green' | 'red' | 'yellow';
+
+/** Voie choisie quand une tuile porte plusieurs voies (signal). */
+export type SignalTrack = 'x' | 'y' | 'upper' | 'lower' | 'left' | 'right';
+
+/** Signal exposé par le snapshot, dérivé des bits de la carte (#156). */
+export interface SignalSnapshot {
+  /** Tuile entière. */
+  x: number;
+  y: number;
+  kind: SignalKind;
+  direction: SignalDirection;
+  aspect: SignalAspect;
+  /** Signal mécanique (true) ou lumineux (false). */
+  semaphore: boolean;
+}
+
 export type TileKind =
   | 'void'
   | 'clear'
@@ -101,6 +140,17 @@ export interface MapSnapshot {
   flags: Uint8Array;
   /** Uint8Array, bits rail/road bruts (m8) pour le rendu des voies */
   trackBits: Uint8Array;
+  /**
+   * Uint8Array, type de rail par tuile (`RAIL_TYPE_INDEX`, #157). Optionnel :
+   * le mock et le pont le fournissent ; un snapshot ancien retombe sur `rail`.
+   */
+  railTypes?: Uint8Array;
+  /**
+   * Uint8Array, bits de signal par tuile (#156). 0 = aucun signal ; sinon
+   * bits 0..2 = type, bit 3 = bidirectionnel, bits 4..5 = état, bit 6 =
+   * mécanique. Voir `src/game/signalRules.ts` pour l'encodage.
+   */
+  signalData?: Uint8Array;
 }
 
 export type VehicleKind = 'train' | 'road' | 'ship' | 'aircraft';
@@ -170,6 +220,8 @@ export interface DepotSnapshot {
   /** Emprise en tuiles ; 1×1 en v1. */
   width: number;
   height: number;
+  /** Type de rail d'un dépôt ferroviaire (#157), absent en v1. */
+  railType?: RailType;
 }
 
 /** Action municipale proposée par l'autorité locale (#166). */
@@ -306,6 +358,8 @@ export interface WorldSnapshot {
   stations: StationSnapshot[];
   /** Dépôts route/rail, ids de pool stables (voir `DepotSnapshot`). */
   depots: DepotSnapshot[];
+  /** Signaux présents sur la carte (#156), dérivés de `map.signalData`. */
+  signals?: SignalSnapshot[];
   vehicles: VehicleSnapshot[];
   /** Subventions proposées et attribuées (#166/#167). */
   subsidies?: SubsidySnapshot[];
@@ -391,6 +445,8 @@ export type EngineCommand =
         | 'station'
         | 'depot'
         | 'signal'
+        | 'unsignal'
+        | 'convert'
         | 'bridge'
         | 'tunnel'
         | 'clear'

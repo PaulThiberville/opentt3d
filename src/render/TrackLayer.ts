@@ -17,7 +17,7 @@
  */
 
 import * as THREE from 'three';
-import type { MapSnapshot, StationSnapshot } from '../engine/protocol';
+import type { MapSnapshot, RailType, StationSnapshot } from '../engine/protocol';
 import { TILE_KIND_INDEX } from '../engine/protocol';
 import { cornerHeightWorld } from '../game/mapGrid';
 import { qualitySettings, type QualityLevel } from './quality';
@@ -78,6 +78,65 @@ const MARK_NIGHT: Rgb = [0.32, 0.3, 0.24];
 const BALLAST_NIGHT: Rgb = [0.012, 0.011, 0.01];
 const SLEEPER_NIGHT: Rgb = [0.02, 0.015, 0.01];
 const RAIL_NIGHT: Rgb = [0.17, 0.2, 0.23];
+
+interface RailPalette {
+  ballast: number;
+  ballastSide: number;
+  sleeper: number;
+  rail: number;
+  railSide: number;
+  railNight: Rgb;
+  sleepers: boolean;
+  gaugeHalf: number;
+  railHalf: number;
+}
+
+const RAIL_PALETTES: Record<RailType, RailPalette> = {
+  rail: {
+    ballast: BALLAST_COLOUR,
+    ballastSide: BALLAST_SIDE_COLOUR,
+    sleeper: SLEEPER_COLOUR,
+    rail: RAIL_COLOUR,
+    railSide: RAIL_SIDE_COLOUR,
+    railNight: RAIL_NIGHT,
+    sleepers: true,
+    gaugeHalf: GAUGE_HALF,
+    railHalf: RAIL_HALF,
+  },
+  electrified: {
+    ballast: BALLAST_COLOUR,
+    ballastSide: BALLAST_SIDE_COLOUR,
+    sleeper: SLEEPER_COLOUR,
+    rail: 0xd8e2e9,
+    railSide: 0x9aa7b0,
+    railNight: [0.2, 0.24, 0.28],
+    sleepers: true,
+    gaugeHalf: GAUGE_HALF,
+    railHalf: RAIL_HALF,
+  },
+  monorail: {
+    ballast: 0x8d8a84,
+    ballastSide: 0x74716c,
+    sleeper: 0x8d8a84,
+    rail: 0xd2d5d8,
+    railSide: 0x9fa4a8,
+    railNight: [0.17, 0.18, 0.2],
+    sleepers: false,
+    gaugeHalf: 0,
+    railHalf: 0.11,
+  },
+  maglev: {
+    ballast: 0xb9bcc2,
+    ballastSide: 0x989ca3,
+    sleeper: 0xb9bcc2,
+    rail: 0xeef2f6,
+    railSide: 0xb9c2ca,
+    railNight: [0.22, 0.24, 0.27],
+    sleepers: false,
+    gaugeHalf: 0,
+    railHalf: 0.13,
+  },
+};
 
 type Rgb = readonly [number, number, number];
 
@@ -617,6 +676,7 @@ function emitRailRibbon(
   writer: GeometryWriter,
   map: MapSnapshot,
   path: readonly Pt2[],
+  palette: RailPalette,
   variant: number,
   railLift: number,
   ballastLift = BALLAST_LIFT,
@@ -626,19 +686,20 @@ function emitRailRibbon(
     topLift: ballastLift,
     bottomLift: 0,
     bottomExpand: BALLAST_BOTTOM_EXPAND,
-    topColour: tint(BALLAST_COLOUR, variant),
-    sideColour: tint(BALLAST_SIDE_COLOUR, variant),
+    topColour: tint(palette.ballast, variant),
+    sideColour: tint(palette.ballastSide, variant),
     topGlow: BALLAST_NIGHT,
   });
-  for (const side of [-1, 1]) {
+  const sides = palette.gaugeHalf === 0 ? [0] : [-1, 1];
+  for (const side of sides) {
     addRibbon(writer, map, path, {
-      lateral: side * GAUGE_HALF,
-      halfWidth: RAIL_HALF,
+      lateral: side * palette.gaugeHalf,
+      halfWidth: palette.railHalf,
       topLift: railLift,
       bottomLift: RAIL_BOTTOM_LIFT,
-      topColour: tint(RAIL_COLOUR, variant),
-      sideColour: tint(RAIL_SIDE_COLOUR, variant),
-      topGlow: RAIL_NIGHT,
+      topColour: tint(palette.rail, variant),
+      sideColour: tint(palette.railSide, variant),
+      topGlow: palette.railNight,
     });
   }
 }
@@ -647,9 +708,10 @@ function placeSleepers(
   writer: GeometryWriter,
   map: MapSnapshot,
   path: readonly Pt2[],
+  palette: RailPalette,
   variant: number,
 ): void {
-  if (path.length < 2) return;
+  if (!palette.sleepers || path.length < 2) return;
   const lengths: number[] = [0];
   for (let i = 1; i < path.length; i += 1) {
     const previous = path[i - 1];
@@ -663,7 +725,7 @@ function placeSleepers(
   const total = lengths[lengths.length - 1] ?? 0;
   if (total < SLEEPER_SPACING * 0.5) return;
 
-  const sleeperColour = tint(SLEEPER_COLOUR, variant);
+  const sleeperColour = tint(palette.sleeper, variant);
   for (let distance = SLEEPER_SPACING * 0.5; distance < total; distance += SLEEPER_SPACING) {
     let segment = 0;
     while (segment + 1 < lengths.length && (lengths[segment + 1] ?? 0) < distance) segment += 1;
@@ -732,8 +794,9 @@ function emitRailPath(
   railLift: number,
   ballastLift = BALLAST_LIFT,
 ): void {
-  emitRailRibbon(writer, map, path, plan.variation, railLift, ballastLift);
-  if (detail >= 1) placeSleepers(writer, map, path, plan.variation);
+  const palette = RAIL_PALETTES[plan.railType];
+  emitRailRibbon(writer, map, path, palette, plan.variation, railLift, ballastLift);
+  if (detail >= 1) placeSleepers(writer, map, path, palette, plan.variation);
 }
 
 function emitRailPad(
@@ -751,7 +814,8 @@ function emitRailPad(
   const topCorners = [nw, ne, se, sw].map((point) => pointAt(map, point.x, point.z, BALLAST_LIFT));
   const [a, b, cc, d] = topCorners;
   if (!a || !b || !cc || !d) return;
-  addQuad(writer, a, b, cc, d, tint(BALLAST_COLOUR, plan.variation), BALLAST_NIGHT);
+  const palette = RAIL_PALETTES[plan.railType];
+  addQuad(writer, a, b, cc, d, tint(palette.ballast, plan.variation), BALLAST_NIGHT);
 
   const sides: Array<{ bit: number; from: Pt2; to: Pt2; outward: Pt2 }> = [
     { bit: TRACK_CONNECT.north, from: nw, to: ne, outward: { x: 0, z: -1 } },
@@ -781,7 +845,7 @@ function emitRailPad(
       topB,
       bottomB,
       bottomA,
-      tint(BALLAST_SIDE_COLOUR, plan.variation),
+      tint(palette.ballastSide, plan.variation),
       BALLAST_NIGHT,
     );
   }
@@ -795,21 +859,23 @@ function emitRailArm(
   detail: number,
   railLift: number,
 ): void {
+  const palette = RAIL_PALETTES[plan.railType];
   const path = [padBoundary(plan, bit, BALLAST_HALF), edgePoint(plan, bit)];
-  emitRailRibbon(writer, map, path, plan.variation, railLift);
-  if (detail >= 1) placeSleepers(writer, map, path, plan.variation);
+  emitRailRibbon(writer, map, path, palette, plan.variation, railLift);
+  if (detail >= 1) placeSleepers(writer, map, path, palette, plan.variation);
   // Les rails partent du centre pour traverser la place du carrefour.
   const c = centre(plan);
   const railPath = [c, edgePoint(plan, bit)];
-  for (const side of [-1, 1]) {
+  const sides = palette.gaugeHalf === 0 ? [0] : [-1, 1];
+  for (const side of sides) {
     addRibbon(writer, map, railPath, {
-      lateral: side * GAUGE_HALF,
-      halfWidth: RAIL_HALF,
+      lateral: side * palette.gaugeHalf,
+      halfWidth: palette.railHalf,
       topLift: railLift,
       bottomLift: RAIL_BOTTOM_LIFT,
-      topColour: tint(RAIL_COLOUR, plan.variation),
-      sideColour: tint(RAIL_SIDE_COLOUR, plan.variation),
-      topGlow: RAIL_NIGHT,
+      topColour: tint(palette.rail, plan.variation),
+      sideColour: tint(palette.railSide, plan.variation),
+      topGlow: palette.railNight,
     });
   }
 }

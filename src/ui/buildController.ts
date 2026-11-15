@@ -17,9 +17,11 @@ import {
   planAqueduct,
   planBuild,
   planCanal,
+  planConvertRail,
   planCrossing,
   planDepot,
   planLock,
+  planRemoveSignal,
   planSignal,
   planStation,
   planTerraform,
@@ -231,6 +233,20 @@ export class BuildController {
         ...(to ? { to } : {}),
         axis,
       });
+    } else if (tool === 'unsignal') {
+      plan = planRemoveSignal({
+        ...shared,
+        settings: this.settings.signal,
+        ...(to ? { to } : {}),
+        axis,
+      });
+    } else if (tool === 'convert') {
+      plan = planConvertRail({
+        ...shared,
+        railType: this.settings.rail.type,
+        ...(to ? { to } : {}),
+        axis,
+      });
     } else if (tool === 'terraform') {
       plan = planTerraform({
         ...shared,
@@ -251,6 +267,7 @@ export class BuildController {
       plan = planBuild({
         ...shared,
         tool: tool ?? 'road',
+        ...(tool === 'rail' ? { railType: this.settings.rail.type } : {}),
         ...(to ? { to } : {}),
         axis,
       });

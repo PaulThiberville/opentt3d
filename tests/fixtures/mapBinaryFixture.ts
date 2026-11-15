@@ -25,11 +25,16 @@ export interface MapFixtureOptions {
   flags?: number;
   /** Contenu des couches ; par défaut un motif déterministe par couche. */
   layers?: Partial<Record<MapLayerName, Uint8Array>>;
+  /** Version du snapshot (1 = ancien moteur sans couche de signaux). */
+  version?: number;
   /** En-tête corrompu à façon (appliqué après écriture). */
   corrupt?: (view: DataView, bytes: Uint8Array) => void;
 }
 
 function defaultLayer(name: MapLayerName, tileCount: number): Uint8Array {
+  // Une carte sans signal est le cas nominal : la couche de signaux démarre à
+  // zéro (sinon le rendu et les tests verraient des signaux aléatoires).
+  if (name === 'signalData') return new Uint8Array(tileCount);
   const seed = MAP_LAYER_ID[name];
   const layer = new Uint8Array(tileCount);
   for (let index = 0; index < tileCount; index += 1) {
@@ -42,33 +47,36 @@ export function buildMapFixture(options: MapFixtureOptions = {}): Uint8Array {
   const width = options.width ?? 2;
   const height = options.height ?? 2;
   const tileCount = width * height;
-  const bytes = new Uint8Array(MAP_DATA_OFFSET + MAP_LAYER_COUNT * tileCount);
+  const version = options.version ?? MAP_SNAPSHOT_VERSION;
+  const layerCount = version === 1 ? MAP_LAYER_COUNT - 1 : MAP_LAYER_COUNT;
+  const dataOffset = MAP_HEADER_SIZE + layerCount * MAP_DIRECTORY_ENTRY_SIZE;
+  const bytes = new Uint8Array(dataOffset + layerCount * tileCount);
   const view = new DataView(bytes.buffer);
 
   view.setUint32(0, MAP_SNAPSHOT_MAGIC, true);
-  view.setUint16(4, MAP_SNAPSHOT_VERSION, true);
+  view.setUint16(4, version, true);
   view.setUint16(6, MAP_HEADER_SIZE, true);
   view.setUint32(8, width, true);
   view.setUint32(12, height, true);
   view.setUint32(16, tileCount, true);
-  view.setUint32(20, MAP_LAYER_COUNT, true);
+  view.setUint32(20, layerCount, true);
   view.setUint32(24, options.sequence ?? 1, true);
   view.setUint32(28, options.tick ?? 1000, true);
   view.setUint32(32, options.flags ?? 1, true);
-  view.setUint32(36, MAP_DATA_OFFSET, true);
+  view.setUint32(36, dataOffset, true);
   view.setUint32(40, MAP_HEADER_SIZE, true);
   view.setUint32(44, tileCount, true);
 
-  MAP_LAYER_ORDER.forEach((name, index) => {
+  MAP_LAYER_ORDER.slice(0, layerCount).forEach((name, index) => {
     const entry = MAP_HEADER_SIZE + index * MAP_DIRECTORY_ENTRY_SIZE;
-    const dataOffset = MAP_DATA_OFFSET + index * tileCount;
+    const layerOffset = dataOffset + index * tileCount;
     const layer = options.layers?.[name] ?? defaultLayer(name, tileCount);
     view.setUint8(entry, MAP_LAYER_ID[name]);
     view.setUint8(entry + 1, 1);
     view.setUint16(entry + 2, 0, true);
-    view.setUint32(entry + 4, dataOffset, true);
+    view.setUint32(entry + 4, layerOffset, true);
     view.setUint32(entry + 8, tileCount, true);
-    bytes.set(layer.subarray(0, tileCount), dataOffset);
+    bytes.set(layer.subarray(0, tileCount), layerOffset);
   });
 
   options.corrupt?.(view, bytes);

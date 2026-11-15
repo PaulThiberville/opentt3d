@@ -61,6 +61,7 @@ import {
   type WorldEvent,
   type WorldSnapshot,
 } from './protocol';
+import { parseRailType } from '../game/railRules';
 
 export type WorldJsonErrorCode = 'not-json' | 'protocol' | 'shape';
 
@@ -308,6 +309,12 @@ export function parseDepot(value: unknown): DepotSnapshot | null {
     direction: clampInt(raw.direction, 0, 3, 0),
     width: Math.max(1, int(raw.width, 1)),
     height: Math.max(1, int(raw.height, 1)),
+    ...(kind === 'rail'
+      ? (() => {
+          const railType = parseRailType(raw.railType);
+          return railType ? { railType } : {};
+        })()
+      : {}),
   };
 }
 

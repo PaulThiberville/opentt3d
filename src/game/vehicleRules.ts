@@ -19,6 +19,7 @@ import {
   type DepotSnapshot,
   type EngineCommand,
   type OrderTargetKind,
+  type RailType,
   type StationSnapshot,
   type VehicleKind,
   type WorldSnapshot,
@@ -51,6 +52,11 @@ export interface VehicleModel {
   /** Entretien indicatif en livres par an. */
   maintenance: number;
   description: string;
+  /**
+   * Types de rail compatibles (#157). Absent = tous les types du dépôt.
+   * Une locomotive électrique ne peut pas rouler sur un rail non électrifié.
+   */
+  railTypes?: RailType[];
 }
 
 /** Nombre maximal d'ordres dans une tournée (protège l'UI et le moteur). */
@@ -116,6 +122,7 @@ export const VEHICLE_MODELS: readonly VehicleModel[] = [
     cost: 160_000,
     maintenance: 2_400,
     description: 'Rame légère pour les lignes voyageurs régulières.',
+    railTypes: ['rail', 'electrified'],
   },
   {
     id: 'rail_freight',
@@ -128,6 +135,46 @@ export const VEHICLE_MODELS: readonly VehicleModel[] = [
     cost: 145_000,
     maintenance: 2_200,
     description: 'Traction lourde pour le charbon et les marchandises.',
+    railTypes: ['rail', 'electrified'],
+  },
+  {
+    id: 'rail_electric',
+    name: 'Locomotive électrique',
+    depot: 'rail',
+    kind: 'train',
+    cargo: 'passengers',
+    capacity: 220,
+    speed: 44,
+    cost: 210_000,
+    maintenance: 2_900,
+    description: 'Rapide et puissante, exige une voie électrifiée.',
+    railTypes: ['electrified'],
+  },
+  {
+    id: 'rail_monorail',
+    name: 'Rame monorail',
+    depot: 'rail',
+    kind: 'train',
+    cargo: 'passengers',
+    capacity: 190,
+    speed: 52,
+    cost: 245_000,
+    maintenance: 3_200,
+    description: 'Suspendue à une poutre unique, réservée au monorail.',
+    railTypes: ['monorail'],
+  },
+  {
+    id: 'rail_maglev',
+    name: 'Rame maglev',
+    depot: 'rail',
+    kind: 'train',
+    cargo: 'goods',
+    capacity: 160,
+    speed: 64,
+    cost: 320_000,
+    maintenance: 4_100,
+    description: 'Sustentation magnétique, la plus rapide du catalogue.',
+    railTypes: ['maglev'],
   },
 ];
 
@@ -146,9 +193,23 @@ export function vehicleModel(id: string | null | undefined): VehicleModel | null
   return VEHICLE_MODELS.find((model) => model.id === id) ?? null;
 }
 
-/** Modèles achetables dans un dépôt route ou rail. */
-export function modelsForDepot(kind: DepotKind): VehicleModel[] {
-  return VEHICLE_MODELS.filter((model) => model.depot === kind);
+/** `true` si le modèle peut circuler sur le type de rail donné (#157). */
+export function modelCompatibleWithRail(
+  model: VehicleModel,
+  railType: RailType | null | undefined,
+): boolean {
+  if (model.depot !== 'rail' || !railType) return true;
+  return model.railTypes === undefined || model.railTypes.includes(railType);
+}
+
+/**
+ * Modèles achetables dans un dépôt route ou rail. Pour un dépôt ferroviaire
+ * dont le type est connu, seuls les matériels compatibles sont proposés.
+ */
+export function modelsForDepot(kind: DepotKind, railType?: RailType | null): VehicleModel[] {
+  return VEHICLE_MODELS.filter(
+    (model) => model.depot === kind && modelCompatibleWithRail(model, railType),
+  );
 }
 
 /** Dépôt du snapshot par identifiant stable, ou `null`. */

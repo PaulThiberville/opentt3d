@@ -44,8 +44,16 @@ const TILE_FLAG_WATER = 1 << 0;
 const MAP_MAGIC = 0x314d544f;
 const MAP_HEADER_SIZE = 64;
 const MAP_DIRECTORY_ENTRY_SIZE = 12;
-const MAP_LAYER_COUNT = 6;
-const LAYER_IDS = { kind: 1, heightMap: 2, owner: 3, slope: 4, flags: 5, trackBits: 6 };
+const LAYER_IDS = {
+  kind: 1,
+  heightMap: 2,
+  owner: 3,
+  slope: 4,
+  flags: 5,
+  trackBits: 6,
+  // #156 : signaux (version 2 du snapshot carte).
+  signalData: 7,
+};
 
 /**
  * Hashes de référence du scénario de sauvegarde (seed 42, 128×128, 200 ticks)
@@ -199,8 +207,9 @@ function makeMapReader(engine) {
       };
       assert(header.magic === MAP_MAGIC, `magic carte 0x${header.magic.toString(16)}`);
 
+      const layerCount = view.getUint32(20, true);
       const layers = {};
-      for (let i = 0; i < MAP_LAYER_COUNT; i++) {
+      for (let i = 0; i < layerCount; i++) {
         const entry = MAP_HEADER_SIZE + i * MAP_DIRECTORY_ENTRY_SIZE;
         const id = view.getUint8(entry);
         const offset = view.getUint32(entry + 4, true);

@@ -37,13 +37,22 @@ const TILE_KIND_COUNT = 19;
 const COMPANY_NONE = 255;
 
 const MAP_MAGIC = 0x314d544f; // "OTM1"
-const MAP_VERSION = 1;
+const MAP_VERSION = 2;
 const MAP_HEADER_SIZE = 64;
 const MAP_DIRECTORY_ENTRY_SIZE = 12;
-const MAP_LAYER_COUNT = 6;
+const MAP_LAYER_COUNT = 7;
 const MAP_DATA_OFFSET = MAP_HEADER_SIZE + MAP_LAYER_COUNT * MAP_DIRECTORY_ENTRY_SIZE;
 
-const LAYER_IDS = { kind: 1, heightMap: 2, owner: 3, slope: 4, flags: 5, trackBits: 6 };
+const LAYER_IDS = {
+  kind: 1,
+  heightMap: 2,
+  owner: 3,
+  slope: 4,
+  flags: 5,
+  trackBits: 6,
+  // #156 : bits de signal par tuile (type, sens, état, variante).
+  signalData: 7,
+};
 const TILE_FLAGS = {
   WATER: 1 << 0,
   SNOW: 1 << 1,

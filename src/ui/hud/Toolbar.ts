@@ -51,6 +51,18 @@ const TOOLS: ToolDefinition[] = [
     hintKey: 'toolbar.signal.hint',
   },
   {
+    id: 'unsignal',
+    icon: '⊘',
+    labelKey: 'toolbar.unsignal.label',
+    hintKey: 'toolbar.unsignal.hint',
+  },
+  {
+    id: 'convert',
+    icon: '⇄',
+    labelKey: 'toolbar.convert.label',
+    hintKey: 'toolbar.convert.hint',
+  },
+  {
     id: 'terraform',
     icon: '⛰',
     labelKey: 'toolbar.terraform.label',
@@ -94,6 +106,8 @@ const SHORT_LABELS: Record<BuildToolId, TranslationKey> = {
   station: 'toolbar.short.station',
   depot: 'toolbar.short.depot',
   signal: 'toolbar.short.signal',
+  unsignal: 'toolbar.short.unsignal',
+  convert: 'toolbar.short.convert',
   clear: 'toolbar.short.road',
   terraform: 'toolbar.short.terraform',
   tree: 'toolbar.short.tree',

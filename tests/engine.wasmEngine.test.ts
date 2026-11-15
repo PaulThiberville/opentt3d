@@ -55,6 +55,10 @@ describe('WasmEngine : chargement et cycle de vie', () => {
       expect(layer).toBeInstanceOf(Uint8Array);
       expect(layer).toHaveLength(64 * 64);
     }
+    expect(map.railTypes).toBeInstanceOf(Uint8Array);
+    expect(map.railTypes).toHaveLength(64 * 64);
+    expect(map.signalData).toBeInstanceOf(Uint8Array);
+    expect(snapshot.signals).toEqual([]);
     expect(snapshot.companies).toHaveLength(1);
     expect(snapshot.companies[0]).toMatchObject({ isLocal: true, name: 'OpenTT3D Transport' });
     expect(snapshot.towns[0]).toMatchObject({ name: 'Bois-le-Duc', x: 12, y: 18 });
