@@ -147,6 +147,9 @@ function ensureSaveStore(): Promise<SaveStoreHandle> {
 }
 
 const webglAvailable = Renderer.isWebGLAvailable();
+const prefersReducedMotion =
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /**
  * Moteur sélectionné par `?engine=mock|wasm`. Le mock reste le défaut : le
@@ -292,8 +295,7 @@ function disposeSession(): void {
 
 /** Démo vivante derrière le menu : une partie mock autonome, sans HUD ni audio. */
 function ensureAttract(): void {
-  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  if (!webglAvailable || attractScene || reduceMotion) return;
+  if (!webglAvailable || attractScene || prefersReducedMotion) return;
   const seedParam = Number(new URLSearchParams(window.location.search).get('attractSeed'));
   const scene = new AttractScene({
     quality: settings.quality === 'low' ? 'low' : 'medium',
@@ -328,7 +330,7 @@ function showMainMenu(): void {
         networkKind === 'local'
           ? 'Mode local · deux onglets BroadcastChannel'
           : 'Salon P2P · Trystero / relais Nostr',
-      liveSimulation: webglAvailable,
+      liveSimulation: webglAvailable && !prefersReducedMotion,
     }),
   );
 }
