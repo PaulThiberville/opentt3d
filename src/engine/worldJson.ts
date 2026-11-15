@@ -19,6 +19,11 @@
  * | `town.rating` | 0 (échelle 0..1000) |
  * | `industry.kind` | `'unknown'` |
  * | `station.kind` inconnu | `'train'` |
+ * | `depot.kind` inconnu | dépôt ignoré (aucune cible d'achat/ordre) |
+ * | `depot.id` | 0 minimum, entier |
+ * | `depot.company` | `COMPANY_NONE` |
+ * | `depot.direction` | 0..3 |
+ * | `depot.width`/`height` | 1 |
  * | `vehicle.cargo` | `null` |
  * | `vehicle.status` | 0 (arrêté) |
  * | `vehicle.orderTargets` | `[]` |
@@ -34,8 +39,11 @@ import {
   PROTOCOL_VERSION,
   type CompanyId,
   type CompanySnapshot,
+  type DepotKind,
+  type DepotSnapshot,
   type EconomySnapshot,
   type IndustrySnapshot,
+  type OrderTargetKind,
   type SnapshotMeta,
   type StationSnapshot,
   type TownSnapshot,
@@ -154,6 +162,14 @@ function newsKind(value: unknown): WorldSnapshot['news'][number]['kind'] {
     : 'info';
 }
 
+const DEPOT_KINDS: readonly DepotKind[] = ['road', 'rail'];
+
+function depotKind(value: unknown): DepotKind | null {
+  return typeof value === 'string' && (DEPOT_KINDS as readonly string[]).includes(value)
+    ? (value as DepotKind)
+    : null;
+}
+
 /* ------------------------------------------------------------------------- */
 /*  Entités                                                                  */
 /* ------------------------------------------------------------------------- */
@@ -222,6 +238,23 @@ export function parseStation(value: unknown): StationSnapshot {
   };
 }
 
+/** Renvoie `null` pour un dépôt d'un type non exposé (maritime, hangar). */
+export function parseDepot(value: unknown): DepotSnapshot | null {
+  const raw = record(value);
+  const kind = depotKind(raw.kind);
+  if (!kind) return null;
+  return {
+    id: Math.max(0, int(raw.id, 0)),
+    company: companyId(raw.company),
+    kind,
+    x: Math.max(0, int(raw.x, 0)),
+    y: Math.max(0, int(raw.y, 0)),
+    direction: clampInt(raw.direction, 0, 3, 0),
+    width: Math.max(1, int(raw.width, 1)),
+    height: Math.max(1, int(raw.height, 1)),
+  };
+}
+
 /** Renvoie `null` pour un véhicule dont le type n'a pas de représentation 3D. */
 export function parseVehicle(value: unknown): VehicleSnapshot | null {
   const raw = record(value);
@@ -244,6 +277,12 @@ export function parseVehicle(value: unknown): VehicleSnapshot | null {
     }
   }
 
+  const orderKinds: OrderTargetKind[] = [];
+  for (const kind of list(raw.orderKinds)) {
+    if (kind !== 'station' && kind !== 'industry' && kind !== 'depot') break;
+    orderKinds.push(kind);
+  }
+
   return {
     id: Math.max(0, int(raw.id, 0)),
     kind,
@@ -256,6 +295,7 @@ export function parseVehicle(value: unknown): VehicleSnapshot | null {
     status: clampInt(raw.status, 0, 4, 0),
     cargo,
     orderTargets,
+    ...(orderKinds.length === orderTargets.length && orderKinds.length > 0 ? { orderKinds } : {}),
     profitLastYear: num(raw.profitLastYear, 0),
     ageDays: Math.max(0, int(raw.ageDays, 0)),
   };
@@ -380,6 +420,11 @@ export function parseWorldJson(input: unknown): WorldSnapshot {
   }
 
   const meta = parseMeta(root.meta);
+  const depots: DepotSnapshot[] = [];
+  for (const entry of list(root.depots)) {
+    const depot = parseDepot(entry);
+    if (depot) depots.push(depot);
+  }
   const vehicles: VehicleSnapshot[] = [];
   for (const entry of list(root.vehicles)) {
     const vehicle = parseVehicle(entry);
@@ -394,6 +439,7 @@ export function parseWorldJson(input: unknown): WorldSnapshot {
     towns: list(root.towns).map(parseTown),
     industries: list(root.industries).map(parseIndustry),
     stations: list(root.stations).map(parseStation),
+    depots,
     vehicles,
     news: parseNews(root.news, meta.tick),
     events: parseEvents(root.events),

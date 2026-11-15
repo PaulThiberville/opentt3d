@@ -20,6 +20,7 @@ function engineJson(overrides: Record<string, unknown> = {}): Record<string, unk
     towns: [],
     industries: [],
     stations: [],
+    depots: [],
     vehicles: [],
     news: [],
     events: [],
@@ -97,6 +98,7 @@ describe('mapping JSON → WorldSnapshot', () => {
     });
     expect(world.news).toEqual([]);
     expect(world.events).toEqual([]);
+    expect(world.depots).toEqual([]);
   });
 
   it('mappe les entités du pont', () => {
@@ -157,6 +159,28 @@ describe('mapping JSON → WorldSnapshot', () => {
             waiting: [{ cargo: 'Passagers', amount: 12 }],
           },
         ],
+        depots: [
+          {
+            id: 7,
+            company: 0,
+            kind: 'road',
+            x: 18,
+            y: 27,
+            direction: 2,
+            width: 1,
+            height: 1,
+          },
+          {
+            id: 3,
+            company: 1,
+            kind: 'rail',
+            x: 40,
+            y: 12,
+            direction: 1,
+            width: 1,
+            height: 1,
+          },
+        ],
         vehicles: [
           {
             id: 12,
@@ -194,6 +218,28 @@ describe('mapping JSON → WorldSnapshot', () => {
       height: 3,
       waiting: [{ cargo: 'Passagers', amount: 12 }],
     });
+    expect(world.depots).toEqual([
+      {
+        id: 7,
+        company: 0,
+        kind: 'road',
+        x: 18,
+        y: 27,
+        direction: 2,
+        width: 1,
+        height: 1,
+      },
+      {
+        id: 3,
+        company: 1,
+        kind: 'rail',
+        x: 40,
+        y: 12,
+        direction: 1,
+        width: 1,
+        height: 1,
+      },
+    ]);
     expect(world.vehicles[0]).toMatchObject({
       id: 12,
       kind: 'aircraft',
@@ -235,6 +281,52 @@ describe('mapping JSON → WorldSnapshot', () => {
       { type: 'vehicle_arrived', vehicle: 2, station: 1, tick: 10 },
       { type: 'company_bankrupt', company: 0, tick: 11 },
     ]);
+  });
+
+  it('mappe les dépôts et ignore les types non exposés', () => {
+    const world = parseWorldJson(
+      engineJson({
+        depots: [
+          { id: 5, company: 0, kind: 'road', x: 3.6, y: 4.2 },
+          { id: 2, company: 1, kind: 'rail', x: 9, y: 10, direction: 3 },
+          { id: 8, company: 0, kind: 'ship', x: 1, y: 1 },
+          'pas un objet',
+        ],
+        vehicles: [
+          {
+            id: 4,
+            kind: 'road',
+            company: 0,
+            orderTargets: [12, 5],
+            orderKinds: ['station', 'depot'],
+          },
+        ],
+      }),
+    );
+
+    expect(world.depots).toEqual([
+      {
+        id: 5,
+        company: 0,
+        kind: 'road',
+        x: 3,
+        y: 4,
+        direction: 0,
+        width: 1,
+        height: 1,
+      },
+      {
+        id: 2,
+        company: 1,
+        kind: 'rail',
+        x: 9,
+        y: 10,
+        direction: 3,
+        width: 1,
+        height: 1,
+      },
+    ]);
+    expect(world.vehicles[0]?.orderKinds).toEqual(['station', 'depot']);
   });
 
   it('refuse un protocole incompatible', () => {

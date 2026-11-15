@@ -17,6 +17,7 @@ import {
   TILE_FLAG,
   TILE_KIND_INDEX,
   type CompanySnapshot,
+  type DepotSnapshot,
   type EconomySnapshot,
   type EngineCommand,
   type EngineDriver,
@@ -37,6 +38,7 @@ import { decodeBase64, encodeBase64 } from '../game/base64';
 import { sampleHeightWorld } from '../game/mapGrid';
 import {
   BUILD_TOOL_LABELS,
+  directionToIndex,
   planBuild,
   planDepot,
   planSignal,
@@ -55,9 +57,6 @@ import {
 } from '../game/buildRules';
 import {
   MAX_VEHICLE_ORDERS,
-  DEPOT_TRACK_BIT,
-  depotKindAt,
-  depotTileFromTarget,
   vehicleModel,
   type DepotKind,
   type VehicleOrder,
@@ -170,6 +169,21 @@ interface MockStation {
   waiting: { cargo: string; amount: number }[];
 }
 
+/**
+ * Dépôt route/rail du mock. `id` est stable tant que le dépôt existe et suit
+ * le même contrat que `DepotSnapshot` (le pont utilise l'index du pool).
+ */
+interface MockDepot {
+  id: number;
+  company: number;
+  kind: DepotKind;
+  x: number;
+  y: number;
+  direction: number;
+  width: number;
+  height: number;
+}
+
 interface MockNews {
   tick: number;
   kind: 'info' | 'warning' | 'error' | 'company';
@@ -199,6 +213,7 @@ interface MockWorld {
   towns: MockTown[];
   industries: MockIndustry[];
   stations: MockStation[];
+  depots: MockDepot[];
   vehicles: MockVehicle[];
 
   news: MockNews[];
@@ -235,6 +250,8 @@ interface SerializedWorld {
   towns: MockTown[];
   industries: MockIndustry[];
   stations: MockStation[];
+  /** Absent des sauvegardes mock antérieures à #90 (migration héritée). */
+  depots?: MockDepot[];
   vehicles: Omit<MockVehicle, 'pathLengths'>[];
   news: MockNews[];
 }
@@ -384,7 +401,6 @@ interface ResolvedOrders {
 function resolveOrders(world: MockWorld, orders: readonly VehicleOrder[]): ResolvedOrders {
   const targets: P2[] = [];
   const stops: { x: number; y: number; station: number }[] = [];
-  const map = mapSnapshotView(world);
   for (const order of orders) {
     if (order.kind === 'station') {
       const station = world.stations.find((item) => item.id === order.target);
@@ -405,11 +421,11 @@ function resolveOrders(world: MockWorld, orders: readonly VehicleOrder[]): Resol
       targets.push({ x: industry.x, y: industry.y });
       continue;
     }
-    const tile = depotTileFromTarget(order.target, map);
-    if (!tile || depotKindAt(map, tile.x, tile.y) === null) {
-      return { targets: [], stops: [], error: 'Dépôt cible introuvable ou démoli.' };
+    const depot = world.depots.find((item) => item.id === order.target);
+    if (!depot) {
+      return { targets: [], stops: [], error: `Dépôt ${order.target} introuvable ou démoli.` };
     }
-    targets.push({ x: tile.x + 0.5, y: tile.y + 0.5 });
+    targets.push({ x: depot.x + depot.width / 2, y: depot.y + depot.height / 2 });
   }
   return { targets, stops, error: null };
 }
@@ -459,6 +475,7 @@ class WorldBuilder {
   readonly towns: MockTown[] = [];
   readonly industries: MockIndustry[] = [];
   readonly stations: MockStation[] = [];
+  readonly depots: MockDepot[] = [];
   readonly vehicles: MockVehicle[] = [];
 
   constructor(options: NewGameOptions, seed: number) {
@@ -869,18 +886,29 @@ class WorldBuilder {
   }
 
   /**
-   * Pose un dépôt de démonstration : tuile route/rail marquée par
-   * `DEPOT_TRACK_BIT`, traversée est-ouest. Le panneau dépôt et l'achat de
-   * véhicules fonctionnent ainsi dès le premier snapshot.
+   * Pose un dépôt de démonstration traversé est-ouest et l'enregistre dans
+   * `depots` : le panneau dépôt et l'achat de véhicules fonctionnent ainsi dès
+   * le premier snapshot.
    */
-  private addDepot(kind: DepotKind, near: P2, owner: number): P2 | null {
+  private addDepot(kind: DepotKind, near: P2, owner: number): MockDepot | null {
     const spot = this.findDepotSpot(near);
     if (!spot) return null;
     const index = this.index(spot.x, spot.y);
     this.kind[index] = kind === 'rail' ? K.rail : K.road;
     this.owner[index] = owner;
-    this.trackBits[index] = depotConnections('ne') | DEPOT_TRACK_BIT;
-    return { x: spot.x + 0.5, y: spot.y + 0.5 };
+    this.trackBits[index] = depotConnections('ne');
+    const depot: MockDepot = {
+      id: this.depots.length,
+      company: owner,
+      kind,
+      x: spot.x,
+      y: spot.y,
+      direction: 0,
+      width: 1,
+      height: 1,
+    };
+    this.depots.push(depot);
+    return depot;
   }
 
   private addVehiclesOnLoop(
@@ -1226,6 +1254,7 @@ class WorldBuilder {
       towns: this.towns,
       industries: this.industries,
       stations: this.stations,
+      depots: this.depots,
       vehicles: this.vehicles,
       news: [
         {
@@ -1257,6 +1286,39 @@ class WorldBuilder {
     updateVehiclesTransforms(world);
     return world;
   }
+}
+
+/**
+ * Bit privé des sauvegardes mock antérieures à #90 (l'UI ne l'utilise plus).
+ * Il n'est jamais écrit : il sert uniquement à reconstruire `depots` à partir
+ * des cartes sauvegardées par la branche #29.
+ */
+const LEGACY_DEPOT_TRACK_BIT = 1 << 7;
+
+/** Reconstruit les dépôts d'une sauvegarde mock héritée (bit 7 de `trackBits`). */
+function legacyDepots(world: MockWorld): MockDepot[] {
+  const depots: MockDepot[] = [];
+  for (let y = 0; y < world.height; y += 1) {
+    for (let x = 0; x < world.width; x += 1) {
+      const index = tileIndex(x, y, world.width);
+      if (((world.trackBits[index] ?? 0) & LEGACY_DEPOT_TRACK_BIT) === 0) continue;
+      const kind =
+        world.kind[index] === K.rail ? 'rail' : world.kind[index] === K.road ? 'road' : null;
+      if (!kind) continue;
+      depots.push({
+        id: depots.length,
+        company: world.owner[index] ?? COMPANY_NONE,
+        kind,
+        x,
+        y,
+        direction: 0,
+        width: 1,
+        height: 1,
+      });
+      world.trackBits[index] = (world.trackBits[index] ?? 0) & ~LEGACY_DEPOT_TRACK_BIT;
+    }
+  }
+  return depots;
 }
 
 function placeOnPath(vehicle: MockVehicle, distanceAlong: number): void {
@@ -1580,7 +1642,22 @@ function applyDepot(
   for (const tile of plan.tiles) {
     world.kind[tile.index] = settings.kind === 'rail' ? K.rail : K.road;
     world.owner[tile.index] = command.company;
-    world.trackBits[tile.index] = tile.connections | DEPOT_TRACK_BIT;
+    world.trackBits[tile.index] = tile.connections;
+  }
+  const depot = plan.tiles[0];
+  if (depot) {
+    const x = depot.index % world.width;
+    const y = Math.floor(depot.index / world.width);
+    world.depots.push({
+      id: nextDepotId(world),
+      company: command.company,
+      kind: settings.kind,
+      x,
+      y,
+      direction: directionToIndex(plan.depot?.direction ?? settings.direction ?? 'se'),
+      width: 1,
+      height: 1,
+    });
   }
   completeBuild(
     world,
@@ -1686,6 +1763,12 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
       world.flags[tile.index] = wasBridge ? TILE_FLAG.WATER : 0;
       world.owner[tile.index] = COMPANY_NONE;
       world.trackBits[tile.index] = 0;
+      const x = tile.index % world.width;
+      const y = Math.floor(tile.index / world.width);
+      world.depots = world.depots.filter(
+        (depot) =>
+          x < depot.x || x >= depot.x + depot.width || y < depot.y || y >= depot.y + depot.height,
+      );
       continue;
     }
     world.kind[tile.index] = BUILT_KIND[tool];
@@ -1715,6 +1798,23 @@ function nextVehicleId(world: MockWorld): number {
   let next = 0;
   for (const vehicle of world.vehicles) next = Math.max(next, vehicle.id + 1);
   return next;
+}
+
+/** Prochain id de dépôt : monotone, jamais réutilisé après démolition. */
+function nextDepotId(world: MockWorld): number {
+  let next = 0;
+  for (const depot of world.depots) next = Math.max(next, depot.id + 1);
+  return next;
+}
+
+/** Dépôt dont l'emprise contient la tuile, ou `null`. */
+function depotAtTile(world: MockWorld, x: number, y: number): MockDepot | null {
+  for (const depot of world.depots) {
+    if (x >= depot.x && x < depot.x + depot.width && y >= depot.y && y < depot.y + depot.height) {
+      return depot;
+    }
+  }
+  return null;
 }
 
 function syncVehicleCounts(world: MockWorld): void {
@@ -1747,19 +1847,32 @@ function buyVehicle(
     addNews(world, 'error', `Modèle « ${command.model ?? '?'} » inconnu au catalogue.`);
     return;
   }
-  if (!command.depot) {
-    addNews(world, 'error', 'Achat refusé : aucun dépôt ciblé.');
+
+  let depot: MockDepot | null;
+  if (command.depotId !== undefined) {
+    if (!Number.isFinite(command.depotId)) {
+      addNews(world, 'error', 'Achat refusé : « depotId » doit être un entier.');
+      return;
+    }
+    depot = world.depots.find((item) => item.id === Math.trunc(command.depotId!)) ?? null;
+    if (!depot) {
+      addNews(world, 'error', `Achat refusé : dépôt #${command.depotId} inexistant.`);
+      return;
+    }
+  } else if (command.depot) {
+    const x = Math.round(command.depot.x);
+    const y = Math.round(command.depot.y);
+    depot = depotAtTile(world, x, y);
+    if (!depot) {
+      addNews(world, 'error', 'Achat refusé : la tuile ciblée n’est pas un dépôt.');
+      return;
+    }
+  } else {
+    addNews(world, 'error', 'Achat refusé : indiquez un « depotId » ou une tuile de dépôt.');
     return;
   }
-  const map = mapSnapshotView(world);
-  const x = Math.round(command.depot.x);
-  const y = Math.round(command.depot.y);
-  const depotKind = depotKindAt(map, x, y);
-  if (!depotKind) {
-    addNews(world, 'error', 'Achat refusé : la tuile ciblée n’est pas un dépôt.');
-    return;
-  }
-  if (depotKind !== model.depot) {
+
+  if (depot.kind !== model.depot) {
     addNews(
       world,
       'error',
@@ -1767,8 +1880,7 @@ function buyVehicle(
     );
     return;
   }
-  const index = tileIndex(x, y, world.width);
-  if ((world.owner[index] ?? COMPANY_NONE) !== company.id) {
+  if (depot.company !== company.id) {
     addNews(world, 'error', 'Achat refusé : ce dépôt appartient à une autre entreprise.');
     return;
   }
@@ -1781,13 +1893,13 @@ function buyVehicle(
     return;
   }
 
-  const centre = { x: x + 0.5, y: y + 0.5 };
+  const centre = { x: depot.x + depot.width / 2, y: depot.y + depot.height / 2 };
   const vehicle: MockVehicle = {
     id: nextVehicleId(world),
     kind: model.kind,
     company: company.id,
     model: model.id,
-    homeDepot: { x, y },
+    homeDepot: { x: depot.x, y: depot.y },
     path: [{ ...centre }],
     pathLengths: [0],
     segment: 0,
@@ -1815,7 +1927,7 @@ function buyVehicle(
   addNews(
     world,
     'info',
-    `${model.name} acheté (#${vehicle.id}) pour ${Math.round(model.cost)} £ dans le dépôt (${x}, ${y}).`,
+    `${model.name} acheté (#${vehicle.id}) pour ${Math.round(model.cost)} £ dans le dépôt ${depot.id} (${depot.x}, ${depot.y}).`,
   );
 }
 
@@ -2213,6 +2325,7 @@ function serializeWorld(world: MockWorld): SerializedWorld {
     towns: world.towns,
     industries: world.industries,
     stations: world.stations,
+    depots: world.depots,
     vehicles: world.vehicles.map((vehicle) => ({
       id: vehicle.id,
       kind: vehicle.kind,
@@ -2383,6 +2496,17 @@ export class MockEngine implements EngineDriver {
       waiting: station.waiting.map((entry) => ({ ...entry })),
     }));
 
+    const depots: DepotSnapshot[] = world.depots.map((depot) => ({
+      id: depot.id,
+      company: depot.company,
+      kind: depot.kind,
+      x: depot.x,
+      y: depot.y,
+      direction: depot.direction,
+      width: depot.width,
+      height: depot.height,
+    }));
+
     const vehicles: VehicleSnapshot[] = world.vehicles.map((vehicle) => ({
       id: vehicle.id,
       kind: vehicle.kind,
@@ -2399,6 +2523,9 @@ export class MockEngine implements EngineDriver {
         capacity: vehicle.cargoCapacity,
       },
       orderTargets: vehicle.orderTargets.slice(),
+      ...(vehicle.orders.length > 0
+        ? { orderKinds: vehicle.orders.map((order) => order.kind) }
+        : {}),
       profitLastYear: vehicle.profitLastYear,
       ageDays: vehicle.ageDays,
     }));
@@ -2416,6 +2543,7 @@ export class MockEngine implements EngineDriver {
       towns,
       industries,
       stations,
+      depots,
       vehicles,
       news,
       events,
@@ -2475,6 +2603,14 @@ export class MockEngine implements EngineDriver {
     for (const station of world.stations) {
       hash.mixInt(station.id);
       for (const waiting of station.waiting) hash.mixInt(waiting.amount);
+    }
+    for (const depot of world.depots) {
+      hash.mixInt(depot.id);
+      hash.mixInt(depot.company);
+      hash.mixString(depot.kind);
+      hash.mixInt(depot.x);
+      hash.mixInt(depot.y);
+      hash.mixInt(depot.direction);
     }
     for (const vehicle of world.vehicles) {
       hash.mixInt(vehicle.id);
@@ -2545,6 +2681,7 @@ export class MockEngine implements EngineDriver {
       towns: saved.towns,
       industries: saved.industries,
       stations: saved.stations,
+      depots: saved.depots ?? [],
       vehicles: [],
       news: saved.news,
       newsCursor: saved.news.length,
@@ -2568,6 +2705,7 @@ export class MockEngine implements EngineDriver {
             })),
       pathLengths: computePathLengths(vehicle.path),
     }));
+    if (!saved.depots) world.depots = legacyDepots(world);
     this.world = world;
     this.ready = true;
     this.loading = false;

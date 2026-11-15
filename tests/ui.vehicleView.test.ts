@@ -4,11 +4,11 @@ import {
   PROTOCOL_VERSION,
   TILE_KIND_INDEX,
   type CompanySnapshot,
+  type DepotSnapshot,
   type MapSnapshot,
   type VehicleSnapshot,
   type WorldSnapshot,
 } from '../src/engine/protocol';
-import { DEPOT_TRACK_BIT, depotOrder } from '../src/game/vehicleRules';
 import { describeDepotPanel, describeVehiclePanel } from '../src/ui/vehicleView';
 
 function makeMap(width = 16, height = 16): MapSnapshot {
@@ -25,10 +25,23 @@ function makeMap(width = 16, height = 16): MapSnapshot {
   };
 }
 
+function depot(overrides: Partial<DepotSnapshot> = {}): DepotSnapshot {
+  return {
+    id: 5,
+    company: 0,
+    kind: 'road',
+    x: 2,
+    y: 2,
+    direction: 0,
+    width: 1,
+    height: 1,
+    ...overrides,
+  };
+}
+
 function markDepot(map: MapSnapshot, x: number, y: number, kind: 'road' | 'rail'): void {
   const index = y * map.width + x;
   map.kind[index] = kind === 'road' ? TILE_KIND_INDEX.road : TILE_KIND_INDEX.rail;
-  map.trackBits[index] = (map.trackBits[index] ?? 0) | DEPOT_TRACK_BIT;
   map.owner[index] = 0;
 }
 
@@ -70,7 +83,11 @@ function vehicle(overrides: Partial<VehicleSnapshot> = {}): VehicleSnapshot {
   };
 }
 
-function snapshot(vehicles: VehicleSnapshot[], money = 100_000): WorldSnapshot {
+function snapshot(
+  vehicles: VehicleSnapshot[],
+  money = 100_000,
+  depots: DepotSnapshot[] = [depot()],
+): WorldSnapshot {
   return {
     meta: { protocol: PROTOCOL_VERSION, tick: 10, hash: 'abc', sequence: 1 },
     economy: { year: 1950, month: 0, day: 1, dayFraction: 0, speed: 1, paused: false },
@@ -91,6 +108,7 @@ function snapshot(vehicles: VehicleSnapshot[], money = 100_000): WorldSnapshot {
         waiting: [],
       },
     ],
+    depots,
     vehicles,
     news: [],
     events: [],
@@ -101,8 +119,9 @@ describe('panneau dépôt', () => {
   it('liste les modèles routiers, leur coût et les véhicules sur place', () => {
     const map = makeMap();
     markDepot(map, 2, 2, 'road');
-    const view = describeDepotPanel(snapshot([vehicle()]), map, 0, { x: 2, y: 2 });
+    const view = describeDepotPanel(snapshot([vehicle()]), 0, 5);
     expect(view).not.toBeNull();
+    expect(view?.id).toBe(5);
     expect(view?.title).toBe('Dépôt routier (2, 2)');
     expect(view?.kindLabel).toBe('Dépôt routier');
     expect(view?.models.length).toBeGreaterThan(0);
@@ -114,16 +133,16 @@ describe('panneau dépôt', () => {
   it('signale un modèle hors budget et ferme le panneau sans dépôt', () => {
     const map = makeMap();
     markDepot(map, 2, 2, 'road');
-    const view = describeDepotPanel(snapshot([], 1_000), map, 0, { x: 2, y: 2 });
+    const view = describeDepotPanel(snapshot([], 1_000), 0, 5);
     expect(view?.models.every((model) => !model.affordable)).toBe(true);
-    expect(describeDepotPanel(snapshot([]), makeMap(), 0, { x: 2, y: 2 })).toBeNull();
-    expect(describeDepotPanel(snapshot([]), map, null, { x: 2, y: 2 })).toBeNull();
+    expect(describeDepotPanel(snapshot([], 100_000, []), 0, 5)).toBeNull();
+    expect(describeDepotPanel(snapshot([]), null, 5)).toBeNull();
   });
 
   it('ne liste que les modèles ferroviaires dans un dépôt rail', () => {
     const map = makeMap();
     markDepot(map, 2, 2, 'rail');
-    const view = describeDepotPanel(snapshot([]), map, 0, { x: 2, y: 2 });
+    const view = describeDepotPanel(snapshot([], 100_000, [depot({ id: 6, kind: 'rail' })]), 0, 6);
     expect(view?.models.length).toBeGreaterThan(0);
     expect(view?.models.every((model) => model.id.startsWith('rail_'))).toBe(true);
   });
@@ -145,9 +164,9 @@ describe('panneau véhicule', () => {
   it('résout les libellés de tournée et autorise le démarrage', () => {
     const map = makeMap();
     markDepot(map, 2, 2, 'road');
-    const orders = [3, depotOrder(2, 2, map.width).target];
+    const orders = [3, 5];
     const view = describeVehiclePanel(
-      snapshot([vehicle({ orderTargets: orders, status: 0 })]),
+      snapshot([vehicle({ orderTargets: orders, orderKinds: ['station', 'depot'], status: 0 })]),
       map,
       7,
       true,

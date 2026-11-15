@@ -229,6 +229,7 @@ export class FakeEngineModule implements EmscriptenModule {
       towns: [],
       industries: [],
       stations: [],
+      depots: [],
       vehicles: [],
       news: [],
       events: [],
@@ -298,6 +299,7 @@ export class FakeEngineModule implements EmscriptenModule {
         },
       ],
       stations: [],
+      depots: [],
       vehicles: [
         {
           id: 7,

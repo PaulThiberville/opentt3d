@@ -687,6 +687,32 @@ async function runCommandsRoundTrip() {
     assert(entry, `gare ${id} absente après chargement`);
     assert(entry.kind === kind, `gare ${id} : type ${entry.kind} au lieu de ${kind}`);
   }
+
+  /* Les dépôts (#90) et leurs ids doivent survivre à l'aller-retour. */
+  const depotSignature = (entry) =>
+    `${entry.id}:${entry.kind}:${entry.x}:${entry.y}:${entry.direction}:${entry.company}`;
+  const depotsA = state.depots.map(depotSignature).sort();
+  const depotsB = targetState.depots.map(depotSignature).sort();
+  assert(
+    JSON.stringify(depotsA) === JSON.stringify(depotsB),
+    `dépôts différents après chargement : ${depotsA} ≠ ${depotsB}`,
+  );
+  assert(
+    state.counts.depots === targetState.counts.depots,
+    `counts.depots ${state.counts.depots} ≠ ${targetState.counts.depots}`,
+  );
+  for (const [id, kind, tile] of [
+    [depot.depotId, 'road', depotTile],
+    [railDepot.depotId, 'rail', railDepotTile],
+  ]) {
+    const entry = targetState.depots.find((candidate) => candidate.id === id);
+    assert(entry, `dépôt ${id} absent après chargement`);
+    assert(entry.kind === kind, `dépôt ${id} : type ${entry.kind} au lieu de ${kind}`);
+    assert(
+      entry.x === tile.x && entry.y === tile.y,
+      `dépôt ${id} : coordonnées (${entry.x}, ${entry.y}) ≠ (${tile.x}, ${tile.y})`,
+    );
+  }
   assert(
     targetState.vehicles
       .find((entry) => entry.id === bus.vehicleId)
@@ -731,6 +757,7 @@ async function runCommandsRoundTrip() {
     companyId,
     counts: {
       stations: state.stations.length,
+      depots: state.depots.length,
       vehicles: state.vehicles.length,
       roadTiles: countKind(finalMap, TILE_KIND.road),
       railTiles: countKind(finalMap, TILE_KIND.rail),
@@ -916,7 +943,8 @@ const commandsTrip = await runCommandsRoundTrip();
 log(
   `[commandes] ${commandsTrip.counts.roadTiles} tuiles de route, ` +
     `${commandsTrip.counts.railTiles} de rail, ${commandsTrip.counts.stationTiles} de gare ; ` +
-    `${commandsTrip.counts.stations} gares, ${commandsTrip.counts.vehicles} véhicules`,
+    `${commandsTrip.counts.stations} gares, ${commandsTrip.counts.depots} dépôts, ` +
+    `${commandsTrip.counts.vehicles} véhicules`,
 );
 log(
   `[commandes] ${commandsTrip.size} octets, sauvegarde ${commandsTrip.saveMs.toFixed(1)} ms, ` +

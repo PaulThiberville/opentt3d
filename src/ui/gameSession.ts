@@ -30,7 +30,7 @@ import {
 import { tileKindAt } from '../game/mapGrid';
 import {
   buyVehicleCommand,
-  depotKindAt,
+  depotAtTile,
   depotOrder,
   orderVehicleCommand,
   ordersFromSnapshot,
@@ -51,6 +51,13 @@ import { describeBuildPlan } from './buildHint';
 import type { NewGameOptions } from './gameOptions';
 import { formatGameDate, formatMoney } from './format';
 import type { BuildToolId } from './hud/Toolbar';
+import {
+  AutosaveScheduler,
+  DEFAULT_AUTOSAVE,
+  type AutosaveConfig,
+  type SaveEngine,
+  type SaveGameDate,
+} from './saveFormat';
 import {
   describeNetworkStatus,
   mapStartInfoToGameOptions,
@@ -87,6 +94,34 @@ export interface GameSessionCallbacks {
   onQualityChange?: (quality: QualityLevel) => void;
   /** Réseau uniquement : plus aucun hôte vivant, la session est perdue. */
   onNetworkLost?: (reason: string) => void;
+  /**
+   * Autosave due (intervalle réel ou ticks atteints). Le bootstrap capture et
+   * écrit le slot ; la session ne connaît pas IndexedDB.
+   */
+  onAutosave?: () => void;
+}
+
+/** Sauvegarde à restaurer au démarrage de la session. */
+export interface LoadedGameInput {
+  bytes: Uint8Array;
+  /** Options d'affichage/qualité et métadonnées connues du slot. */
+  options: NewGameOptions;
+  /** Moteur qui a produit le conteneur. */
+  engine: EngineMode;
+  /** Nom du slot, pour les messages du HUD. */
+  name?: string;
+}
+
+/** Instantané sérialisable d'une partie, prêt pour `SaveStore.save`. */
+export interface CapturedSave {
+  bytes: Uint8Array;
+  engine: SaveEngine;
+  seed: number;
+  mapSize: number;
+  gameDate: SaveGameDate | null;
+  companies: string[];
+  tick: number;
+  protocol: number | null;
 }
 
 export interface GameSessionOptions {
@@ -101,6 +136,10 @@ export interface GameSessionOptions {
   engineModuleUrl?: string;
   /** Démarre une partie lockstep à partir du salon. Force le moteur mock. */
   network?: StartInfo;
+  /** Restaure une sauvegarde au lieu de générer une nouvelle partie. */
+  loadedGame?: LoadedGameInput;
+  /** Autosave : intervalles réels/ticks, ou `false` pour désactiver. */
+  autosave?: AutosaveConfig | false;
 }
 
 const HUD_REFRESH_SECONDS = 0.2;
@@ -162,8 +201,8 @@ export class GameSession {
 
   private quality: QualityLevel;
   private lastTarget: WorldTarget | null = null;
-  /** Dépôt ouvert par un clic (panneau achat/gestion). */
-  private openDepot: { x: number; y: number } | null = null;
+  /** Dépôt ouvert par un clic (id stable de `snapshot.depots`). */
+  private openDepot: number | null = null;
   /** Véhicule dont la tournée attend un clic sur une gare/dépôt. */
   private orderPickingFor: number | null = null;
   private hudTimer = 0;
@@ -171,14 +210,20 @@ export class GameSession {
   private disposed = false;
   private inputEnabled = true;
   private gameOverShown = false;
+  private loadedGame: LoadedGameInput | null = null;
+  private restoredState: { tick: number; hash: string } | null = null;
+  private autosave: AutosaveScheduler | null = null;
+  private saveChip: HTMLDivElement | null = null;
+  private saveChipTimer = 0;
 
   constructor(options: GameSessionOptions) {
     this.canvas = options.canvas;
     this.uiRoot = options.uiRoot;
     this.network = options.network ?? null;
+    this.loadedGame = this.network ? null : (options.loadedGame ?? null);
     this.config = this.network
       ? mapStartInfoToGameOptions(this.network, options.config.quality).options
-      : options.config;
+      : (this.loadedGame?.options ?? options.config);
     if (this.network) {
       this.networkWarnings = mapStartInfoToGameOptions(
         this.network,
@@ -188,8 +233,12 @@ export class GameSession {
     this.settings = options.settings;
     this.callbacks = options.callbacks;
     this.quality = this.config.quality;
-    this.engineMode = this.network ? 'mock' : (options.engine ?? 'mock');
+    this.engineMode = this.network ? 'mock' : (this.loadedGame?.engine ?? options.engine ?? 'mock');
     this.engineModuleUrl = options.engineModuleUrl ?? resolveEngineModuleUrl();
+    this.autosave =
+      this.network || options.autosave === false
+        ? null
+        : new AutosaveScheduler(options.autosave ?? DEFAULT_AUTOSAVE);
   }
 
   get isNetwork(): boolean {
@@ -224,16 +273,24 @@ export class GameSession {
     return this.quality;
   }
 
+  /** Tick et hash relevés juste après `engine.load`, avant reprise. */
+  get restoredStateInfo(): { tick: number; hash: string } | null {
+    return this.restoredState ? { ...this.restoredState } : null;
+  }
+
   async load(token: LoadToken): Promise<void> {
     const config = this.config;
     const wasm = this.engineMode === 'wasm';
+    const restoring = this.loadedGame !== null;
     this.report(
       0.03,
-      this.isNetwork
-        ? 'Préparation de la session réseau (moteur mock déterministe)…'
-        : wasm
-          ? 'Chargement du moteur OpenTTD (WebAssembly)…'
-          : 'Initialisation du moteur mock…',
+      restoring
+        ? 'Préparation de la restauration…'
+        : this.isNetwork
+          ? 'Préparation de la session réseau (moteur mock déterministe)…'
+          : wasm
+            ? 'Chargement du moteur OpenTTD (WebAssembly)…'
+            : 'Initialisation du moteur mock…',
     );
     const engine: EngineDriver = wasm ? new WasmEngine() : new MockEngine();
     this.engine = engine;
@@ -247,27 +304,39 @@ export class GameSession {
     this.collectEngineWarnings();
     this.ensureActive(token);
 
-    this.report(
-      0.42,
-      wasm
-        ? 'Génération de la carte OpenTTD…'
-        : this.isNetwork
-          ? 'Génération déterministe du monde partagé…'
-          : 'Génération de la carte et des réseaux…',
-    );
-    await nextFrame();
-    this.ensureActive(token);
-    await engine.newGame({
-      seed: config.seed,
-      width: config.size,
-      height: config.size,
-      aiCompanies: config.aiCompanies,
-      difficulty: config.difficulty,
-      startYear: config.startYear,
-      climate: config.climate,
-    });
-    this.collectEngineWarnings();
-    this.ensureActive(token);
+    if (this.loadedGame) {
+      this.report(0.42, 'Restauration de la sauvegarde…');
+      await nextFrame();
+      this.ensureActive(token);
+      // `load()` du pilote remplace l'état atomiquement : la première snapshot
+      // reçue est complète (les séquences repartent à zéro côté pont).
+      await engine.load(this.loadedGame.bytes);
+      this.restoredState = { tick: engine.status().tick, hash: engine.hash() };
+      this.collectEngineWarnings();
+      this.ensureActive(token);
+    } else {
+      this.report(
+        0.42,
+        wasm
+          ? 'Génération de la carte OpenTTD…'
+          : this.isNetwork
+            ? 'Génération déterministe du monde partagé…'
+            : 'Génération de la carte et des réseaux…',
+      );
+      await nextFrame();
+      this.ensureActive(token);
+      await engine.newGame({
+        seed: config.seed,
+        width: config.size,
+        height: config.size,
+        aiCompanies: config.aiCompanies,
+        difficulty: config.difficulty,
+        startYear: config.startYear,
+        climate: config.climate,
+      });
+      this.collectEngineWarnings();
+      this.ensureActive(token);
+    }
 
     if (this.network) this.createNetworkSession(engine);
     this.ensureActive(token);
@@ -294,12 +363,19 @@ export class GameSession {
     this.attachEvents(game);
     this.attachListeners();
     this.createEngineBadge();
+    this.createSaveChip();
 
     // `game.start()` capture le premier snapshot et émet les news initiales,
     // désormais écoutées par le HUD.
     game.start();
     this.refreshHud();
     this.announceEngine();
+    if (this.loadedGame) {
+      this.hud.notify(
+        'info',
+        `Partie restaurée${this.loadedGame.name ? ` : « ${this.loadedGame.name} »` : ''}.`,
+      );
+    }
 
     this.report(0.82, 'Construction du terrain…');
     const buildStart = performance.now();
@@ -318,7 +394,12 @@ export class GameSession {
     this.report(1, 'Monde prêt');
 
     const snapshot = game.getLatestSnapshot();
-    this.hud.notify('info', `Monde ${config.size}×${config.size} généré en ${buildMs} ms.`);
+    this.hud.notify(
+      'info',
+      this.loadedGame
+        ? `Sauvegarde restaurée en ${buildMs} ms.`
+        : `Monde ${config.size}×${config.size} généré en ${buildMs} ms.`,
+    );
     this.hud.notify(
       'info',
       'Clic : sélection · double-clic : suivre · Échap : pause · Espace : pause.',
@@ -453,6 +534,85 @@ export class GameSession {
         ? `${label} — ${this.engineWarnings.length} avertissement(s)`
         : label,
     );
+  }
+
+  /**
+   * Pastille discrète de sauvegarde (bas gauche, au-dessus de la pastille
+   * moteur). Elle confirme un autosave ou une sauvegarde manuelle sans masquer
+   * le HUD, puis s'efface au bout de quelques secondes.
+   */
+  private createSaveChip(): void {
+    if (this.saveChip) return;
+    const chip = document.createElement('div');
+    chip.className = 'save-chip';
+    chip.hidden = true;
+    chip.setAttribute('role', 'status');
+    chip.setAttribute('aria-live', 'polite');
+    this.uiRoot.append(chip);
+    this.saveChip = chip;
+  }
+
+  /** Affiche brièvement la pastille d'autosave et le toast correspondant. */
+  notifySave(text: string): void {
+    this.hud?.notify('info', text);
+    const chip = this.saveChip;
+    if (!chip) return;
+    chip.textContent = text;
+    chip.hidden = false;
+    window.clearTimeout(this.saveChipTimer);
+    this.saveChipTimer = window.setTimeout(() => {
+      if (this.saveChip) this.saveChip.hidden = true;
+    }, 5_000);
+  }
+
+  /** Erreur de sauvegarde non bloquante (quota, stockage indisponible). */
+  notifySaveError(text: string): void {
+    this.hud?.notify('warning', text);
+  }
+
+  /**
+   * Capture l'état courant pour le stockage local. Le nom est choisi par
+   * l'appelant ; la session ne fait que fournir les octets et les métadonnées
+   * du snapshot (date de jeu, entreprises, tick, graine).
+   */
+  async captureSave(): Promise<CapturedSave> {
+    const engine = this.engine;
+    if (!engine || this.disposed) {
+      throw new Error('Aucune partie en cours à sauvegarder.');
+    }
+    if (this.isNetwork) {
+      throw new Error('La sauvegarde locale est désactivée pendant une partie réseau.');
+    }
+    const bytes = await engine.save();
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    const economy = snapshot?.economy ?? null;
+    return {
+      bytes,
+      engine: this.engineMode,
+      seed: this.config.seed,
+      mapSize: this.config.size,
+      gameDate: economy ? { year: economy.year, month: economy.month, day: economy.day } : null,
+      companies: snapshot?.companies.map((company) => company.name) ?? [],
+      tick: snapshot?.meta.tick ?? this.game?.getTick() ?? 0,
+      protocol: snapshot?.meta.protocol ?? null,
+    };
+  }
+
+  /** Vérifie l'échéance d'autosave ; le bootstrap écrit le slot. */
+  private checkAutosave(tick: number): void {
+    const scheduler = this.autosave;
+    const callback = this.callbacks.onAutosave;
+    if (!scheduler || !callback || this.disposed || !this.inputEnabled) return;
+    if (scheduler.due(this.networkNow(), tick)) callback();
+  }
+
+  /** Active ou suspend l'autosave (utile pendant un écran ou un import). */
+  setAutosaveEnabled(enabled: boolean): void {
+    if (enabled && !this.autosave && !this.isNetwork) {
+      this.autosave = new AutosaveScheduler(DEFAULT_AUTOSAVE);
+      return;
+    }
+    if (!enabled) this.autosave = null;
   }
 
   private report(progress: number, message: string): void {
@@ -599,7 +759,7 @@ export class GameSession {
         this.cancelOrderPicking();
         return;
       }
-      if (this.openDepot) {
+      if (this.openDepot !== null) {
         this.closeDepot();
         return;
       }
@@ -651,6 +811,8 @@ export class GameSession {
       game.advance(delta);
       world.update(delta, game.getInterpolation());
     }
+
+    this.checkAutosave(game.getTick());
 
     this.hudTimer += delta;
     if (this.hudTimer >= HUD_REFRESH_SECONDS) {
@@ -759,10 +921,9 @@ export class GameSession {
     const map = world.getMap();
     const selection = game.getSelection();
     const companyId = this.localCompanyId();
-    let depot = this.openDepot
-      ? describeDepotPanel(snapshot, map, companyId, this.openDepot)
-      : null;
-    if (this.openDepot && !depot) this.openDepot = null;
+    let depot =
+      this.openDepot !== null ? describeDepotPanel(snapshot, companyId, this.openDepot) : null;
+    if (this.openDepot !== null && !depot) this.openDepot = null;
     let vehicle = null;
     if (selection?.kind === 'vehicle') {
       vehicle = describeVehiclePanel(
@@ -807,8 +968,9 @@ export class GameSession {
     this.lastTarget = target;
 
     if (target && target.kind === 'tile' && map) {
-      if (depotKindAt(map, target.x, target.y)) {
-        this.openDepot = { x: target.x, y: target.y };
+      const depot = depotAtTile(snapshot, target.x, target.y);
+      if (depot) {
+        this.openDepot = depot.id;
       } else {
         const station = stationAtTile(snapshot, target.x, target.y);
         if (station) {
@@ -866,15 +1028,15 @@ export class GameSession {
    */
   private buyVehicle(modelId: string): void {
     const game = this.game;
-    const depot = this.openDepot;
-    if (!game || !depot) return;
+    const depotId = this.openDepot;
+    if (!game || depotId === null) return;
     const company = this.localCompanyId();
     if (company === null) {
       this.hud?.notify('warning', 'Aucune entreprise locale : achat impossible.');
       return;
     }
     const before = new Set(game.getLatestSnapshot()?.vehicles.map((item) => item.id) ?? []);
-    game.issueCommand(buyVehicleCommand(company, depot, modelId));
+    game.issueCommand(buyVehicleCommand(company, depotId, modelId));
     if (this.isNetwork) {
       this.hud?.notify('info', 'Achat envoyé : il sera appliqué au prochain tour.');
       return;
@@ -966,8 +1128,7 @@ export class GameSession {
     const vehicleId = this.orderPickingFor;
     if (vehicleId === null) return;
     const snapshot = this.game?.getLatestSnapshot() ?? null;
-    const map = this.world?.getMap() ?? null;
-    if (!snapshot || !map) return;
+    if (!snapshot) return;
     const vehicle = snapshot.vehicles.find((item) => item.id === vehicleId);
     if (!vehicle) {
       this.cancelOrderPicking();
@@ -978,8 +1139,9 @@ export class GameSession {
       return;
     }
     let order: VehicleOrder | null = null;
-    if (depotKindAt(map, target.x, target.y)) {
-      order = depotOrder(target.x, target.y, map.width);
+    const depot = depotAtTile(snapshot, target.x, target.y);
+    if (depot) {
+      order = depotOrder(depot);
     } else {
       const station = stationAtTile(snapshot, target.x, target.y);
       if (station) order = stationOrder(station);
@@ -988,8 +1150,8 @@ export class GameSession {
       this.hud?.notify('warning', 'Ordre invalide : seules les gares et les dépôts sont acceptés.');
       return;
     }
-    const orders = [...ordersFromSnapshot(vehicle, snapshot, map), order];
-    const validation = validateVehicleOrders(orders, snapshot, map);
+    const orders = [...ordersFromSnapshot(vehicle, snapshot), order];
+    const validation = validateVehicleOrders(orders, snapshot);
     if (!validation.ok) {
       this.hud?.notify('warning', validation.reason ?? 'Ordre refusé.');
       return;
@@ -1024,11 +1186,10 @@ export class GameSession {
     transform: (orders: VehicleOrder[]) => VehicleOrder[],
   ): void {
     const snapshot = this.game?.getLatestSnapshot() ?? null;
-    const map = this.world?.getMap() ?? null;
-    if (!snapshot || !map) return;
+    if (!snapshot) return;
     const vehicle = snapshot.vehicles.find((item) => item.id === vehicleId);
     if (!vehicle) return;
-    const orders = transform(ordersFromSnapshot(vehicle, snapshot, map));
+    const orders = transform(ordersFromSnapshot(vehicle, snapshot));
     const company = this.localCompanyId();
     if (company === null) return;
     this.issueVehicleCommand(orderVehicleCommand(company, vehicleId, orders));
@@ -1388,5 +1549,9 @@ export class GameSession {
     this.engine = null;
     this.engineBadge?.remove();
     this.engineBadge = null;
+    window.clearTimeout(this.saveChipTimer);
+    this.saveChip?.remove();
+    this.saveChip = null;
+    this.autosave = null;
   }
 }

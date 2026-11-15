@@ -51,6 +51,7 @@ function emptySnapshot(): WorldSnapshot {
     towns: [],
     industries: [],
     stations: [],
+    depots: [],
     vehicles: [],
     news: [],
     events: [],

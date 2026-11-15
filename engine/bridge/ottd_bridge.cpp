@@ -1123,6 +1123,41 @@ const char *StationKindName(const Station *st)
 	return "train";
 }
 
+/**
+ * Type de dépôt exposé par le protocole (`road` ou `rail`), ou `nullptr` pour
+ * les dépôts non couverts en v1 (maritime, hangar d'aéroport).
+ */
+const char *DepotKindName(TileIndex tile)
+{
+	switch (GetTileType(tile)) {
+		case MP_ROAD:    return "road";
+		case MP_RAILWAY: return "rail";
+		default:         return nullptr;
+	}
+}
+
+/**
+ * Direction d'entrée d'un dépôt routier ou ferroviaire (0..3, `DiagDirection` :
+ * 0 = NE, 1 = SE, 2 = SW, 3 = NW).
+ */
+uint8_t DepotDirection(TileIndex tile)
+{
+	if (GetTileType(tile) == MP_ROAD) {
+		return static_cast<uint8_t>(GetRoadDepotDirection(tile));
+	}
+	return static_cast<uint8_t>(GetRailDepotDirection(tile));
+}
+
+/** Nombre de dépôts route/rail, c'est-à-dire ceux exposés dans `depots`. */
+uint32_t CountProtocolDepots()
+{
+	uint32_t count = 0;
+	for (const Depot *d : Depot::Iterate()) {
+		if (DepotKindName(d->xy) != nullptr) count++;
+	}
+	return count;
+}
+
 /** Sérialise les entités et l'économie dans `out` (JSON, sans la carte). */
 void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 {
@@ -1141,6 +1176,7 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 	const uint32_t towns = static_cast<uint32_t>(Town::GetNumItems());
 	const uint32_t industries = static_cast<uint32_t>(Industry::GetNumItems());
 	const uint32_t stations = static_cast<uint32_t>(Station::GetNumItems());
+	const uint32_t depots = CountProtocolDepots();
 
 	/* Compteurs par entreprise, alignés sur la liste de véhicules émise
 	 * (un train = une rame, pas un wagon). */
@@ -1160,7 +1196,8 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 		if (owner < MAX_COMPANIES) company_stations[owner]++;
 	}
 
-	out.reserve(4096 + companies * 256 + towns * 160 + industries * 256 + stations * 256 + vehicles * 256);
+	out.reserve(4096 + companies * 256 + towns * 160 + industries * 256 + stations * 256 +
+			depots * 128 + vehicles * 256);
 
 	out += fmt::format(
 		"{{\"meta\":{{\"protocol\":1,\"tick\":{},\"hash\":\"0x{:016x}\",\"sequence\":{}}},"
@@ -1172,8 +1209,9 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 		static_cast<unsigned>(OTTD_MAP_LAYER_COUNT));
 
 	out += fmt::format(
-		"\"counts\":{{\"companies\":{},\"towns\":{},\"industries\":{},\"stations\":{},\"vehicles\":{}}},",
-		companies, towns, industries, stations, vehicles);
+		"\"counts\":{{\"companies\":{},\"towns\":{},\"industries\":{},\"stations\":{},\"depots\":{},"
+		"\"vehicles\":{}}},",
+		companies, towns, industries, stations, depots, vehicles);
 
 	/* --- Configuration appliquée (issue #60) ------------------------------ */
 	const GameSetupConfig &active = _ottd_active_config;
@@ -1332,6 +1370,27 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 			out += fmt::format(",\"amount\":{}}}", waiting);
 		}
 		out += "]}";
+	}
+	out.push_back(']');
+
+	/* --- Dépôts route/rail ------------------------------------------------- */
+	/* `id` est l'index du pool OpenTTD (`DepotID`) : il reste stable tant que
+	 * le dépôt existe et sert directement aux ordres `vehicle.order`
+	 * (`kind: "depot"`). Les dépôts maritimes et hangars sont omis en v1. */
+	out += ",\"depots\":[";
+	first = true;
+	for (const Depot *d : Depot::Iterate()) {
+		const char *kind = DepotKindName(d->xy);
+		if (kind == nullptr) continue;
+
+		if (!first) out.push_back(',');
+		first = false;
+
+		out += fmt::format(
+			"{{\"id\":{},\"company\":{},\"kind\":\"{}\",\"x\":{},\"y\":{},\"direction\":{},"
+			"\"width\":1,\"height\":1}}",
+			d->index.base(), ProtocolOwner(GetTileOwner(d->xy)), kind,
+			TileX(d->xy), TileY(d->xy), DepotDirection(d->xy));
 	}
 	out.push_back(']');
 
@@ -2560,23 +2619,84 @@ Vehicle *FindVehicle(const JsonValue &root, CompanyID company, CommandReply &rep
 	return vehicle;
 }
 
-bool VehicleBuy(CompanyID company, const JsonValue &root, CommandReply &reply)
+/**
+ * Type de véhicule attendu d'après un mot-clé de modèle (`bus`, `train`…), ou
+ * `VEH_INVALID` quand le libellé ne permet pas de conclure (id numérique, nom
+ * NewGRF…). Sert à refuser tôt un véhicule incompatible avec le dépôt.
+ */
+VehicleType ModelVehicleType(const std::string &model)
 {
+	const std::string needle = LowerAscii(model);
+	if (needle == "bus" || needle == "truck" || needle == "camion" || needle == "tram" ||
+			needle == "fret" || needle == "marchandises") {
+		return VEH_ROAD;
+	}
+	if (needle == "train" || needle == "locomotive" || needle == "loco") return VEH_TRAIN;
+	if (needle == "ship" || needle == "bateau" || needle == "navire") return VEH_SHIP;
+	if (needle == "aircraft" || needle == "avion") return VEH_AIRCRAFT;
+	return VEH_INVALID;
+}
+
+/**
+ * Résout la tuile du dépôt désigné par `depotId` (prioritaire) ou `depot {x,y}`
+ * et vérifie qu'il appartient à `company`.
+ *
+ * @return la tuile du dépôt, ou `INVALID_TILE` après avoir rempli `reply`.
+ */
+TileIndex ResolveDepotTile(const JsonValue &root, CompanyID company, CommandReply &reply)
+{
+	const JsonValue *id_value = root.Find("depotId");
+	if (id_value != nullptr && !id_value->IsNull()) {
+		int id = 0;
+		if (!JsonGetInt(id_value, id) || id < 0 || id > 0xFFFF) {
+			FailWith(reply, "INVALID_PARAMETER", "« depotId » doit être un entier entre 0 et 65535.");
+			return INVALID_TILE;
+		}
+		if (!Depot::IsValidID(DepotID(static_cast<uint16_t>(id)))) {
+			FailWith(reply, "UNKNOWN_DEPOT", fmt::format("Dépôt {} inexistant.", id));
+			return INVALID_TILE;
+		}
+		const TileIndex tile = Depot::Get(DepotID(static_cast<uint16_t>(id)))->xy;
+		if (!IsTileOwner(tile, company)) {
+			FailWith(reply, "WRONG_OWNER", "Ce dépôt appartient à une autre entreprise.");
+			return INVALID_TILE;
+		}
+		return tile;
+	}
+
 	int depot_x, depot_y;
 	if (!JsonGetTile(root.Find("depot"), depot_x, depot_y) || !IsTileInMap(depot_x, depot_y)) {
-		return FailWith(reply, "INVALID_PARAMETER", "Le champ « depot » doit être une tuile de la carte.");
+		FailWith(reply, "INVALID_PARAMETER", "Indiquez « depotId » ou « depot » (tuile de la carte).");
+		return INVALID_TILE;
 	}
 	const TileIndex tile = TileXY(depot_x, depot_y);
 	if (!IsDepotTile(tile)) {
-		return FailWith(reply, "NOT_A_DEPOT", "L'achat d'un véhicule exige une tuile de dépôt.");
+		FailWith(reply, "NOT_A_DEPOT", "L'achat d'un véhicule exige une tuile de dépôt.");
+		return INVALID_TILE;
 	}
 	if (!IsTileOwner(tile, company)) {
-		return FailWith(reply, "WRONG_OWNER", "Ce dépôt appartient à une autre entreprise.");
+		FailWith(reply, "WRONG_OWNER", "Ce dépôt appartient à une autre entreprise.");
+		return INVALID_TILE;
 	}
+	return tile;
+}
+
+bool VehicleBuy(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	const TileIndex tile = ResolveDepotTile(root, company, reply);
+	if (tile == INVALID_TILE) return false;
 
 	const VehicleType type = GetDepotVehicleType(tile);
 	std::string model;
 	JsonGetString(root.Find("model"), model);
+	const VehicleType requested = ModelVehicleType(model);
+	if (requested != VEH_INVALID && requested != type) {
+		const char *depot_label = type == VEH_TRAIN ? "ferroviaire"
+				: type == VEH_ROAD ? "routier" : "de ce type";
+		return FailWith(reply, "WRONG_DEPOT_TYPE",
+				fmt::format("« {} » ne peut pas être acheté dans un dépôt {}.", model, depot_label));
+	}
+
 	const EngineID engine = SelectEngine(company, type, model);
 	if (engine == EngineID::Invalid()) {
 		return FailWith(reply, "NO_ENGINE",
@@ -2598,6 +2718,7 @@ bool VehicleBuy(CompanyID company, const JsonValue &root, CommandReply &reply)
 	reply.cost = cost.GetCost();
 	reply.vehicle = std::get<1>(result);
 	reply.model = EngineName(engine);
+	if (!IsHangarTile(tile)) reply.depot = GetDepotIndex(tile);
 	return Succeed(reply, fmt::format("Véhicule acheté : {}.", reply.model));
 }
 
@@ -2673,8 +2794,18 @@ bool VehicleOrders(CompanyID company, const JsonValue &root, CommandReply &reply
 				return FailWith(reply, "UNKNOWN_STATION", fmt::format("Gare {} inexistante.", target));
 			}
 		} else if (kind == "depot") {
-			if (!Depot::IsValidID(DepotID(static_cast<uint16_t>(target)))) {
+			const DepotID depot_id(static_cast<uint16_t>(target));
+			if (!Depot::IsValidID(depot_id)) {
 				return FailWith(reply, "UNKNOWN_DEPOT", fmt::format("Dépôt {} inexistant.", target));
+			}
+			const TileIndex depot_tile = Depot::Get(depot_id)->xy;
+			if (!IsTileOwner(depot_tile, company)) {
+				return FailWith(reply, "WRONG_OWNER",
+						fmt::format("Dépôt {} d'une autre entreprise.", target));
+			}
+			if (GetDepotVehicleType(depot_tile) != vehicle->type) {
+				return FailWith(reply, "WRONG_DEPOT_TYPE",
+						fmt::format("Dépôt {} incompatible avec ce véhicule.", target));
 			}
 		} else if (kind == "industry" || kind == "industrie") {
 			return FailWith(reply, "NOT_SUPPORTED",

@@ -2,31 +2,31 @@
  * Règles véhicules partagées par l'interface et par `MockEngine`.
  *
  * Module pur (aucun DOM, aucun Three.js) : catalogue des modèles, lecture des
- * tuiles de dépôt, validation des tournées et fabrique de commandes
+ * dépôts du snapshot, validation des tournées et fabrique de commandes
  * `EngineCommand.vehicle`. Comme `buildRules`, il ne simule rien : l'interface
  * s'en sert pour composer une commande, le moteur reste seul juge de son
  * application (fonds, dépôt, ordres).
  *
- * Le protocole v1 ne transporte pas encore de liste de dépôts : une tuile
- * dépôt est une tuile route/rail portant le bit privé `DEPOT_TRACK_BIT` dans
- * `trackBits`. Le mock le pose ; un futur pont WASM exposera de vrais
- * identifiants (voir wiki Protocole > évolutions).
+ * Depuis #90, les dépôts sont exposés par `WorldSnapshot.depots` avec un `id`
+ * de pool stable. L'UI n'utilise plus aucun encodage privé (bit de `trackBits`
+ * ou identifiant synthétique) : un achat envoie `depotId` et un ordre envoie
+ * `{ kind: 'depot', target: depots[].id }`.
  */
 
 import {
-  TILE_KIND_INDEX,
   type CompanyId,
+  type DepotKind,
+  type DepotSnapshot,
   type EngineCommand,
-  type MapSnapshot,
+  type OrderTargetKind,
   type StationSnapshot,
   type VehicleKind,
   type WorldSnapshot,
 } from '../engine/protocol';
-import { TILE_KINDS, inBounds, tileIndex } from './mapGrid';
 
-export type DepotKind = 'road' | 'rail';
+export type { DepotKind } from '../engine/protocol';
 
-export type VehicleOrderKind = 'station' | 'industry' | 'depot';
+export type VehicleOrderKind = OrderTargetKind;
 
 export interface VehicleOrder {
   target: number;
@@ -52,24 +52,6 @@ export interface VehicleModel {
   maintenance: number;
   description: string;
 }
-
-/**
- * Bit privé de `trackBits` marquant une tuile de dépôt.
- *
- * Les bits 0..3 portent les connexions nord/est/sud/ouest ; les bits 4..7
- * sont libres dans le protocole v1. Le mock utilise le bit 7, ignoré par le
- * rendu des voies et par les règles de gare (qui ne lisent que 0..3).
- */
-export const DEPOT_TRACK_BIT = 1 << 7;
-
-/**
- * Base des identifiants de dépôt utilisés comme cible d'ordre.
- *
- * Les gares ont des identifiants fournis par le snapshot ; les dépôts v1 n'en
- * ont pas. Le mock encode donc la tuile dans un identifiant stable tant que le
- * dépôt existe : `base + y * largeur + x`.
- */
-export const DEPOT_ORDER_TARGET_BASE = 1_000_000;
 
 /** Nombre maximal d'ordres dans une tournée (protège l'UI et le moteur). */
 export const MAX_VEHICLE_ORDERS = 24;
@@ -169,42 +151,25 @@ export function modelsForDepot(kind: DepotKind): VehicleModel[] {
   return VEHICLE_MODELS.filter((model) => model.depot === kind);
 }
 
-/** Axe de la tuile, utilisé seulement pour reconnaître un dépôt cohérent. */
-function depotKindFromTile(kind: number): DepotKind | null {
-  if (kind === TILE_KIND_INDEX.road) return 'road';
-  if (kind === TILE_KIND_INDEX.rail) return 'rail';
+/** Dépôt du snapshot par identifiant stable, ou `null`. */
+export function depotById(snapshot: WorldSnapshot | null, id: number): DepotSnapshot | null {
+  if (!snapshot || !Number.isFinite(id)) return null;
+  return snapshot.depots.find((depot) => depot.id === id) ?? null;
+}
+
+/** Dépôt dont l'emprise contient la tuile, ou `null`. */
+export function depotAtTile(
+  snapshot: WorldSnapshot | null,
+  x: number,
+  y: number,
+): DepotSnapshot | null {
+  if (!snapshot) return null;
+  for (const depot of snapshot.depots) {
+    if (x >= depot.x && x < depot.x + depot.width && y >= depot.y && y < depot.y + depot.height) {
+      return depot;
+    }
+  }
   return null;
-}
-
-/** Type de dépôt porté par une tuile, ou `null` si ce n'est pas un dépôt. */
-export function depotKindAt(map: MapSnapshot, x: number, y: number): DepotKind | null {
-  if (!inBounds(x, y, map.width, map.height)) return null;
-  const index = tileIndex(x, y, map.width);
-  if (((map.trackBits[index] ?? 0) & DEPOT_TRACK_BIT) === 0) return null;
-  return depotKindFromTile(map.kind[index] ?? TILE_KIND_INDEX.void);
-}
-
-export function isDepotTile(map: MapSnapshot, x: number, y: number): boolean {
-  return depotKindAt(map, x, y) !== null;
-}
-
-/** Identifiant de cible d'ordre d'un dépôt (mock v1). */
-export function depotOrderTarget(x: number, y: number, width: number): number {
-  return DEPOT_ORDER_TARGET_BASE + y * width + x;
-}
-
-/** Tuile encodée dans une cible d'ordre de type dépôt, ou `null`. */
-export function depotTileFromTarget(
-  target: number,
-  map: Pick<MapSnapshot, 'width' | 'height'>,
-): { x: number; y: number } | null {
-  if (!Number.isFinite(target) || target < DEPOT_ORDER_TARGET_BASE) return null;
-  const tile = Math.floor(target) - DEPOT_ORDER_TARGET_BASE;
-  if (tile < 0) return null;
-  const x = tile % map.width;
-  const y = Math.floor(tile / map.width);
-  if (!inBounds(x, y, map.width, map.height)) return null;
-  return { x, y };
 }
 
 /** Cible d'ordre stable pour une gare cliquée sur la carte. */
@@ -212,9 +177,9 @@ export function stationOrder(station: StationSnapshot): VehicleOrder {
   return { target: station.id, kind: 'station' };
 }
 
-/** Cible d'ordre stable pour un dépôt cliqué sur la carte. */
-export function depotOrder(x: number, y: number, width: number): VehicleOrder {
-  return { target: depotOrderTarget(x, y, width), kind: 'depot' };
+/** Cible d'ordre stable pour un dépôt du snapshot. */
+export function depotOrder(depot: DepotSnapshot): VehicleOrder {
+  return { target: depot.id, kind: 'depot' };
 }
 
 /** Gare dont l'emprise contient la tuile, ou `null`. */
@@ -235,11 +200,7 @@ export function stationAtTile(
 }
 
 /** Libellé d'une cible d'ordre pour l'éditeur de tournée. */
-export function orderTargetLabel(
-  order: VehicleOrder,
-  snapshot: WorldSnapshot | null,
-  map: Pick<MapSnapshot, 'width' | 'height'> | null,
-): string {
+export function orderTargetLabel(order: VehicleOrder, snapshot: WorldSnapshot | null): string {
   if (order.kind === 'station') {
     const station = snapshot?.stations.find((item) => item.id === order.target);
     return station?.name ?? `Gare #${order.target}`;
@@ -248,26 +209,34 @@ export function orderTargetLabel(
     const industry = snapshot?.industries.find((item) => item.id === order.target);
     return industry?.name ?? `Industrie #${order.target}`;
   }
-  const tile = map ? depotTileFromTarget(order.target, map) : null;
-  return tile ? `Dépôt (${tile.x}, ${tile.y})` : `Dépôt #${order.target}`;
+  const depot = depotById(snapshot, order.target);
+  return depot ? `Dépôt (${depot.x}, ${depot.y})` : `Dépôt #${order.target}`;
 }
 
 /**
- * Tournée lisible à partir du snapshot : `orderTargets` ne transporte pas le
- * type de cible, on le déduit des gares, industries et dépôts connus.
+ * Tournée typée à partir du snapshot.
+ *
+ * `orderKinds` (fourni par le mock) lève l'ambiguïté entre les pools
+ * d'identifiants gares/industries/dépôts. À défaut, on retombe sur l'ordre de
+ * résolution historique — gare, industrie, dépôt — car le pont v1 n'expose que
+ * des arrêts de gare dans `orderTargets`.
  */
 export function ordersFromSnapshot(
-  vehicle: { orderTargets: readonly number[] },
+  vehicle: { orderTargets: readonly number[]; orderKinds?: readonly OrderTargetKind[] },
   snapshot: WorldSnapshot | null,
-  map: Pick<MapSnapshot, 'width' | 'height'> | null,
 ): VehicleOrder[] {
-  return vehicle.orderTargets.map((target) => {
-    if (map && depotTileFromTarget(target, map)) return { target, kind: 'depot' };
+  const kinds = vehicle.orderKinds;
+  return vehicle.orderTargets.map((target, index) => {
+    const declared = kinds?.[index];
+    if (declared) return { target, kind: declared };
     if (snapshot?.stations.some((station) => station.id === target)) {
       return { target, kind: 'station' };
     }
     if (snapshot?.industries.some((industry) => industry.id === target)) {
       return { target, kind: 'industry' };
+    }
+    if (snapshot?.depots.some((depot) => depot.id === target)) {
+      return { target, kind: 'depot' };
     }
     return { target, kind: 'station' };
   });
@@ -282,7 +251,6 @@ export interface OrderValidation {
 export function validateVehicleOrders(
   orders: readonly VehicleOrder[],
   snapshot: WorldSnapshot | null,
-  map: MapSnapshot | null,
 ): OrderValidation {
   if (orders.length === 0) {
     return { ok: false, reason: 'Ajoutez au moins une gare ou un dépôt à la tournée.' };
@@ -303,21 +271,20 @@ export function validateVehicleOrders(
       }
       continue;
     }
-    const tile = map ? depotTileFromTarget(order.target, map) : null;
-    if (!tile || !map || depotKindAt(map, tile.x, tile.y) === null) {
+    if (!depotById(snapshot, order.target)) {
       return { ok: false, reason: 'Dépôt cible inconnu : ajoutez-le depuis la carte.' };
     }
   }
   return { ok: true, reason: null };
 }
 
-/** Commande d'achat d'un modèle dans un dépôt. */
+/** Commande d'achat d'un modèle dans un dépôt identifié par son id stable. */
 export function buyVehicleCommand(
   company: CompanyId,
-  depot: { x: number; y: number },
+  depotId: number,
   model: string,
 ): Extract<EngineCommand, { type: 'vehicle' }> {
-  return { type: 'vehicle', action: 'buy', company, depot: { x: depot.x, y: depot.y }, model };
+  return { type: 'vehicle', action: 'buy', company, depotId, model };
 }
 
 /** Commande de vente, d'arrêt ou de démarrage d'un véhicule existant. */
@@ -342,12 +309,4 @@ export function orderVehicleCommand(
     vehicle,
     orders: orders.map((order) => ({ target: order.target, kind: order.kind })),
   };
-}
-
-/** Libellé court d'un type de tuile dépôt (débogage, tests). */
-export function depotTileKindLabel(map: MapSnapshot, x: number, y: number): string {
-  const kind = depotKindAt(map, x, y);
-  if (kind) return depotKindLabel(kind);
-  if (!inBounds(x, y, map.width, map.height)) return 'Hors carte';
-  return TILE_KINDS[map.kind[tileIndex(x, y, map.width)] ?? 0] ?? 'Void';
 }

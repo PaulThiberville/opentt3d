@@ -46,6 +46,25 @@ describe('guards du protocole réseau', () => {
       }),
     ).toBe(true);
     expect(isEngineCommand({ type: 'speed', speed: 9 })).toBe(false);
+    // #90 : l'achat par id de dépôt et les ordres typés traversent le lockstep.
+    expect(
+      isEngineCommand({
+        type: 'vehicle',
+        action: 'buy',
+        company: 0,
+        depotId: 7,
+        model: 'bus_city',
+      }),
+    ).toBe(true);
+    expect(
+      isEngineCommand({
+        type: 'vehicle',
+        action: 'order',
+        company: 0,
+        vehicle: 3,
+        orders: [{ target: 7, kind: 'depot' }],
+      }),
+    ).toBe(true);
     expect(
       isEngineCommand({ type: 'build', tool: 'laser', company: 0, from: { x: 0, y: 0 } }),
     ).toBe(false);
