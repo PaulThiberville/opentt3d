@@ -20,7 +20,8 @@
     "engine:fetch": "bash engine/scripts/fetch.sh",
     "engine:build": "bash engine/scripts/build.sh",
     "engine:test": "node engine/scripts/smoke.mjs",
-    "engine:test:commands": "node engine/scripts/commands.mjs"
+    "engine:test:commands": "node engine/scripts/commands.mjs",
+    "engine:test:save": "node engine/scripts/save.mjs"
   },
   "dependencies": {
     "nostr-tools": "2.26.0",
