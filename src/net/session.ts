@@ -100,6 +100,16 @@ export interface Runner {
   hash(): string;
   serialize(): string;
   load(data: string): void;
+  /**
+   * Optional exact asynchronous snapshot used by the late-join transfer.
+   *
+   * A `MockEngine` save is only available as a promise: `serialize()` returns
+   * the last cached snapshot, which may predate the join frontier tick. When
+   * provided, the host pauses the simulation and uses this method so the save
+   * and the announced tick always match. Runners without it keep the original
+   * synchronous behaviour.
+   */
+  saveNow?(): Promise<string>;
 }
 
 export type PeersMap = Record<number, string> | Map<number, string>;
@@ -155,6 +165,19 @@ export interface JoinEvent {
   message?: string;
 }
 
+/** Host-side progress of a reserved seat or an in-flight save transfer. */
+export type JoinWindowPhase = 'reserved' | 'serializing' | 'transfer';
+
+export interface JoinWindowStatus {
+  peerId: string;
+  player: number;
+  phase: JoinWindowPhase;
+  /** Chunks handed to the transport (`0` before the save is serialized). */
+  sent: number;
+  /** Total chunks of the transfer (`0` before serialization). */
+  total: number;
+}
+
 export interface NetUpdate {
   ticks: number;
   waiting: boolean;
@@ -197,6 +220,11 @@ export interface NetSession {
   admitPeer(peerId: string, playerIndex?: number): JoinAdmission | null;
   /** Host side: closes one join window (or all) and refuses pending transfers. */
   closeJoinWindow(peerId?: string): void;
+  /**
+   * Host side: current reserved seats and save transfers, for the lobby UI.
+   * `sent`/`total` describe the chunk count once the save was queued.
+   */
+  pendingJoins(): JoinWindowStatus[];
   onJoin(fn: (event: JoinEvent) => void): () => void;
   /** Client-side phase of the late-join handshake. */
   joinPhase(): JoinPhase;
@@ -372,6 +400,12 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   const joinWindows = new Map<string, PendingJoin>();
   /** Host: at most one save transfer is in flight (the simulation pauses). */
   const joinTransfers = new Map<string, PendingJoin>();
+  /**
+   * Host: exact save is being serialized (async runners only). The simulation
+   * pauses during this short window so the save and its frontier tick match.
+   * The value is the expiry timestamp.
+   */
+  const joinPreparing = new Map<string, number>();
 
   const selfRecord = selfMapped ? players.get(localPlayer) : undefined;
   if (amHost) {
@@ -829,6 +863,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   /** Host: refuses a reserved seat or aborts an in-flight transfer. */
   function cancelJoin(peerId: string, reason: JoinRejectReason, message: string): void {
+    joinPreparing.delete(peerId);
     const pending = joinTransfers.get(peerId) ?? joinWindows.get(peerId);
     if (!pending) return;
     removeJoinSeat(pending);
@@ -904,16 +939,52 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   /** Host: serialises the state at the current tick and pauses until ready. */
   function startJoinTransfer(pending: PendingJoin): boolean {
     if (joinTransfers.size > 0 && !joinTransfers.has(pending.peerId)) {
-      rejectJoin(
+      cancelJoin(
         pending.peerId,
         'closed',
         'Un autre joueur est déjà en train de rejoindre la partie.',
-        pending.player,
+      );
+      return false;
+    }
+    if (joinPreparing.size > 0 && !joinPreparing.has(pending.peerId)) {
+      cancelJoin(
+        pending.peerId,
+        'closed',
+        'Un autre joueur est déjà en train de rejoindre la partie.',
       );
       return false;
     }
     if (pending.sent) {
       sendJoinPlan(pending);
+      return true;
+    }
+    if (joinPreparing.has(pending.peerId)) return true;
+
+    // Exact asynchronous snapshot (mock engine). The simulation pauses while it
+    // runs, so the serialized state and the announced tick stay consistent.
+    const saveNow = runner.saveNow;
+    if (typeof saveNow === 'function') {
+      joinPreparing.set(pending.peerId, currentNow + joinTimeoutMs);
+      void saveNow
+        .call(runner)
+        .then((save) => {
+          if (!joinPreparing.delete(pending.peerId) || disposed) return;
+          const tick = runner.tick();
+          let hash: string;
+          try {
+            hash = runner.hash();
+          } catch (error) {
+            console.error('[net:session] join : hash impossible', error);
+            cancelJoin(pending.peerId, 'invalid-save', 'L’état de l’hôte ne produit pas de hash.');
+            return;
+          }
+          commitJoinTransfer(pending, save, tick, hash);
+        })
+        .catch((error: unknown) => {
+          joinPreparing.delete(pending.peerId);
+          console.error('[net:session] join : sérialisation impossible', error);
+          cancelJoin(pending.peerId, 'invalid-save', 'L’hôte ne peut pas sérialiser la partie.');
+        });
       return true;
     }
 
@@ -928,7 +999,17 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       cancelJoin(pending.peerId, 'invalid-save', 'L’hôte ne peut pas sérialiser la partie.');
       return false;
     }
-    if (typeof save !== 'string' || typeof hash !== 'string') {
+    return commitJoinTransfer(pending, save, tick, hash);
+  }
+
+  /** Host: stores a prepared save, opens the transfer and ships the chunks. */
+  function commitJoinTransfer(
+    pending: PendingJoin,
+    save: unknown,
+    tick: number,
+    hash: string,
+  ): boolean {
+    if (typeof save !== 'string' || save.length === 0 || typeof hash !== 'string') {
       cancelJoin(pending.peerId, 'invalid-save', 'Sauvegarde d’hôte invalide.');
       return false;
     }
@@ -958,6 +1039,12 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   /** Host: expires idle windows and aborted transfers. */
   function expireJoins(now: number): void {
+    for (const [peerId, expiresAt] of [...joinPreparing.entries()]) {
+      if (now >= expiresAt) {
+        joinPreparing.delete(peerId);
+        cancelJoin(peerId, 'timeout', 'La sérialisation de la sauvegarde a expiré.');
+      }
+    }
     for (const pending of [...joinWindows.values()]) {
       if (now >= pending.expiresAt) {
         cancelJoin(pending.peerId, 'closed', 'La fenêtre de join a expiré.');
@@ -1033,12 +1120,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     }
 
     if (joinTransfers.size > 0 && !joinTransfers.has(from)) {
-      rejectJoin(
-        from,
-        'closed',
-        'Un autre joueur est déjà en train de rejoindre la partie.',
-        pending.player,
-      );
+      cancelJoin(from, 'closed', 'Un autre joueur est déjà en train de rejoindre la partie.');
       return;
     }
     startJoinTransfer(pending);
@@ -1306,11 +1388,44 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     if (!amHost || disposed) return;
     const targets =
       peerId === undefined
-        ? [...new Set([...joinWindows.keys(), ...joinTransfers.keys()])]
+        ? [...new Set([...joinWindows.keys(), ...joinTransfers.keys(), ...joinPreparing.keys()])]
         : [peerId];
     for (const target of targets) {
       cancelJoin(target, 'closed', 'La fenêtre de join a été fermée par l’hôte.');
     }
+  }
+
+  function pendingJoins(): JoinWindowStatus[] {
+    if (!amHost || disposed) return [];
+    const result: JoinWindowStatus[] = [];
+    for (const peerId of joinPreparing.keys()) {
+      result.push({
+        peerId,
+        player: playerOf(peerId)?.index ?? -1,
+        phase: 'serializing',
+        sent: 0,
+        total: 0,
+      });
+    }
+    for (const pending of joinWindows.values()) {
+      result.push({
+        peerId: pending.peerId,
+        player: pending.player,
+        phase: 'reserved',
+        sent: 0,
+        total: 0,
+      });
+    }
+    for (const pending of joinTransfers.values()) {
+      result.push({
+        peerId: pending.peerId,
+        player: pending.player,
+        phase: 'transfer',
+        sent: pending.sent ? pending.total : 0,
+        total: pending.total,
+      });
+    }
+    return result;
   }
 
   // ------------------------------------------------------------------ commands
@@ -1466,6 +1581,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     lost = false;
     joinWindows.clear();
     joinTransfers.clear();
+    joinPreparing.clear();
     if (joinMode && joinPhaseState !== 'joined') {
       joinAssembly = null;
       joinPhaseState = 'rejected';
@@ -1719,12 +1835,12 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   function updateHost(now: number, dt: number): NetUpdate {
     if (firstUpdateAt === null) firstUpdateAt = now;
     expireJoins(now);
-    if (joinTransfers.size > 0) {
+    if (joinTransfers.size > 0 || joinPreparing.size > 0) {
       // Simple, deterministic policy: a join pauses the whole simulation. The
       // state is serialised at the current tick N; no turn is executed or sent
       // until the newcomer has confirmed the hash at N (or the window expires).
       acc = 0;
-      waitingFor = [...joinTransfers.keys()];
+      waitingFor = [...joinPreparing.keys(), ...joinTransfers.keys()];
       return { ticks: 0, waiting: true, waitingFor: [...waitingFor], desyncs };
     }
     const expected = expectedClients();
@@ -1840,6 +1956,10 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       if (ticks >= MAX_NORMAL_STEPS + CATCHUP_EXTRA) break;
     }
 
+    // Un client qui suit exactement la frontière exécute des ticks à chaque
+    // mise à jour puis s'arrête faute du tour suivant : ce n'est pas un stall.
+    // Seule une absence totale de progrès doit déclencher hello/resync.
+    if (ticks > 0) stallSince = null;
     if (stalled) {
       acc = Math.min(acc, NET_TICK_MS);
       if (stallSince === null) stallSince = now;
@@ -1977,6 +2097,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     saveAssemblies.clear();
     joinWindows.clear();
     joinTransfers.clear();
+    joinPreparing.clear();
     joinAssembly = null;
     transport.leave();
   }
@@ -1995,6 +2116,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     requestJoin,
     admitPeer,
     closeJoinWindow,
+    pendingJoins,
     onJoin,
     joinPhase,
     joinProgress,

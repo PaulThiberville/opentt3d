@@ -85,6 +85,27 @@ describe('adaptation EngineDriver → Runner', () => {
     expect(save).toContain('"tick"');
   });
 
+  it('recharge une sauvegarde mock avec le hash exact de l’hôte (join)', async () => {
+    const host = await makeEngine();
+    const hostRunner = createEngineRunner(host);
+    for (let tick = 0; tick < 200; tick++) hostRunner.step([]);
+    const save = await hostRunner.saveNow();
+
+    const newcomer = await makeEngine({ ...gameOptions, seed: 99 });
+    const newcomerRunner = createEngineRunner(newcomer);
+    newcomerRunner.load(save);
+    expect(newcomerRunner.tick()).toBe(200);
+    // `MockEngine.load` re-lisse les directions : le runner restaure celles de
+    // la sauvegarde pour que le hash de join reste identique à celui de l'hôte.
+    expect(newcomerRunner.hash()).toBe(hostRunner.hash());
+
+    for (let tick = 0; tick < 50; tick++) {
+      hostRunner.step([]);
+      newcomerRunner.step([]);
+      expect(newcomerRunner.hash()).toBe(hostRunner.hash());
+    }
+  });
+
   it('la façade Game ne consomme que les ticks déjà exécutés', async () => {
     const engine = await makeEngine();
     const driver = createLockstepDriver(engine);
