@@ -226,9 +226,29 @@ export class Hud {
   private handleEscape = (event: KeyboardEvent): void => {
     if (event.key !== 'Escape' || event.defaultPrevented) return;
     if (document.querySelector('.screen.is-visible')) return;
-    if (!this.closePanels()) return;
+    if (this.closePanels()) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    // La session ignore Échap quand le focus est sur un contrôle interactif.
+    // On rend le focus au canvas puis on rejoue l'événement dans son contexte,
+    // pour que le menu de pause reste accessible après un passage dans le HUD.
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !active.closest('.hud')) return;
+    const canvas = document.querySelector<HTMLElement>('#scene');
+    if (!canvas) return;
     event.preventDefault();
     event.stopPropagation();
+    canvas.focus();
+    canvas.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        code: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
   };
 
   update(state: HudState): void {
