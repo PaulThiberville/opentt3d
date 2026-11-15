@@ -138,6 +138,39 @@ describe('WasmEngine : chargement et cycle de vie', () => {
     expect(engine.status().warnings).toEqual([]);
   });
 
+  it('transmet les options de partie à ottd_new_game_ex quand le pont l’expose', async () => {
+    const { engine, fake, warnings } = await createEngine();
+    const calls: unknown[][] = [];
+    Object.assign(fake, {
+      _ottd_new_game_ex: (seed: number, width: number, height: number, config: string) => {
+        calls.push([seed, width, height, config]);
+        return fake._ottd_new_game(seed, width, height);
+      },
+    });
+
+    await engine.newGame({
+      seed: 7,
+      width: 64,
+      height: 64,
+      aiCompanies: 2,
+      climate: 'toyland',
+      startYear: 2000,
+      difficulty: 3,
+    });
+
+    expect(calls).toHaveLength(1);
+    const config = JSON.parse(String(calls[0]?.[3])) as Record<string, unknown>;
+    expect(config).toMatchObject({
+      climate: 'toyland',
+      start_year: 2000,
+      difficulty: 3,
+      ai_companies: 2,
+      map_size: 64,
+    });
+    expect(warnings).toEqual([]);
+    expect(engine.status().warnings).toEqual([]);
+  });
+
   it('avertit quand la mémoire demandée dépasse la mémoire compilée', async () => {
     const { engine } = await createEngine(64);
     const warnings = engine.status().warnings ?? [];
