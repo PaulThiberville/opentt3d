@@ -19,7 +19,7 @@
 #     --docker     force l'image Docker upstream (emsdk-openttd)
 #     --native     force emsdk natif (emcmake/emmake dans le PATH)
 #
-# Par défaut : Docker si disponible, sinon emsdk natif.
+# Par défaut : image Docker déjà construite, sinon emsdk local, sinon Docker.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,11 +91,19 @@ else
   command -v emcmake >/dev/null 2>&1 || die "emcmake introuvable (sourcez emsdk_env.sh ou utilisez --docker)"
 fi
 
-if ! command -v cmake >/dev/null 2>&1 && [[ -x /tmp/cmake-venv/bin/cmake ]]; then
-  PATH="/tmp/cmake-venv/bin:${PATH}"
+if ! command -v cmake >/dev/null 2>&1; then
+  for candidate in \
+    "${ENGINE_DIR}/.cache/cmake-venv/bin/cmake" \
+    /opt/homebrew/bin/cmake \
+    /usr/local/bin/cmake; do
+    if [[ -x "${candidate}" ]]; then
+      PATH="$(dirname "${candidate}"):${PATH}"
+      break
+    fi
+  done
 fi
 CMAKE_BIN="${CMAKE_BIN:-cmake}"
-command -v "${CMAKE_BIN}" >/dev/null 2>&1 || die "cmake introuvable"
+command -v "${CMAKE_BIN}" >/dev/null 2>&1 || die "cmake introuvable (brew install cmake ou pip install cmake)"
 
 run_tool() {
   local workdir="$1"; shift
