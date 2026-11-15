@@ -68,6 +68,10 @@ const FR = {
     'Le cycle est purement visuel : il n’a aucun effet sur le gameplay. Désactivé, l’heure est figée à midi. 120 s = 2 minutes par journée.',
   'settings.daynight.hintOff':
     'Cycle désactivé : l’heure est figée à midi, la scène reste en plein jour.',
+  'settings.intro.label': 'Intro cinématique',
+  'settings.intro.toggle': 'Jouer l’intro au lancement d’une partie',
+  'settings.intro.hint':
+    'Survol doux de la carte pendant quelques secondes, coupable au clic ou à la touche. Ignorée si le système demande des animations réduites.',
   'settings.language.label': 'Langue de l’interface',
   'settings.language.hint':
     'Le français est la langue de référence ; la traduction anglaise couvre les écrans et le HUD principaux.',
@@ -186,6 +190,19 @@ const FR = {
   'topbar.helpTitle': 'Aide et contrôles',
   'topbar.unread.one': '{count} actualité non lue',
   'topbar.unread.other': '{count} actualités non lues',
+
+  // Mode photo -----------------------------------------------------------
+  'photo.open': 'Mode photo (P)',
+  'photo.title': 'Mode photo',
+  'photo.hint':
+    'Glisser : orbite · Molette : zoom · 1/2/3 : carte, rue, train · C : capture · P ou Échap : quitter',
+  'photo.capture': 'Capturer (C)',
+  'photo.exit': 'Quitter (P)',
+  'photo.captured': 'Capture enregistrée',
+  'photo.preset.map': 'Carte',
+  'photo.preset.street': 'Rue',
+  'photo.preset.train': 'Train',
+  'intro.skip': 'Clic ou touche pour passer l’intro',
 
   // Barre d'outils -------------------------------------------------------
   'toolbar.label': 'Outils de construction',
@@ -356,6 +373,10 @@ const EN: Record<TranslationKey, string> = {
     'The cycle is purely visual: it has no effect on gameplay. When disabled, time is frozen at noon. 120 s = 2 minutes per day.',
   'settings.daynight.hintOff':
     'Cycle disabled: time is frozen at noon and the scene stays in daylight.',
+  'settings.intro.label': 'Cinematic intro',
+  'settings.intro.toggle': 'Play the intro when a game starts',
+  'settings.intro.hint':
+    'A gentle flyover for a few seconds, skipped by click or key. Ignored when the system asks for reduced motion.',
   'settings.language.label': 'Interface language',
   'settings.language.hint':
     'French is the reference language; the English translation covers the main screens and HUD.',
@@ -467,6 +488,19 @@ const EN: Record<TranslationKey, string> = {
   'topbar.helpTitle': 'Help and controls',
   'topbar.unread.one': '{count} unread news item',
   'topbar.unread.other': '{count} unread news items',
+
+  // Photo mode -----------------------------------------------------------
+  'photo.open': 'Photo mode (P)',
+  'photo.title': 'Photo mode',
+  'photo.hint':
+    'Drag: orbit · Wheel: zoom · 1/2/3: map, street, train · C: capture · P or Escape: exit',
+  'photo.capture': 'Capture (C)',
+  'photo.exit': 'Exit (P)',
+  'photo.captured': 'Capture saved',
+  'photo.preset.map': 'Map',
+  'photo.preset.street': 'Street',
+  'photo.preset.train': 'Train',
+  'intro.skip': 'Click or press a key to skip the intro',
 
   'toolbar.label': 'Build tools',
   'toolbar.labelActive': 'Build tools — {tool} active',

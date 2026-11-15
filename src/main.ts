@@ -1110,6 +1110,9 @@ function exposeDebug(current: GameSession): void {
     listSaves: async () => (await ensureSaveStore()).store.list(),
     captureSave: () => current.captureSave(),
     restored: current.restoredStateInfo,
+    photo: current.getPhotoMode(),
+    togglePhotoMode: (preset?: 'map' | 'street' | 'train') => current.togglePhotoMode(preset),
+    isIntroRunning: () => current.isCinematicIntroRunning(),
   };
   (window as unknown as Record<string, unknown>).__opentt3d = api;
 }

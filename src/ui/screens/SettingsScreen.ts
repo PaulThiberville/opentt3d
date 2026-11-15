@@ -27,6 +27,7 @@ export class SettingsScreen extends BaseScreen {
   private cycleInput!: HTMLInputElement;
   private cycleOutput!: HTMLOutputElement;
   private cycleHint!: HTMLParagraphElement;
+  private introToggle!: HTMLInputElement;
   private languageSelect!: HTMLSelectElement;
   private volumeInputs = new Map<keyof GameSettings, HTMLInputElement>();
   private volumeOutputs = new Map<keyof GameSettings, HTMLOutputElement>();
@@ -133,6 +134,26 @@ export class SettingsScreen extends BaseScreen {
       this.cycleHint,
     );
 
+    // Intro cinématique ------------------------------------------------------
+    const introField = el('div', { className: 'field' });
+    const introRow = el('div', { className: 'settings-toggle-row' });
+    this.introToggle = el('input', {
+      attrs: { id: 'settings-cinematic-intro', type: 'checkbox' },
+    });
+    this.introToggle.checked = this.settings.cinematicIntro;
+    this.introToggle.addEventListener('change', () => {
+      this.patch({ cinematicIntro: this.introToggle.checked });
+    });
+    introRow.append(
+      this.introToggle,
+      fieldLabel(t('settings.intro.toggle'), 'settings-cinematic-intro'),
+    );
+    introField.append(
+      fieldLabel(t('settings.intro.label')),
+      introRow,
+      this.hint('settings-intro-hint', t('settings.intro.hint')),
+    );
+
     // Langue -----------------------------------------------------------------
     this.languageSelect = el('select', {
       className: 'input',
@@ -211,7 +232,7 @@ export class SettingsScreen extends BaseScreen {
     relayField.append(fieldLabel(t('settings.relay.label'), 'settings-relay'), relay);
     relayField.append(this.hint('settings-relay-hint', t('settings.relay.hint')));
 
-    grid.append(qualityField, dayNightField, languageField, volumes, relayField);
+    grid.append(qualityField, dayNightField, introField, languageField, volumes, relayField);
 
     this.status = el('p', {
       className: 'settings-status',
@@ -272,6 +293,7 @@ export class SettingsScreen extends BaseScreen {
     this.languageSelect.value = this.settings.language;
     this.qualitySelect.value = this.settings.quality;
     this.dayNightToggle.checked = this.settings.dayNightCycle;
+    this.introToggle.checked = this.settings.cinematicIntro;
     this.cycleInput.value = `${this.settings.dayNightCycleSeconds}`;
     this.cycleOutput.textContent = `${this.settings.dayNightCycleSeconds} s`;
     this.cycleInput.disabled = !this.settings.dayNightCycle;

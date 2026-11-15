@@ -53,6 +53,8 @@ export interface HudCallbacks {
   onCloseVehicle: () => void;
   /** Coupe ou rétablit le son (bouton minimal de la barre supérieure). */
   onToggleAudio?: () => void;
+  /** Ouvre/ferme le mode photo (bouton appareil). */
+  onPhotoMode?: () => void;
 }
 
 export interface HudNewsInput {
@@ -71,6 +73,7 @@ export class Hud {
   private callbacks: HudCallbacks;
   private topBar: TopBar;
   private audioButton: HTMLButtonElement;
+  private photoButton: HTMLButtonElement;
   private selectionPanel: SelectionPanel;
   private depotPanel: DepotPanel;
   private vehiclePanel: VehiclePanel;
@@ -117,6 +120,21 @@ export class Hud {
     this.audioButton.hidden = this.callbacks.onToggleAudio === undefined;
     const tools = this.topBar.element.querySelector('.hud-tools');
     (tools ?? this.topBar.element).append(this.audioButton);
+
+    // Mode photo : même emplacement discret que le bouton son.
+    this.photoButton = el('button', {
+      className: 'hud-button hud-photo-button',
+      text: '📷',
+      attrs: {
+        type: 'button',
+        title: t('photo.open'),
+        'aria-label': t('photo.open'),
+        'aria-pressed': 'false',
+      },
+    });
+    this.photoButton.addEventListener('click', () => this.callbacks.onPhotoMode?.());
+    this.photoButton.hidden = this.callbacks.onPhotoMode === undefined;
+    (tools ?? this.topBar.element).append(this.photoButton);
 
     this.selectionPanel = new SelectionPanel({
       onClear: () => this.callbacks.onClearSelection(),
@@ -307,6 +325,12 @@ export class Hud {
   /** Reflète l'outil de construction armé dans la barre du bas. */
   setBuildTool(tool: BuildToolId | null): void {
     this.toolbar.setActive(tool);
+  }
+
+  /** Reflète l'état du mode photo sur le bouton appareil. */
+  setPhotoMode(active: boolean): void {
+    this.photoButton.setAttribute('aria-pressed', active ? 'true' : 'false');
+    this.photoButton.classList.toggle('is-active', active);
   }
 
   /** Met à jour le bouton mute (état réel du moteur audio). */

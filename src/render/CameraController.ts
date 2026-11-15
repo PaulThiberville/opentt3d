@@ -14,7 +14,7 @@
  */
 
 import * as THREE from 'three';
-import { clamp, damp } from '../game/interpolation';
+import { clamp, clamp01, damp, lerp, lerpAngle, smoothstep01 } from '../game/interpolation';
 import {
   CAMERA_GROUND_CLEARANCE,
   MAX_DISTANCE,
@@ -24,7 +24,9 @@ import {
   type MapBounds,
   cameraOffset,
   clampDistance,
+  clampFov,
   clampPitch,
+  clampSpeedMultiplier,
   clampTarget,
   enforceAboveGround,
   groundPointFromNdc,
@@ -72,6 +74,22 @@ interface DragState {
   moved: number;
 }
 
+/** Transition douce entre deux cadrages (preset photo, retour de suivi…). */
+interface CameraTransition {
+  fromTarget: THREE.Vector3;
+  fromYaw: number;
+  fromPitch: number;
+  fromDistance: number;
+  fromFov: number;
+  toTarget: THREE.Vector3;
+  toYaw: number;
+  toPitch: number;
+  toDistance: number;
+  toFov: number;
+  elapsed: number;
+  duration: number;
+}
+
 const KEY_LEFT = new Set(['ArrowLeft', 'KeyA']);
 const KEY_RIGHT = new Set(['ArrowRight', 'KeyD']);
 const KEY_UP = new Set(['ArrowUp', 'KeyW']);
@@ -102,6 +120,11 @@ export class CameraController {
   private followDistance = 16;
   private scratchPosition = new THREE.Vector3();
   private attached = false;
+  private fov = 52;
+  private speedMultiplier = 1;
+  /** Pose imposée par un script (intro cinématique) : prioritaire sur les entrées. */
+  private scriptedPose: CameraPose | null = null;
+  private transition: CameraTransition | null = null;
 
   private onClick?: (ndc: { x: number; y: number }) => void;
   private onDoubleClick?: (ndc: { x: number; y: number }) => void;
@@ -135,6 +158,7 @@ export class CameraController {
       distance: clampDistance(options.initialDistance ?? Math.min(MAX_DISTANCE * 0.85, span * 1.1)),
     };
     this.currentDistance = this.pose.distance;
+    this.fov = clampFov(this.camera.fov);
     this.updateTargetHeight();
     this.update(0);
   }
@@ -201,9 +225,104 @@ export class CameraController {
     return this.pose.distance;
   }
 
+  /** Champ de vision courant en degrés. */
+  getFov(): number {
+    return this.fov;
+  }
+
+  /** Applique un FOV borné (30–68°) et met à jour la projection. */
+  setFov(fov: number): void {
+    const next = clampFov(fov);
+    if (Math.abs(next - this.fov) < 1e-4) return;
+    this.fov = next;
+    this.camera.fov = next;
+    this.camera.updateProjectionMatrix();
+  }
+
+  /** Multiplicateur des entrées caméra (0,4–2,5). */
+  getSpeedMultiplier(): number {
+    return this.speedMultiplier;
+  }
+
+  setSpeedMultiplier(value: number): void {
+    this.speedMultiplier = clampSpeedMultiplier(value);
+  }
+
+  /**
+   * Impose une pose (intro cinématique). Tant qu'elle est fournie à chaque
+   * frame, les entrées clavier/souris ne déplacent pas la caméra ; `null`
+   * rend la main au contrôleur.
+   */
+  setScriptedPose(pose: CameraPose | null): void {
+    this.scriptedPose = pose;
+    if (pose) {
+      this.transition = null;
+      this.currentDistance = pose.distance;
+    }
+  }
+
+  isScripted(): boolean {
+    return this.scriptedPose !== null;
+  }
+
+  /** Applique immédiatement une pose complète (sans interpolation). */
+  applyPose(
+    pose: Pick<CameraPose, 'yaw' | 'pitch' | 'distance'> & { target: THREE.Vector3 },
+    options: { fov?: number; immediate?: boolean } = {},
+  ): void {
+    this.transition = null;
+    this.pose.target.copy(pose.target);
+    this.pose.yaw = pose.yaw;
+    this.pose.pitch = clampPitch(pose.pitch);
+    this.pose.distance = clampDistance(pose.distance);
+    if (options.fov !== undefined) this.setFov(options.fov);
+    if (options.immediate !== false) this.currentDistance = this.pose.distance;
+    clampTarget(this.pose.target, this.bounds);
+    this.updateTargetHeight();
+    this.commit(0);
+  }
+
+  /**
+   * Transition douce vers un cadrage. La durée nulle (ou une pose identique)
+   * applique la pose immédiatement, ce qui sert au respect de
+   * `prefers-reduced-motion`.
+   */
+  transitionTo(
+    pose: Pick<CameraPose, 'yaw' | 'pitch' | 'distance'> & { target: THREE.Vector3 },
+    options: { fov?: number; seconds?: number } = {},
+  ): void {
+    const seconds = Math.max(0, options.seconds ?? 0.8);
+    if (seconds === 0) {
+      this.applyPose(pose, { ...(options.fov !== undefined ? { fov: options.fov } : {}) });
+      return;
+    }
+    this.scriptedPose = null;
+    this.follow = null;
+    this.transition = {
+      fromTarget: this.pose.target.clone(),
+      fromYaw: this.pose.yaw,
+      fromPitch: this.pose.pitch,
+      fromDistance: this.currentDistance,
+      fromFov: this.fov,
+      toTarget: pose.target.clone(),
+      toYaw: pose.yaw,
+      toPitch: clampPitch(pose.pitch),
+      toDistance: clampDistance(pose.distance),
+      toFov: options.fov !== undefined ? clampFov(options.fov) : this.fov,
+      elapsed: 0,
+      duration: seconds,
+    };
+  }
+
+  isTransitioning(): boolean {
+    return this.transition !== null;
+  }
+
   /** Recentre la vue sur un point du monde. */
   focusOn(x: number, z: number, distance?: number): void {
     this.follow = null;
+    this.transition = null;
+    this.scriptedPose = null;
     this.pose.target.x = x;
     this.pose.target.z = z;
     clampTarget(this.pose.target, this.bounds);
@@ -249,6 +368,8 @@ export class CameraController {
   /** Recadre la carte entière. */
   reset(): void {
     this.follow = null;
+    this.transition = null;
+    this.scriptedPose = null;
     this.pose.target.set(
       (this.bounds.minX + this.bounds.maxX) / 2,
       0,
@@ -280,6 +401,16 @@ export class CameraController {
 
   update(deltaSeconds: number): void {
     const dt = Math.min(deltaSeconds, 0.1);
+    if (this.scriptedPose) {
+      this.copyScriptedPose();
+      this.commit(dt);
+      return;
+    }
+    if (this.transition) {
+      this.advanceTransition(dt);
+      this.commit(dt);
+      return;
+    }
     this.applyKeyboardPan(dt);
     this.applyEdgeScroll(dt);
 
@@ -292,6 +423,35 @@ export class CameraController {
       }
     }
 
+    this.commit(dt);
+  }
+
+  /** Recopie la pose imposée en la bornant à la carte. */
+  private copyScriptedPose(): void {
+    const scripted = this.scriptedPose;
+    if (!scripted) return;
+    this.pose.target.copy(scripted.target);
+    this.pose.yaw = scripted.yaw;
+    this.pose.pitch = scripted.pitch;
+    this.pose.distance = scripted.distance;
+  }
+
+  private advanceTransition(dt: number): void {
+    const transition = this.transition;
+    if (!transition) return;
+    transition.elapsed = Math.min(transition.duration, transition.elapsed + dt);
+    const t = smoothstep01(clamp01(transition.elapsed / transition.duration));
+    this.pose.target.x = lerp(transition.fromTarget.x, transition.toTarget.x, t);
+    this.pose.target.z = lerp(transition.fromTarget.z, transition.toTarget.z, t);
+    this.pose.yaw = lerpAngle(transition.fromYaw, transition.toYaw, t);
+    this.pose.pitch = lerp(transition.fromPitch, transition.toPitch, t);
+    this.pose.distance = lerp(transition.fromDistance, transition.toDistance, t);
+    this.setFov(lerp(transition.fromFov, transition.toFov, t));
+    if (transition.elapsed >= transition.duration) this.transition = null;
+  }
+
+  /** Borne la pose puis place la caméra (partagé par tous les modes). */
+  private commit(dt: number): void {
     clampTarget(this.pose.target, this.bounds, TARGET_MARGIN);
     this.updateTargetHeight();
     this.pose.yaw = ((this.pose.yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
@@ -301,7 +461,11 @@ export class CameraController {
       Math.max(this.minDistance, MIN_DISTANCE),
       this.maxDistance,
     );
-    this.currentDistance = damp(this.currentDistance, this.pose.distance, 16, dt);
+    if (this.scriptedPose || this.transition) {
+      this.currentDistance = this.pose.distance;
+    } else {
+      this.currentDistance = damp(this.currentDistance, this.pose.distance, 16, dt);
+    }
     this.currentDistance = clamp(this.currentDistance, this.minDistance, this.maxDistance);
 
     cameraOffset(this.pose.yaw, this.pose.pitch, this.currentDistance, this.scratchPosition).add(
@@ -320,7 +484,7 @@ export class CameraController {
   private applyKeyboardPan(dt: number): void {
     if (this.keys.size === 0) return;
     const basis = panBasis(this.pose.yaw);
-    const step = keyboardPanStep(this.pose.distance, dt);
+    const step = keyboardPanStep(this.pose.distance, dt) * this.speedMultiplier;
     let forward = 0;
     let right = 0;
     let yawDelta = 0;
@@ -341,8 +505,11 @@ export class CameraController {
       this.pose.target.z += ((basis.forwardZ * forward + basis.rightZ * right) / length) * step;
       this.follow = null;
     }
-    if (yawDelta !== 0) this.pose.yaw += yawDelta * 1.5 * dt;
-    if (zoom !== 0) this.pose.distance = clampDistance(this.pose.distance * (1 + zoom * 0.9 * dt));
+    if (yawDelta !== 0) this.pose.yaw += yawDelta * 1.5 * dt * this.speedMultiplier;
+    if (zoom !== 0)
+      this.pose.distance = clampDistance(
+        this.pose.distance * (1 + zoom * 0.9 * dt * this.speedMultiplier),
+      );
     if (forward !== 0 || right !== 0) clampTarget(this.pose.target, this.bounds, TARGET_MARGIN);
   }
 
@@ -354,7 +521,7 @@ export class CameraController {
     const y = this.lastPointerY - rect.top;
     if (x < 0 || y < 0 || x > rect.width || y > rect.height) return;
     const basis = panBasis(this.pose.yaw);
-    const step = keyboardPanStep(this.pose.distance, dt) * 0.75;
+    const step = keyboardPanStep(this.pose.distance, dt) * 0.75 * this.speedMultiplier;
     let dx = 0;
     let dy = 0;
     if (x < margin) dx -= 1;
@@ -403,12 +570,14 @@ export class CameraController {
       event.preventDefault();
       this.placementPointerId = event.pointerId;
       this.follow = null;
+      this.transition = null;
       this.element.setPointerCapture?.(event.pointerId);
       this.placement.begin(this.ndcForEvent(event.clientX, event.clientY));
       return;
     }
 
     event.preventDefault();
+    this.transition = null;
     this.drag = {
       mode: orbit ? 'orbit' : 'pan',
       pointerId: event.pointerId,
@@ -452,11 +621,11 @@ export class CameraController {
     drag.lastY = event.clientY;
     drag.moved += Math.abs(dx) + Math.abs(dy);
     if (drag.mode === 'orbit') {
-      this.pose.yaw -= dx * 0.0062;
-      this.pose.pitch = clampPitch(this.pose.pitch + dy * 0.0052);
+      this.pose.yaw -= dx * 0.0062 * this.speedMultiplier;
+      this.pose.pitch = clampPitch(this.pose.pitch + dy * 0.0052 * this.speedMultiplier);
     } else {
       const basis = panBasis(this.pose.yaw);
-      const scale = this.currentDistance * 0.0017;
+      const scale = this.currentDistance * 0.0017 * this.speedMultiplier;
       this.pose.target.x += basis.forwardX * dy * scale - basis.rightX * dx * scale;
       this.pose.target.z += basis.forwardZ * dy * scale - basis.rightZ * dx * scale;
       clampTarget(this.pose.target, this.bounds, TARGET_MARGIN);
@@ -491,6 +660,7 @@ export class CameraController {
     event.preventDefault();
     const ndc = this.ndcForEvent(event.clientX, event.clientY);
     this.follow = null;
+    this.transition = null;
     this.zoomAt(ndc, wheelZoomFactor(event.deltaY));
   };
 
@@ -534,6 +704,7 @@ export class CameraController {
     ];
     if (!keys.includes(event.code)) return;
     event.preventDefault();
+    this.transition = null;
     this.keys.add(event.code);
   };
 
@@ -554,6 +725,8 @@ export class CameraController {
     this.detach();
     this.placement = null;
     this.follow = null;
+    this.transition = null;
+    this.scriptedPose = null;
     this.onClick = undefined;
     this.onDoubleClick = undefined;
   }

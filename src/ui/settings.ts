@@ -24,6 +24,8 @@ export interface GameSettings {
   dayNightCycle: boolean;
   /** Durée d'une journée visuelle complète, en secondes. */
   dayNightCycleSeconds: number;
+  /** Intro cinématique de début de partie (désactivée par reduced motion). */
+  cinematicIntro: boolean;
 }
 
 export const SETTINGS_STORAGE_KEY = 'opentt3d.settings.v1';
@@ -39,6 +41,7 @@ export const DEFAULT_SETTINGS: GameSettings = {
   p2pRelay: DEFAULT_P2P_RELAY,
   dayNightCycle: true,
   dayNightCycleSeconds: DEFAULT_DAY_NIGHT_CYCLE_SECONDS,
+  cinematicIntro: true,
 };
 
 export interface StorageLike {
@@ -76,6 +79,10 @@ export function sanitizeSettings(raw: unknown): GameSettings {
         ? record.dayNightCycle
         : DEFAULT_SETTINGS.dayNightCycle,
     dayNightCycleSeconds: sanitizeCycleSeconds(record.dayNightCycleSeconds),
+    cinematicIntro:
+      typeof record.cinematicIntro === 'boolean'
+        ? record.cinematicIntro
+        : DEFAULT_SETTINGS.cinematicIntro,
   };
 }
 
