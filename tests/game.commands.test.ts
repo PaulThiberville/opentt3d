@@ -4,8 +4,7 @@ import { MockEngine } from '../src/engine/MockEngine';
 import { TILE_KIND_INDEX, type EngineCommand, type MapSnapshot } from '../src/engine/protocol';
 import { planBuild } from '../src/game/buildRules';
 import { tileIndex } from '../src/game/mapGrid';
-import { DEPOT_TRACK_BIT, buyVehicleCommand, orderVehicleCommand } from '../src/game/vehicleRules';
-
+import { buyVehicleCommand, orderVehicleCommand } from '../src/game/vehicleRules';
 async function setup(sink?: (command: EngineCommand) => void): Promise<{
   game: Game;
   engine: MockEngine;
@@ -84,18 +83,7 @@ describe('Game.issueCommand', () => {
   });
 
   it('achemine une commande véhicule par le sink réseau', () => {
-    const map = game.getLatestSnapshot()?.map;
-    if (!map) throw new Error('carte attendue');
-    let depot: { x: number; y: number } | null = null;
-    for (let y = 0; y < map.height && !depot; y += 1) {
-      for (let x = 0; x < map.width; x += 1) {
-        const index = tileIndex(x, y, map.width);
-        if (((map.trackBits[index] ?? 0) & DEPOT_TRACK_BIT) !== 0) {
-          depot = { x, y };
-          break;
-        }
-      }
-    }
+    const depot = game.getLatestSnapshot()?.depots.find((item) => item.company === 0);
     if (!depot) throw new Error('dépôt de démonstration attendu');
     const received: EngineCommand[] = [];
     const networked = new Game({
@@ -104,14 +92,14 @@ describe('Game.issueCommand', () => {
       commandSink: (command) => received.push(command),
     });
     const before = engine.hash();
-    networked.issueCommand(buyVehicleCommand(0, depot, 'bus_city'));
+    networked.issueCommand(buyVehicleCommand(0, depot.id, 'bus_city'));
     networked.issueCommand(orderVehicleCommand(0, 4, [{ target: 0, kind: 'station' }]));
     expect(received).toEqual([
       {
         type: 'vehicle',
         action: 'buy',
         company: 0,
-        depot,
+        depotId: depot.id,
         model: 'bus_city',
       },
       {

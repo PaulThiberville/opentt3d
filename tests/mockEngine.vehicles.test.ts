@@ -1,13 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MockEngine } from '../src/engine/MockEngine';
-import { TILE_KIND_INDEX, type MapSnapshot } from '../src/engine/protocol';
-import {
-  DEPOT_TRACK_BIT,
-  depotKindAt,
-  depotOrder,
-  depotOrderTarget,
-  stationOrder,
-} from '../src/game/vehicleRules';
+import { TILE_KIND_INDEX, type DepotSnapshot, type MapSnapshot } from '../src/engine/protocol';
+import { depotOrder, stationOrder } from '../src/game/vehicleRules';
 import { tileIndex } from '../src/game/mapGrid';
 
 async function createEngine(seed = 2024, size = 128): Promise<MockEngine> {
@@ -23,18 +17,12 @@ function mapOf(engine: MockEngine): MapSnapshot {
   return map;
 }
 
-function findDepot(map: MapSnapshot, kind: 'road' | 'rail', owner = 0): { x: number; y: number } {
-  const expected = kind === 'rail' ? TILE_KIND_INDEX.rail : TILE_KIND_INDEX.road;
-  for (let y = 0; y < map.height; y += 1) {
-    for (let x = 0; x < map.width; x += 1) {
-      const index = tileIndex(x, y, map.width);
-      if (((map.trackBits[index] ?? 0) & DEPOT_TRACK_BIT) === 0) continue;
-      if (map.kind[index] !== expected) continue;
-      if (map.owner[index] !== owner) continue;
-      return { x, y };
-    }
-  }
-  throw new Error(`aucun dépôt ${kind} de l’entreprise ${owner}`);
+function findDepot(engine: MockEngine, kind: 'road' | 'rail', owner = 0): DepotSnapshot {
+  const depot = engine
+    .snapshot()
+    .depots.find((item) => item.kind === kind && item.company === owner);
+  if (!depot) throw new Error(`aucun dépôt ${kind} de l’entreprise ${owner}`);
+  return depot;
 }
 
 function findGrass(map: MapSnapshot): { x: number; y: number } {
@@ -55,11 +43,33 @@ function run(engine: MockEngine, ticks: number): void {
   }
 }
 
-describe('MockEngine : achat et vente de véhicules', () => {
-  it('achète un bus dans un dépôt routier et débite le prix catalogue', async () => {
+describe('MockEngine : dépôts exposés', () => {
+  it('publie les dépôts de démonstration avec des ids stables', async () => {
     const engine = await createEngine();
-    const map = mapOf(engine);
-    const depot = findDepot(map, 'road');
+    const first = engine.snapshot();
+    expect(first.depots.length).toBeGreaterThanOrEqual(2);
+    expect(first.depots.some((item) => item.kind === 'road')).toBe(true);
+    expect(first.depots.some((item) => item.kind === 'rail')).toBe(true);
+    for (const depot of first.depots) {
+      expect(depot.id).toBeGreaterThanOrEqual(0);
+      expect(Number.isInteger(depot.x)).toBe(true);
+      expect(Number.isInteger(depot.y)).toBe(true);
+      expect(depot.width).toBe(1);
+      expect(depot.height).toBe(1);
+      expect(depot.direction).toBeGreaterThanOrEqual(0);
+      expect(depot.direction).toBeLessThanOrEqual(3);
+    }
+    // Les ids ne changent pas entre deux snapshots sans construction.
+    expect(engine.snapshot().depots.map((item) => item.id)).toEqual(
+      first.depots.map((item) => item.id),
+    );
+  });
+});
+
+describe('MockEngine : achat et vente de véhicules', () => {
+  it('achète un bus par depotId et débite le prix catalogue', async () => {
+    const engine = await createEngine();
+    const depot = findDepot(engine, 'road');
     const before = engine.snapshot();
     const moneyBefore = before.companies[0]?.money ?? 0;
     const hashBefore = engine.hash();
@@ -68,7 +78,7 @@ describe('MockEngine : achat et vente de véhicules', () => {
       type: 'vehicle',
       action: 'buy',
       company: 0,
-      depot,
+      depotId: depot.id,
       model: 'bus_city',
     });
     const after = engine.snapshot();
@@ -85,11 +95,30 @@ describe('MockEngine : achat et vente de véhicules', () => {
     expect(after.news.some((item) => item.text.includes('Bus urbain acheté'))).toBe(true);
   });
 
-  it('refuse mauvais dépôt, tuile non-dépôt, modèle inconnu et fonds insuffisants', async () => {
+  it('accepte encore la tuile depot {x,y} pour compatibilité', async () => {
+    const engine = await createEngine(99);
+    const depot = findDepot(engine, 'road');
+    engine.send({
+      type: 'vehicle',
+      action: 'buy',
+      company: 0,
+      depot: { x: depot.x, y: depot.y },
+      model: 'bus_city',
+    });
+    expect(
+      engine
+        .snapshot()
+        .vehicles.some(
+          (item) => item.company === 0 && item.status === 3 && item.cargo?.type === 'passengers',
+        ),
+    ).toBe(true);
+  });
+
+  it('refuse mauvais dépôt, tuile non-dépôt, depotId inconnu, modèle inconnu et fonds insuffisants', async () => {
     const engine = await createEngine(77);
     const map = mapOf(engine);
-    const roadDepot = findDepot(map, 'road');
-    const railDepot = findDepot(map, 'rail');
+    const roadDepot = findDepot(engine, 'road');
+    const railDepot = findDepot(engine, 'rail');
     const grass = findGrass(map);
     const moneyBefore = engine.snapshot().companies[0]?.money ?? 0;
     const vehiclesBefore = engine.snapshot().vehicles.length;
@@ -98,7 +127,7 @@ describe('MockEngine : achat et vente de véhicules', () => {
       type: 'vehicle',
       action: 'buy',
       company: 0,
-      depot: railDepot,
+      depotId: railDepot.id,
       model: 'bus_city',
     });
     expect(
@@ -114,35 +143,21 @@ describe('MockEngine : achat et vente de véhicules', () => {
       type: 'vehicle',
       action: 'buy',
       company: 0,
-      depot: roadDepot,
+      depotId: 99_999,
+      model: 'bus_city',
+    });
+    expect(engine.snapshot().news.some((item) => item.text.includes('inexistant'))).toBe(true);
+
+    engine.send({
+      type: 'vehicle',
+      action: 'buy',
+      company: 0,
+      depotId: roadDepot.id,
       model: 'modele_inconnu',
     });
     expect(engine.snapshot().news.some((item) => item.text.includes('inconnu au catalogue'))).toBe(
       true,
     );
-
-    // Un dépôt appartenant à l'IA refuse l'achat.
-    const aiDepot = (() => {
-      for (let y = 0; y < map.height; y += 1) {
-        for (let x = 0; x < map.width; x += 1) {
-          if (depotKindAt(map, x, y) === null) continue;
-          if (map.owner[tileIndex(x, y, map.width)] === 1) return { x, y };
-        }
-      }
-      return null;
-    })();
-    if (aiDepot) {
-      engine.send({
-        type: 'vehicle',
-        action: 'buy',
-        company: 0,
-        depot: aiDepot,
-        model: 'bus_city',
-      });
-      expect(engine.snapshot().news.some((item) => item.text.includes('autre entreprise'))).toBe(
-        true,
-      );
-    }
 
     const after = engine.snapshot();
     expect(after.companies[0]?.money).toBe(moneyBefore);
@@ -151,9 +166,14 @@ describe('MockEngine : achat et vente de véhicules', () => {
 
   it('vend un véhicule avec reprise et met à jour le compteur', async () => {
     const engine = await createEngine(808);
-    const map = mapOf(engine);
-    const depot = findDepot(map, 'road');
-    engine.send({ type: 'vehicle', action: 'buy', company: 0, depot, model: 'truck_flatbed' });
+    const depot = findDepot(engine, 'road');
+    engine.send({
+      type: 'vehicle',
+      action: 'buy',
+      company: 0,
+      depotId: depot.id,
+      model: 'truck_flatbed',
+    });
     const bought = engine
       .snapshot()
       .vehicles.find((item) => item.company === 0 && item.status === 3);
@@ -173,14 +193,19 @@ describe('MockEngine : achat et vente de véhicules', () => {
 describe('MockEngine : tournées et revenus', () => {
   it('démarre un camion, parcourt sa tournée et génère du revenu', async () => {
     const engine = await createEngine(4242);
-    const map = mapOf(engine);
-    const depot = findDepot(map, 'road');
+    const depot = findDepot(engine, 'road');
     const station = engine
       .snapshot()
       .stations.find((item) => item.company === 0 && item.kind === 'road');
     if (!station) throw new Error('arrêt routier attendu');
 
-    engine.send({ type: 'vehicle', action: 'buy', company: 0, depot, model: 'truck_flatbed' });
+    engine.send({
+      type: 'vehicle',
+      action: 'buy',
+      company: 0,
+      depotId: depot.id,
+      model: 'truck_flatbed',
+    });
     const bought = engine
       .snapshot()
       .vehicles.find((item) => item.company === 0 && item.status === 3);
@@ -191,14 +216,12 @@ describe('MockEngine : tournées et revenus', () => {
       action: 'order',
       company: 0,
       vehicle: bought.id,
-      orders: [stationOrder(station), depotOrder(depot.x, depot.y, map.width)],
+      orders: [stationOrder(station), depotOrder(depot)],
     });
     const orderedSnapshot = engine.snapshot();
     const ordered = orderedSnapshot.vehicles.find((item) => item.id === bought.id);
-    expect(ordered?.orderTargets).toEqual([
-      station.id,
-      depotOrderTarget(depot.x, depot.y, map.width),
-    ]);
+    expect(ordered?.orderTargets).toEqual([station.id, depot.id]);
+    expect(ordered?.orderKinds).toEqual(['station', 'depot']);
     expect(orderedSnapshot.news.some((item) => item.text.includes('Tournée du véhicule'))).toBe(
       true,
     );
@@ -218,9 +241,14 @@ describe('MockEngine : tournées et revenus', () => {
 
   it('refuse un ordre inconnu et un départ sans tournée', async () => {
     const engine = await createEngine(303);
-    const map = mapOf(engine);
-    const depot = findDepot(map, 'road');
-    engine.send({ type: 'vehicle', action: 'buy', company: 0, depot, model: 'bus_city' });
+    const depot = findDepot(engine, 'road');
+    engine.send({
+      type: 'vehicle',
+      action: 'buy',
+      company: 0,
+      depotId: depot.id,
+      model: 'bus_city',
+    });
     const bought = engine
       .snapshot()
       .vehicles.find((item) => item.company === 0 && item.status === 3);
@@ -231,7 +259,7 @@ describe('MockEngine : tournées et revenus', () => {
       action: 'order',
       company: 0,
       vehicle: bought.id,
-      orders: [{ target: 99_999, kind: 'station' }],
+      orders: [{ target: 99_999, kind: 'depot' }],
     });
     let after = engine.snapshot();
     expect(after.news.some((item) => item.kind === 'error')).toBe(true);
@@ -245,13 +273,18 @@ describe('MockEngine : tournées et revenus', () => {
 
   it('arrête un véhicule : sa position ne bouge plus', async () => {
     const engine = await createEngine(505);
-    const map = mapOf(engine);
-    const depot = findDepot(map, 'road');
+    const depot = findDepot(engine, 'road');
     const station = engine
       .snapshot()
       .stations.find((item) => item.company === 0 && item.kind === 'road');
     if (!station) throw new Error('arrêt routier attendu');
-    engine.send({ type: 'vehicle', action: 'buy', company: 0, depot, model: 'bus_city' });
+    engine.send({
+      type: 'vehicle',
+      action: 'buy',
+      company: 0,
+      depotId: depot.id,
+      model: 'bus_city',
+    });
     const bought = engine
       .snapshot()
       .vehicles.find((item) => item.company === 0 && item.status === 3);
@@ -280,13 +313,18 @@ describe('MockEngine : déterminisme des commandes véhicules', () => {
   it('produit le même hash pour la même suite achat + ordres + démarrage', async () => {
     const scenario = async (): Promise<string> => {
       const engine = await createEngine(606);
-      const map = mapOf(engine);
-      const depot = findDepot(map, 'road');
+      const depot = findDepot(engine, 'road');
       const station = engine
         .snapshot()
         .stations.find((item) => item.company === 0 && item.kind === 'road');
       if (!station) throw new Error('arrêt routier attendu');
-      engine.send({ type: 'vehicle', action: 'buy', company: 0, depot, model: 'bus_city' });
+      engine.send({
+        type: 'vehicle',
+        action: 'buy',
+        company: 0,
+        depotId: depot.id,
+        model: 'bus_city',
+      });
       const bought = engine
         .snapshot()
         .vehicles.find((item) => item.company === 0 && item.status === 3);
@@ -296,7 +334,7 @@ describe('MockEngine : déterminisme des commandes véhicules', () => {
         action: 'order',
         company: 0,
         vehicle: bought.id,
-        orders: [stationOrder(station), depotOrder(depot.x, depot.y, map.width)],
+        orders: [stationOrder(station), depotOrder(depot)],
       });
       engine.send({ type: 'vehicle', action: 'start', company: 0, vehicle: bought.id });
       run(engine, 960);

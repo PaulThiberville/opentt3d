@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest';
 import type { EmscriptenModuleFactory, EmscriptenModuleOptions } from '../src/engine/loadEngine';
 import { WasmEngine } from '../src/engine/WasmEngine';
 import { PROTOCOL_VERSION, TILE_FLAG, TILE_KIND_INDEX } from '../src/engine/protocol';
+import type { MapSnapshot } from '../src/engine/protocol';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_DIR = path.join(ROOT, 'public', 'engine');
@@ -63,6 +64,36 @@ function setupWindowShim(): void {
     encodeURIComponent,
     location: { pathname: '/' },
   };
+}
+
+/** Zone rectangulaire d'herbe plate, sans eau, pour bâtir route + dépôt. */
+function findFlatArea(
+  map: MapSnapshot,
+  width: number,
+  height: number,
+): { x: number; y: number } | null {
+  for (let y = 1; y + height < map.height; y += 1) {
+    for (let x = 1; x + width < map.width; x += 1) {
+      const base = map.heightMap[y * map.width + x];
+      let ok = true;
+      for (let dy = 0; dy < height && ok; dy += 1) {
+        for (let dx = 0; dx < width; dx += 1) {
+          const index = (y + dy) * map.width + x + dx;
+          if (
+            map.kind[index] !== TILE_KIND_INDEX.grass ||
+            map.slope[index] !== 0 ||
+            ((map.flags[index] ?? 0) & TILE_FLAG.WATER) !== 0 ||
+            map.heightMap[index] !== base
+          ) {
+            ok = false;
+            break;
+          }
+        }
+      }
+      if (ok) return { x, y };
+    }
+  }
+  return null;
 }
 
 suite('intégration moteur WASM réel', () => {
@@ -137,6 +168,87 @@ suite('intégration moteur WASM réel', () => {
       const kinds = [0, 1, 2].map((dx) => after.map?.kind[start.y * map.width + start.x + dx]);
       expect(kinds).toEqual([TILE_KIND_INDEX.road, TILE_KIND_INDEX.road, TILE_KIND_INDEX.road]);
       expect(after.news.some((item) => /Route/i.test(item.text))).toBe(true);
+    } finally {
+      engine.dispose();
+    }
+  }, 120_000);
+
+  it('expose les dépôts réels et achète un bus par depotId', async () => {
+    const engine = new WasmEngine({ factory: await createNodeFactory() });
+    try {
+      await engine.init({ moduleUrl: pathToFileURL(MODULE_PATH).href });
+      await engine.newGame({ seed: 42, width: 128, height: 128 });
+      const first = engine.snapshot();
+      expect(Array.isArray(first.depots)).toBe(true);
+      expect(first.depots).toHaveLength(0);
+
+      const map = first.map;
+      if (!map) throw new Error('carte absente');
+      const site = findFlatArea(map, 8, 4);
+      if (!site) throw new Error('aucune zone plate 8×4 trouvée');
+      const company = first.companies.find((item) => item.isLocal)?.id ?? 0;
+
+      const roadFrom = { x: site.x + 1, y: site.y };
+      engine.send({
+        type: 'build',
+        tool: 'road',
+        company,
+        from: roadFrom,
+        to: { x: roadFrom.x + 3, y: roadFrom.y },
+        options: { axis: 'x' },
+      });
+      const depotTile = { x: roadFrom.x, y: roadFrom.y + 1 };
+      engine.send({
+        type: 'build',
+        tool: 'depot',
+        company,
+        from: depotTile,
+        options: { kind: 'road' },
+      });
+
+      const built = engine.snapshot();
+      expect(built.news.some((item) => /Dépôt routier/i.test(item.text))).toBe(true);
+      expect(built.depots.length).toBe(1);
+      const depot = built.depots[0];
+      if (!depot) throw new Error('dépôt attendu dans le snapshot');
+      expect(depot.kind).toBe('road');
+      expect(depot.company).toBe(company);
+      expect(depot.x).toBe(depotTile.x);
+      expect(depot.y).toBe(depotTile.y);
+      expect(depot.direction).toBeGreaterThanOrEqual(0);
+      expect(depot.direction).toBeLessThanOrEqual(3);
+
+      engine.send({
+        type: 'vehicle',
+        action: 'buy',
+        company,
+        depotId: depot.id,
+        model: 'bus',
+      });
+      const bought = engine.snapshot();
+      expect(bought.news.some((item) => /Véhicule acheté/i.test(item.text))).toBe(true);
+      const bus = bought.vehicles.find((item) => item.kind === 'road');
+      if (!bus) throw new Error('bus acheté attendu dans le snapshot');
+
+      engine.send({
+        type: 'vehicle',
+        action: 'order',
+        company,
+        vehicle: bus.id,
+        orders: [{ target: depot.id, kind: 'depot' }],
+      });
+      const ordered = engine.snapshot();
+      expect(ordered.news.some((item) => /ordre\(s\) ajouté\(s\)/i.test(item.text))).toBe(true);
+
+      engine.send({
+        type: 'vehicle',
+        action: 'buy',
+        company,
+        depotId: 60_000,
+        model: 'bus',
+      });
+      const unknown = engine.snapshot();
+      expect(unknown.news.some((item) => /Dépôt 60000 inexistant/i.test(item.text))).toBe(true);
     } finally {
       engine.dispose();
     }
