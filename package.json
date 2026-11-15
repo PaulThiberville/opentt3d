@@ -25,6 +25,8 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "perf": "node scripts/perf.mjs",
+    "perf:quick": "node scripts/perf.mjs --sizes=128 --qualities=medium --engine=mock --duration=4 --soak=0",
     "engine:fetch": "bash engine/scripts/fetch.sh",
     "engine:build": "bash engine/scripts/build.sh",
     "engine:test": "node engine/scripts/smoke.mjs",
