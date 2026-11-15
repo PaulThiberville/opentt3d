@@ -65,6 +65,7 @@ export class VegetationLayer {
   private windUniform: WindUniform | null = null;
   private elapsed = 0;
   private windEnabled = true;
+  private reducedMotion = false;
   private map: MapSnapshot | null = null;
   private density = 0.8;
   private treeCount = 0;
@@ -268,8 +269,27 @@ export class VegetationLayer {
     return this.nearChunkCount * 2 + this.farChunkCount;
   }
 
+  /**
+   * Fige le balancement (accessibilité). Le shader conserve sa phase courante
+   * au lieu de repartir de zéro : aucun saut visuel au changement de réglage.
+   */
+  setReducedMotion(enabled: boolean): void {
+    this.reducedMotion = enabled;
+    if (!enabled) return;
+    if (this.windUniform) this.windUniform.value = this.elapsed;
+  }
+
+  get isReducedMotion(): boolean {
+    return this.reducedMotion;
+  }
+
+  /** Temps de vent accumulé (diagnostic/tests). */
+  get windElapsed(): number {
+    return this.elapsed;
+  }
+
   update(deltaSeconds: number, cameraPosition?: THREE.Vector3 | null): void {
-    if (this.windEnabled) {
+    if (this.windEnabled && !this.reducedMotion) {
       this.elapsed += deltaSeconds;
       if (this.windUniform) this.windUniform.value = this.elapsed;
     }
