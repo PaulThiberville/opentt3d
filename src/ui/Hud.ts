@@ -17,6 +17,7 @@ import { NewsQueue, type NewsKind } from './news';
 import type { CameraView, HudState, SelectionSummary } from './types';
 import { BuildHint } from './hud/BuildHint';
 import { BuildOptions } from './hud/BuildOptions';
+import { DepotPanel } from './hud/DepotPanel';
 import { HelpPanel } from './hud/HelpPanel';
 import { Minimap } from './hud/Minimap';
 import { NewsFeed } from './hud/NewsFeed';
@@ -24,6 +25,7 @@ import { SelectionPanel } from './hud/SelectionPanel';
 import { Toasts } from './hud/Toasts';
 import { Toolbar, type BuildToolId } from './hud/Toolbar';
 import { TopBar } from './hud/TopBar';
+import { VehiclePanel } from './hud/VehiclePanel';
 
 export interface HudCallbacks {
   onTogglePause: () => void;
@@ -36,6 +38,18 @@ export interface HudCallbacks {
   onBuildToolChange: (tool: BuildToolId) => void;
   onBuildSettingsChange: (settings: BuildSettings) => void;
   onBuildRotate: () => void;
+  /** Panneau dépôt : achat, sélection, démarrage et vente. */
+  onBuyVehicle: (modelId: string) => void;
+  onSelectVehicle: (vehicleId: number) => void;
+  onStartVehicle: (vehicleId: number) => void;
+  onStopVehicle: (vehicleId: number) => void;
+  onSellVehicle: (vehicleId: number) => void;
+  onCloseDepot: () => void;
+  /** Éditeur de tournée du panneau véhicule. */
+  onAddOrder: (vehicleId: number) => void;
+  onRemoveOrder: (vehicleId: number, index: number) => void;
+  onMoveOrder: (vehicleId: number, index: number, delta: -1 | 1) => void;
+  onCloseVehicle: () => void;
 }
 
 export interface HudNewsInput {
@@ -54,6 +68,8 @@ export class Hud {
   private callbacks: HudCallbacks;
   private topBar: TopBar;
   private selectionPanel: SelectionPanel;
+  private depotPanel: DepotPanel;
+  private vehiclePanel: VehiclePanel;
   private minimap: Minimap;
   private newsFeed: NewsFeed;
   private toolbar: Toolbar;
@@ -82,6 +98,24 @@ export class Hud {
 
     this.selectionPanel = new SelectionPanel({
       onClear: () => this.callbacks.onClearSelection(),
+    });
+
+    this.depotPanel = new DepotPanel({
+      onBuy: (modelId) => this.callbacks.onBuyVehicle(modelId),
+      onSelectVehicle: (vehicleId) => this.callbacks.onSelectVehicle(vehicleId),
+      onStartVehicle: (vehicleId) => this.callbacks.onStartVehicle(vehicleId),
+      onSellVehicle: (vehicleId) => this.callbacks.onSellVehicle(vehicleId),
+      onClose: () => this.callbacks.onCloseDepot(),
+    });
+
+    this.vehiclePanel = new VehiclePanel({
+      onClear: () => this.callbacks.onCloseVehicle(),
+      onStart: (vehicleId) => this.callbacks.onStartVehicle(vehicleId),
+      onStop: (vehicleId) => this.callbacks.onStopVehicle(vehicleId),
+      onSell: (vehicleId) => this.callbacks.onSellVehicle(vehicleId),
+      onAddOrder: (vehicleId) => this.callbacks.onAddOrder(vehicleId),
+      onRemoveOrder: (vehicleId, index) => this.callbacks.onRemoveOrder(vehicleId, index),
+      onMoveOrder: (vehicleId, index, delta) => this.callbacks.onMoveOrder(vehicleId, index, delta),
     });
 
     this.minimap = new Minimap({
@@ -136,6 +170,8 @@ export class Hud {
     this.root.append(
       this.topBar.element,
       this.selectionPanel.element,
+      this.depotPanel.element,
+      this.vehiclePanel.element,
       this.minimap.element,
       this.newsFeed.element,
       this.toolbar.element,
@@ -154,7 +190,17 @@ export class Hud {
   update(state: HudState): void {
     this.topBar.update(state);
     this.updateNetworkStatus(state);
-    this.selectionPanel.update(state.selection, state.following);
+    // Le panneau véhicule est prioritaire sur le dépôt, lui-même prioritaire
+    // sur le panneau de sélection générique.
+    const vehicle = state.vehicle ?? null;
+    const depot = vehicle ? null : (state.depot ?? null);
+    this.depotPanel.update(depot);
+    this.vehiclePanel.update(vehicle);
+    const panelsOpen = vehicle !== null || depot !== null;
+    this.selectionPanel.update(
+      panelsOpen ? null : state.selection,
+      panelsOpen ? false : state.following,
+    );
     this.minimap.setSnapshot(state.snapshot);
     this.minimap.setSelection(state.selection?.selection ?? null);
     this.refreshNewsBadge();
