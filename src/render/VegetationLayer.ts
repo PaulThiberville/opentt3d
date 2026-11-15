@@ -45,7 +45,10 @@ export class VegetationLayer {
       shader.uniforms.uTime = this.windUniform ?? { value: 0 };
       this.windUniform = shader.uniforms.uTime as WindUniform;
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nuniform float uTime;\nattribute float aPhase;')
+        .replace(
+          '#include <common>',
+          '#include <common>\nuniform float uTime;\nattribute float aPhase;',
+        )
         .replace(
           '#include <begin_vertex>',
           `vec3 transformed = vec3( position );
@@ -80,8 +83,15 @@ export class VegetationLayer {
     }
 
     const capacity = Math.min(settings.maxTrees, candidates.length);
-    const kept: { x: number; z: number; ground: number; scale: number; rotation: number; phase: number; tint: number }[] =
-      [];
+    const kept: {
+      x: number;
+      z: number;
+      ground: number;
+      scale: number;
+      rotation: number;
+      phase: number;
+      tint: number;
+    }[] = [];
     for (const index of candidates) {
       if (kept.length >= capacity) break;
       const x = index % map.width;

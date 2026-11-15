@@ -45,7 +45,11 @@ export function clampDistance(distance: number): number {
 }
 
 /** Borne la cible à l'intérieur de la carte (mutation en place). */
-export function clampTarget(target: THREE.Vector3, bounds: MapBounds, margin = TARGET_MARGIN): THREE.Vector3 {
+export function clampTarget(
+  target: THREE.Vector3,
+  bounds: MapBounds,
+  margin = TARGET_MARGIN,
+): THREE.Vector3 {
   const minX = Math.min(bounds.minX + margin, bounds.maxX - margin);
   const minZ = Math.min(bounds.minZ + margin, bounds.maxZ - margin);
   const maxX = Math.max(bounds.minX + margin, bounds.maxX - margin);
@@ -56,7 +60,12 @@ export function clampTarget(target: THREE.Vector3, bounds: MapBounds, margin = T
 }
 
 /** Décalage de la caméra par rapport à la cible. */
-export function cameraOffset(yaw: number, pitch: number, distance: number, out = new THREE.Vector3()): THREE.Vector3 {
+export function cameraOffset(
+  yaw: number,
+  pitch: number,
+  distance: number,
+  out = new THREE.Vector3(),
+): THREE.Vector3 {
   const horizontal = Math.cos(pitch) * distance;
   out.set(Math.sin(yaw) * horizontal, Math.sin(pitch) * distance, Math.cos(yaw) * horizontal);
   return out;
@@ -67,7 +76,12 @@ export function computeCameraPosition(pose: CameraPose, out = new THREE.Vector3(
 }
 
 /** Repère de déplacement au sol pour le pan. */
-export function panBasis(yaw: number): { forwardX: number; forwardZ: number; rightX: number; rightZ: number } {
+export function panBasis(yaw: number): {
+  forwardX: number;
+  forwardZ: number;
+  rightX: number;
+  rightZ: number;
+} {
   return {
     forwardX: -Math.sin(yaw),
     forwardZ: -Math.cos(yaw),
@@ -92,7 +106,11 @@ export function enforceAboveGround(
 }
 
 /** Coordonnées écran → NDC ([-1, 1]). */
-export function screenToNdc(clientX: number, clientY: number, rect: { left: number; top: number; width: number; height: number }): {
+export function screenToNdc(
+  clientX: number,
+  clientY: number,
+  rect: { left: number; top: number; width: number; height: number },
+): {
   x: number;
   y: number;
 } {

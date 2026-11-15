@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { VehicleSnapshot } from '../src/engine/protocol';
-import { VehicleInterpolator, modelKindFor, type RenderVehicle } from '../src/game/vehicleInterpolation';
+import {
+  VehicleInterpolator,
+  modelKindFor,
+  type RenderVehicle,
+} from '../src/game/vehicleInterpolation';
 import { lerpAngle, lerpDirection, normalizeAngle, smoothstep01 } from '../src/game/interpolation';
 
 function vehicle(overrides: Partial<VehicleSnapshot> & { id: number }): VehicleSnapshot {
@@ -121,12 +125,16 @@ describe('interpolation des véhicules', () => {
     expect(modelKindFor(vehicle({ id: 1, kind: 'train' }))).toBe('train');
     expect(modelKindFor(vehicle({ id: 2, kind: 'ship' }))).toBe('ship');
     expect(modelKindFor(vehicle({ id: 3, kind: 'aircraft' }))).toBe('plane');
-    expect(modelKindFor(vehicle({ id: 4, kind: 'road', cargo: { type: 'passengers', amount: 0, capacity: 1 } }))).toBe(
-      'bus',
-    );
-    expect(modelKindFor(vehicle({ id: 5, kind: 'road', cargo: { type: 'coal', amount: 0, capacity: 1 } }))).toBe(
-      'truck',
-    );
+    expect(
+      modelKindFor(
+        vehicle({ id: 4, kind: 'road', cargo: { type: 'passengers', amount: 0, capacity: 1 } }),
+      ),
+    ).toBe('bus');
+    expect(
+      modelKindFor(
+        vehicle({ id: 5, kind: 'road', cargo: { type: 'coal', amount: 0, capacity: 1 } }),
+      ),
+    ).toBe('truck');
   });
 
   it('interpole la direction avec rebouclage', () => {

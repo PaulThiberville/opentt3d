@@ -44,7 +44,11 @@ export class Picking {
     this.outlinePositions = new Float32Array(4 * 3);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(this.outlinePositions, 3));
-    this.tileOutlineMaterial = new THREE.LineBasicMaterial({ color: 0x9fe8ff, transparent: true, opacity: 0.9 });
+    this.tileOutlineMaterial = new THREE.LineBasicMaterial({
+      color: 0x9fe8ff,
+      transparent: true,
+      opacity: 0.9,
+    });
     this.tileOutline = new THREE.LineLoop(geometry, this.tileOutlineMaterial);
     this.tileOutline.visible = false;
     this.tileOutline.renderOrder = 12;

@@ -12,8 +12,6 @@ import type { VehicleModelKind, RenderVehicle } from '../game/vehicleInterpolati
 import { companyColour, hexToRgb } from './tileVisuals';
 import { buildVehicleGeometries, disposeVehicleGeometries } from './vehicleModels';
 
-const MODEL_KINDS: readonly VehicleModelKind[] = ['train', 'truck', 'bus', 'ship', 'plane'];
-
 /** Direction OpenTTD 0..255 → lacet Three.js (modèle orienté +X). */
 export function directionToYaw(direction: number): number {
   const theta = ((direction & 255) / 256) * Math.PI * 2;

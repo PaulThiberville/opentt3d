@@ -6,7 +6,7 @@
  * snapshots et l'état d'interpolation, et relaie les sélections vers `Game`.
  */
 
-import * as THREE from 'three';
+import type * as THREE from 'three';
 import type { MapSnapshot, WorldSnapshot } from '../engine/protocol';
 import { VehicleInterpolator, type RenderVehicle } from '../game/vehicleInterpolation';
 import type { InterpolationState } from '../game/Game';
@@ -253,7 +253,9 @@ export class WorldView {
   }
 
   getDrawCalls(): number {
-    return this.vehicles.drawCallCount + this.cityLayer.drawCallCount + this.vegetation.drawCallCount;
+    return (
+      this.vehicles.drawCallCount + this.cityLayer.drawCallCount + this.vegetation.drawCallCount
+    );
   }
 
   getScene(): THREE.Scene {

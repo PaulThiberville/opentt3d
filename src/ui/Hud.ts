@@ -176,7 +176,11 @@ export class Hud {
     this.selectionDot = el('span', 'hud-selection-dot');
     const selectionText = el('div', 'hud-selection-text');
     this.selectionTitle = el('div', 'hud-selection-title', 'Aucune sélection');
-    this.selectionDetail = el('div', 'hud-selection-detail', 'Cliquez sur un véhicule, une ville ou une tuile.');
+    this.selectionDetail = el(
+      'div',
+      'hud-selection-detail',
+      'Cliquez sur un véhicule, une ville ou une tuile.',
+    );
     selectionText.append(this.selectionTitle, this.selectionDetail);
     this.selectionCard.append(this.selectionDot, selectionText);
 
@@ -228,7 +232,14 @@ export class Hud {
     this.errorOverlay.hidden = true;
     this.helpPanel.hidden = true;
 
-    this.root.append(bar, this.selectionCard, this.toasts, this.helpPanel, this.loadingOverlay, this.errorOverlay);
+    this.root.append(
+      bar,
+      this.selectionCard,
+      this.toasts,
+      this.helpPanel,
+      this.loadingOverlay,
+      this.errorOverlay,
+    );
     mount.append(this.root);
 
     this.root.addEventListener('keydown', (event) => {

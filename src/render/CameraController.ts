@@ -102,9 +102,16 @@ export class CameraController {
     this.onDoubleClick = options.onDoubleClick;
     const centerX = (options.bounds.minX + options.bounds.maxX) / 2;
     const centerZ = (options.bounds.minZ + options.bounds.maxZ) / 2;
-    const span = Math.max(options.bounds.maxX - options.bounds.minX, options.bounds.maxZ - options.bounds.minZ);
+    const span = Math.max(
+      options.bounds.maxX - options.bounds.minX,
+      options.bounds.maxZ - options.bounds.minZ,
+    );
     this.pose = {
-      target: new THREE.Vector3(options.initialTarget?.x ?? centerX, 0, options.initialTarget?.z ?? centerZ),
+      target: new THREE.Vector3(
+        options.initialTarget?.x ?? centerX,
+        0,
+        options.initialTarget?.z ?? centerZ,
+      ),
       yaw: options.initialYaw ?? Math.PI * 0.25,
       pitch: clampPitch(options.initialPitch ?? 0.92),
       distance: clampDistance(options.initialDistance ?? Math.min(MAX_DISTANCE * 0.85, span * 1.1)),
@@ -182,7 +189,8 @@ export class CameraController {
     this.pose.target.z = z;
     clampTarget(this.pose.target, this.bounds);
     this.updateTargetHeight();
-    if (distance !== undefined) this.pose.distance = clamp(distance, this.minDistance, this.maxDistance);
+    if (distance !== undefined)
+      this.pose.distance = clamp(distance, this.minDistance, this.maxDistance);
   }
 
   /** Suit une cible mobile (véhicule). `null` revient en vue libre. */
@@ -249,11 +257,17 @@ export class CameraController {
     this.updateTargetHeight();
     this.pose.yaw = ((this.pose.yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
     this.pose.pitch = clampPitch(this.pose.pitch);
-    this.pose.distance = clamp(this.pose.distance, Math.max(this.minDistance, MIN_DISTANCE), this.maxDistance);
+    this.pose.distance = clamp(
+      this.pose.distance,
+      Math.max(this.minDistance, MIN_DISTANCE),
+      this.maxDistance,
+    );
     this.currentDistance = damp(this.currentDistance, this.pose.distance, 16, dt);
     this.currentDistance = clamp(this.currentDistance, this.minDistance, this.maxDistance);
 
-    cameraOffset(this.pose.yaw, this.pose.pitch, this.currentDistance, this.scratchPosition).add(this.pose.target);
+    cameraOffset(this.pose.yaw, this.pose.pitch, this.currentDistance, this.scratchPosition).add(
+      this.pose.target,
+    );
     enforceAboveGround(this.scratchPosition, this.heightAt, CAMERA_GROUND_CLEARANCE);
     this.camera.position.copy(this.scratchPosition);
     this.camera.lookAt(this.pose.target);
@@ -407,7 +421,11 @@ export class CameraController {
 
   private handleKeyDown = (event: KeyboardEvent): void => {
     const target = event.target as HTMLElement | null;
-    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+    if (
+      target &&
+      (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+    )
+      return;
     if (event.key === 'Home') {
       this.reset();
       return;

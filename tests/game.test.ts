@@ -116,10 +116,7 @@ describe('Game : accumulation et snapshots', () => {
     game.select({ kind: 'vehicle', id: 3 });
     game.select({ kind: 'vehicle', id: 3 });
     game.select(null);
-    expect(selections).toEqual([
-      { kind: 'vehicle', id: 3 },
-      null,
-    ]);
+    expect(selections).toEqual([{ kind: 'vehicle', id: 3 }, null]);
     expect(game.getSelection()).toBeNull();
   });
 

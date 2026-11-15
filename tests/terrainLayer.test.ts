@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { Mesh } from 'three';
 import type { MapSnapshot } from '../src/engine/protocol';
 import { TILE_KIND_INDEX } from '../src/engine/protocol';
 import { sampleHeightWorld } from '../src/game/mapGrid';
@@ -35,8 +36,8 @@ function makeMap(width: number, height: number, water = false): MapSnapshot {
 
 function vertexCount(layer: TerrainLayer): number {
   const terrain = layer.group.children.find((child) => child.name.startsWith('terrain-'));
-  if (!terrain || !(terrain as import('three').Mesh).geometry) return 0;
-  const geometry = (terrain as import('three').Mesh).geometry;
+  if (!terrain || !(terrain as Mesh).geometry) return 0;
+  const geometry = (terrain as Mesh).geometry;
   return geometry.getAttribute('position').count;
 }
 
@@ -98,14 +99,14 @@ describe('TerrainLayer', () => {
   it('partage exactement les sommets de bord entre chunks', () => {
     const layer = new TerrainLayer();
     layer.setMap(makeMap(64, 64));
-    const meshes = layer.group.children.filter(
-      (child): child is import('three').Mesh => child.name.startsWith('terrain-'),
+    const meshes = layer.group.children.filter((child): child is Mesh =>
+      child.name.startsWith('terrain-'),
     );
     const left = meshes.find((mesh) => mesh.name === 'terrain-0-0');
     const right = meshes.find((mesh) => mesh.name === 'terrain-1-0');
     if (!left || !right) throw new Error('chunks manquants');
 
-    const collectEdge = (mesh: import('three').Mesh): Map<string, number[]> => {
+    const collectEdge = (mesh: Mesh): Map<string, number[]> => {
       const positions = mesh.geometry.getAttribute('position');
       const edge = new Map<string, number[]>();
       for (let i = 0; i < positions.count; i += 1) {

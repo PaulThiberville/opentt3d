@@ -416,7 +416,8 @@ class WorldBuilder {
           if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
           const x = startX + dx;
           const y = startY + dy;
-          if (x < margin || y < margin || x >= this.width - margin || y >= this.height - margin) continue;
+          if (x < margin || y < margin || x >= this.width - margin || y >= this.height - margin)
+            continue;
           let ok = true;
           for (let oy = -margin; oy <= margin && ok; oy += 1) {
             for (let ox = -margin; ox <= margin; ox += 1) {
@@ -459,7 +460,12 @@ class WorldBuilder {
           const y = startY + dy;
           const value = this.kindAt(x, y);
           if (value !== K.coast && value !== K.grass && value !== K.trees) continue;
-          if (this.isWater(x + 1, y) || this.isWater(x - 1, y) || this.isWater(x, y + 1) || this.isWater(x, y - 1)) {
+          if (
+            this.isWater(x + 1, y) ||
+            this.isWater(x - 1, y) ||
+            this.isWater(x, y + 1) ||
+            this.isWater(x, y - 1)
+          ) {
             return { x, y };
           }
         }
@@ -505,7 +511,9 @@ class WorldBuilder {
     for (let y = 0; y < height; y += 1) {
       const seaEdge = width - 22 - Math.round(valueNoise(seaNoiseSeed, y * 0.06, 3.7) * 16);
       const riverX =
-        width * 0.44 + Math.sin(y * 0.055) * width * 0.07 + (valueNoise(seed + 0x71, y * 0.11, 0.5) - 0.5) * 5;
+        width * 0.44 +
+        Math.sin(y * 0.055) * width * 0.07 +
+        (valueNoise(seed + 0x71, y * 0.11, 0.5) - 0.5) * 5;
       const lakeX = width * 0.24;
       const lakeY = height * 0.7;
       const lakeRx = Math.max(6, width * 0.085);
@@ -517,7 +525,8 @@ class WorldBuilder {
         const isRiver = Math.abs(x - riverX) <= 1.1 && y < height * 0.94;
         const lakeNoise = (valueNoise(seed + 0x13, x * 0.09, y * 0.09) - 0.5) * 0.45;
         const inLake =
-          ((x - lakeX) * (x - lakeX)) / (lakeRx * lakeRx) + ((y - lakeY) * (y - lakeY)) / (lakeRy * lakeRy) <
+          ((x - lakeX) * (x - lakeX)) / (lakeRx * lakeRx) +
+            ((y - lakeY) * (y - lakeY)) / (lakeRy * lakeRy) <
           1 + lakeNoise;
 
         if (isSea || isRiver || inLake) {
@@ -559,7 +568,10 @@ class WorldBuilder {
         const level = this.heightMap[index] ?? 0;
         if (level === 0 || level > 3) continue;
         const nearWater =
-          this.isWater(x - 1, y) || this.isWater(x + 1, y) || this.isWater(x, y - 1) || this.isWater(x, y + 1);
+          this.isWater(x - 1, y) ||
+          this.isWater(x + 1, y) ||
+          this.isWater(x, y - 1) ||
+          this.isWater(x, y + 1);
         if (nearWater) this.kind[index] = K.coast;
       }
     }
@@ -612,8 +624,10 @@ class WorldBuilder {
     ];
     for (let i = 0; i < 3; i += 1) {
       const anchor = anchors[i] ?? { x: this.width / 2, y: this.height / 2 };
-      const spot =
-        this.findLand(anchor.x, anchor.y, 22, 5) ?? { x: Math.round(anchor.x), y: Math.round(anchor.y) };
+      const spot = this.findLand(anchor.x, anchor.y, 22, 5) ?? {
+        x: Math.round(anchor.x),
+        y: Math.round(anchor.y),
+      };
       const level = Math.max(2, this.heightMap[this.index(spot.x, spot.y)] ?? 3);
       this.flatten(spot.x, spot.y, 8, 8, level);
       const radius = 5;
@@ -653,7 +667,10 @@ class WorldBuilder {
       const definition = INDUSTRY_DEFINITIONS[i];
       const anchor = spots[i];
       if (!definition || !anchor) continue;
-      const spot = this.findLand(anchor.x, anchor.y, 24, 2) ?? { x: Math.round(anchor.x), y: Math.round(anchor.y) };
+      const spot = this.findLand(anchor.x, anchor.y, 24, 2) ?? {
+        x: Math.round(anchor.x),
+        y: Math.round(anchor.y),
+      };
       this.paintArea(spot, 3, 3, K.industry, COMPANY_NONE);
       this.industries.push({
         id: i,
@@ -740,7 +757,10 @@ class WorldBuilder {
   }
 
   /** Marque les segments dont le nœud de départ est la tuile d'une gare. */
-  private segmentsForStops(path: P2[], stops: { x: number; y: number; station: number }[]): number[] {
+  private segmentsForStops(
+    path: P2[],
+    stops: { x: number; y: number; station: number }[],
+  ): number[] {
     const ids = new Array<number>(path.length).fill(-1);
     for (let i = 0; i < path.length; i += 1) {
       const point = path[i];
@@ -760,19 +780,59 @@ class WorldBuilder {
     const townC = this.towns[2];
 
     const trainA = townA
-      ? this.addStation('train', { x: townA.x + 4, y: townA.y + 2 }, 0, `Gare de ${townA.name}`, 2, 3, K.station)
+      ? this.addStation(
+          'train',
+          { x: townA.x + 4, y: townA.y + 2 },
+          0,
+          `Gare de ${townA.name}`,
+          2,
+          3,
+          K.station,
+        )
       : null;
     const trainB = townB
-      ? this.addStation('train', { x: townB.x - 4, y: townB.y + 2 }, 1, `Gare de ${townB.name}`, 2, 3, K.station)
+      ? this.addStation(
+          'train',
+          { x: townB.x - 4, y: townB.y + 2 },
+          1,
+          `Gare de ${townB.name}`,
+          2,
+          3,
+          K.station,
+        )
       : null;
     const roadA = townB
-      ? this.addStation('road', { x: townB.x + 5, y: townB.y - 3 }, 0, `Arrêt de ${townB.name}`, 2, 2, K.station)
+      ? this.addStation(
+          'road',
+          { x: townB.x + 5, y: townB.y - 3 },
+          0,
+          `Arrêt de ${townB.name}`,
+          2,
+          2,
+          K.station,
+        )
       : null;
     const roadB = townC
-      ? this.addStation('road', { x: townC.x - 5, y: townC.y - 2 }, 1, `Arrêt de ${townC.name}`, 2, 2, K.station)
+      ? this.addStation(
+          'road',
+          { x: townC.x - 5, y: townC.y - 2 },
+          1,
+          `Arrêt de ${townC.name}`,
+          2,
+          2,
+          K.station,
+        )
       : null;
     const airport = townA
-      ? this.addStation('airport', { x: townA.x, y: townA.y - 5 }, 0, `Aéroport de ${townA.name}`, 3, 3, K.airport)
+      ? this.addStation(
+          'airport',
+          { x: townA.x, y: townA.y - 5 },
+          0,
+          `Aéroport de ${townA.name}`,
+          3,
+          3,
+          K.airport,
+        )
       : null;
 
     const coast =
@@ -804,8 +864,26 @@ class WorldBuilder {
         { x: Math.floor(trainA.x), y: Math.floor(trainA.y), station: trainA.id },
         { x: Math.floor(trainB.x), y: Math.floor(trainB.y), station: trainB.id },
       ]);
-      this.addVehiclesOnLoop(path, 0, 'train', 5, [22, 34], { type: 'passengers', capacity: 180 }, [trainA.id, trainB.id], stops);
-      this.addVehiclesOnLoop(path, 1, 'train', 5, [20, 32], { type: 'passengers', capacity: 180 }, [trainA.id, trainB.id], stops);
+      this.addVehiclesOnLoop(
+        path,
+        0,
+        'train',
+        5,
+        [22, 34],
+        { type: 'passengers', capacity: 180 },
+        [trainA.id, trainB.id],
+        stops,
+      );
+      this.addVehiclesOnLoop(
+        path,
+        1,
+        'train',
+        5,
+        [20, 32],
+        { type: 'passengers', capacity: 180 },
+        [trainA.id, trainB.id],
+        stops,
+      );
     }
 
     // Réseau routier voyageurs : arrêt A ↔ arrêt B.
@@ -817,29 +895,80 @@ class WorldBuilder {
         { x: Math.floor(roadA.x), y: Math.floor(roadA.y), station: roadA.id },
         { x: Math.floor(roadB.x), y: Math.floor(roadB.y), station: roadB.id },
       ]);
-      this.addVehiclesOnLoop(path, 0, 'road', 5, [12, 20], { type: 'passengers', capacity: 42 }, [roadA.id, roadB.id], stops);
-      this.addVehiclesOnLoop(path, 1, 'road', 5, [11, 19], { type: 'passengers', capacity: 40 }, [roadA.id, roadB.id], stops);
+      this.addVehiclesOnLoop(
+        path,
+        0,
+        'road',
+        5,
+        [12, 20],
+        { type: 'passengers', capacity: 42 },
+        [roadA.id, roadB.id],
+        stops,
+      );
+      this.addVehiclesOnLoop(
+        path,
+        1,
+        'road',
+        5,
+        [11, 19],
+        { type: 'passengers', capacity: 40 },
+        [roadA.id, roadB.id],
+        stops,
+      );
     }
 
     // Ligne de fret : arrêt routier → industrie.
     const freightIndustry = this.industries[0];
     if (roadA && freightIndustry) {
-      const tiles = traceTiles({ x: roadA.x, y: roadA.y }, { x: freightIndustry.x, y: freightIndustry.y });
+      const tiles = traceTiles(
+        { x: roadA.x, y: roadA.y },
+        { x: freightIndustry.x, y: freightIndustry.y },
+      );
       this.paintRoute(tiles, K.road, 0);
       const path = loopPath(tiles);
       const stops = this.segmentsForStops(path, [
         { x: Math.floor(roadA.x), y: Math.floor(roadA.y), station: roadA.id },
       ]);
-      this.addVehiclesOnLoop(path, 0, 'road', 4, [10, 16], { type: 'coal', capacity: 30 }, [roadA.id], stops);
-      this.addVehiclesOnLoop(path, 1, 'road', 4, [10, 15], { type: 'goods', capacity: 26 }, [roadA.id], stops);
+      this.addVehiclesOnLoop(
+        path,
+        0,
+        'road',
+        4,
+        [10, 16],
+        { type: 'coal', capacity: 30 },
+        [roadA.id],
+        stops,
+      );
+      this.addVehiclesOnLoop(
+        path,
+        1,
+        'road',
+        4,
+        [10, 15],
+        { type: 'goods', capacity: 26 },
+        [roadA.id],
+        stops,
+      );
     }
 
     // Bateaux : boucle sur l'eau.
     const shipStops: P2[] = [
-      this.findWater(this.width - 12, Math.round(this.height * 0.3), 20) ?? { x: this.width - 12, y: Math.round(this.height * 0.3) },
-      this.findWater(this.width - 12, Math.round(this.height * 0.72), 20) ?? { x: this.width - 12, y: Math.round(this.height * 0.72) },
-      this.findWater(this.width * 0.9, Math.round(this.height * 0.72), 20) ?? { x: Math.round(this.width * 0.9), y: Math.round(this.height * 0.72) },
-      this.findWater(this.width * 0.9, Math.round(this.height * 0.3), 20) ?? { x: Math.round(this.width * 0.9), y: Math.round(this.height * 0.3) },
+      this.findWater(this.width - 12, Math.round(this.height * 0.3), 20) ?? {
+        x: this.width - 12,
+        y: Math.round(this.height * 0.3),
+      },
+      this.findWater(this.width - 12, Math.round(this.height * 0.72), 20) ?? {
+        x: this.width - 12,
+        y: Math.round(this.height * 0.72),
+      },
+      this.findWater(this.width * 0.9, Math.round(this.height * 0.72), 20) ?? {
+        x: Math.round(this.width * 0.9),
+        y: Math.round(this.height * 0.72),
+      },
+      this.findWater(this.width * 0.9, Math.round(this.height * 0.3), 20) ?? {
+        x: Math.round(this.width * 0.9),
+        y: Math.round(this.height * 0.3),
+      },
     ];
     const shipPath = loopPath(shipStops);
     this.addVehiclesOnLoop(
@@ -864,10 +993,17 @@ class WorldBuilder {
         { x: clampInt(ax - 16, 1, this.width - 2), y: clampInt(ay - 10, 1, this.height - 2) },
       ];
       const airPath = loopPath(airTiles);
-      const airStops = this.segmentsForStops(airPath, [
-        { x: ax, y: ay, station: airport.id },
-      ]);
-      this.addVehiclesOnLoop(airPath, 0, 'aircraft', 6, [40, 60], { type: 'passengers', capacity: 90 }, [airport.id], airStops);
+      const airStops = this.segmentsForStops(airPath, [{ x: ax, y: ay, station: airport.id }]);
+      this.addVehiclesOnLoop(
+        airPath,
+        0,
+        'aircraft',
+        6,
+        [40, 60],
+        { type: 'passengers', capacity: 90 },
+        [airport.id],
+        airStops,
+      );
     }
 
     // Complète la flotte à 40 véhicules avec des camions supplémentaires.
@@ -921,9 +1057,21 @@ class WorldBuilder {
       stations: this.stations,
       vehicles: this.vehicles,
       news: [
-        { tick: 0, kind: 'info', text: `Nouvelle partie : ${this.width}×${this.height} tuiles, graine ${this.seed}.` },
-        { tick: 0, kind: 'company', text: `${this.companies[0]?.name ?? 'Votre entreprise'} démarre avec 2 400 000 £.` },
-        { tick: 0, kind: 'info', text: 'Clic droit / Alt + glisser pour tourner, molette pour zoomer, clic pour sélectionner.' },
+        {
+          tick: 0,
+          kind: 'info',
+          text: `Nouvelle partie : ${this.width}×${this.height} tuiles, graine ${this.seed}.`,
+        },
+        {
+          tick: 0,
+          kind: 'company',
+          text: `${this.companies[0]?.name ?? 'Votre entreprise'} démarre avec 2 400 000 £.`,
+        },
+        {
+          tick: 0,
+          kind: 'info',
+          text: 'Clic droit / Alt + glisser pour tourner, molette pour zoomer, clic pour sélectionner.',
+        },
       ],
       newsCursor: 0,
       events: [],
@@ -955,7 +1103,8 @@ function placeOnPath(vehicle: MockVehicle, distanceAlong: number): void {
         vehicle.x = point.x;
         vehicle.y = point.y;
       }
-      if (point && next) vehicle.direction = directionFromVector(next.x - point.x, next.y - point.y);
+      if (point && next)
+        vehicle.direction = directionFromVector(next.x - point.x, next.y - point.y);
       return;
     }
     remaining -= length;
@@ -1012,7 +1161,11 @@ function updateVehiclesTransforms(world: MockWorld): void {
     const position = positionAlong(vehicle);
     vehicle.x = position.x;
     vehicle.y = position.y;
-    vehicle.direction = stepDirection(vehicle.direction, directionFromVector(position.dx, position.dy), 12);
+    vehicle.direction = stepDirection(
+      vehicle.direction,
+      directionFromVector(position.dx, position.dy),
+      12,
+    );
     const ground = sampleHeightWorld(map, vehicle.x, vehicle.y);
     if (vehicle.kind === 'aircraft') {
       vehicle.z = ground + 6.5 + Math.sin(world.tick * 0.02 + vehicle.id) * 0.4;
@@ -1064,7 +1217,12 @@ function vehicleArrive(world: MockWorld, vehicle: MockVehicle, stationId: number
   }
   vehicle.waitTicks = 14 + ((vehicle.id * 7) % 22);
   vehicle.status = 2;
-  addEvent(world, { type: 'vehicle_arrived', vehicle: vehicle.id, station: stationId, tick: world.tick });
+  addEvent(world, {
+    type: 'vehicle_arrived',
+    vehicle: vehicle.id,
+    station: stationId,
+    tick: world.tick,
+  });
 }
 
 function vehicleDepart(world: MockWorld, vehicle: MockVehicle, stationId: number): void {
@@ -1082,7 +1240,12 @@ function vehicleDepart(world: MockWorld, vehicle: MockVehicle, stationId: number
   }
   if (vehicle.cargoAmount === 0) vehicle.cargoAmount = Math.round(vehicle.cargoCapacity * 0.35);
   vehicle.status = 1;
-  addEvent(world, { type: 'vehicle_departed', vehicle: vehicle.id, station: stationId, tick: world.tick });
+  addEvent(world, {
+    type: 'vehicle_departed',
+    vehicle: vehicle.id,
+    station: stationId,
+    tick: world.tick,
+  });
 }
 
 function moveVehicle(world: MockWorld, vehicle: MockVehicle): void {
@@ -1125,8 +1288,12 @@ function moveVehicle(world: MockWorld, vehicle: MockVehicle): void {
 
 function updateCompanyEconomy(world: MockWorld): void {
   for (const company of world.companies) {
-    company.vehicleCount = world.vehicles.filter((vehicle) => vehicle.company === company.id).length;
-    company.stationCount = world.stations.filter((station) => station.company === company.id).length;
+    company.vehicleCount = world.vehicles.filter(
+      (vehicle) => vehicle.company === company.id,
+    ).length;
+    company.stationCount = world.stations.filter(
+      (station) => station.company === company.id,
+    ).length;
     company.income = company.deliveredToday;
     company.expenses = 240 * company.vehicleCount + 180 * company.stationCount + 1_200;
     company.money += company.income - company.expenses;
@@ -1163,7 +1330,12 @@ function growTowns(world: MockWorld, rng: Prng, dayIndex: number): void {
     town.rating = Math.max(0, Math.min(100, town.rating + (rng.chance(0.5) ? 1 : -1)));
     if (dayIndex % 12 === 0 && addTownBuilding(world, rng, town)) {
       town.buildings += 1;
-      addEvent(world, { type: 'town_growth', town: town.id, population: town.population, tick: world.tick });
+      addEvent(world, {
+        type: 'town_growth',
+        town: town.id,
+        population: town.population,
+        tick: world.tick,
+      });
     }
   }
 }
@@ -1171,9 +1343,17 @@ function growTowns(world: MockWorld, rng: Prng, dayIndex: number): void {
 function updateIndustries(world: MockWorld, rng: Prng): void {
   for (const industry of world.industries) {
     industry.production = Math.max(24, Math.min(960, industry.production + rng.int(-6, 7)));
-    industry.transported = Math.max(0, Math.min(industry.production, industry.transported + rng.int(-8, 10)));
+    industry.transported = Math.max(
+      0,
+      Math.min(industry.production, industry.transported + rng.int(-8, 10)),
+    );
     if (rng.chance(0.03)) {
-      addEvent(world, { type: 'industry_production', industry: industry.id, amount: industry.production, tick: world.tick });
+      addEvent(world, {
+        type: 'industry_production',
+        industry: industry.id,
+        amount: industry.production,
+        tick: world.tick,
+      });
     }
   }
 }
@@ -1292,7 +1472,6 @@ export class MockEngine implements EngineDriver {
       this.progress = 1;
       this.loading = false;
       if (options.debug) {
-        // eslint-disable-next-line no-console
         console.info('[MockEngine] prêt (moduleUrl =', options.moduleUrl, ')');
       }
     } catch (error) {
@@ -1414,7 +1593,11 @@ export class MockEngine implements EngineDriver {
       direction: vehicle.direction,
       speed: Math.round(vehicle.speed),
       status: vehicle.status,
-      cargo: { type: vehicle.cargoType, amount: vehicle.cargoAmount, capacity: vehicle.cargoCapacity },
+      cargo: {
+        type: vehicle.cargoType,
+        amount: vehicle.cargoAmount,
+        capacity: vehicle.cargoCapacity,
+      },
       orderTargets: vehicle.orderTargets.slice(),
       profitLastYear: vehicle.profitLastYear,
       ageDays: vehicle.ageDays,
@@ -1515,7 +1698,9 @@ export class MockEngine implements EngineDriver {
     const parsed = JSON.parse(text) as { v?: number; world?: SerializedWorld };
     if (!parsed.world) throw new Error('Sauvegarde invalide : monde absent.');
     if (parsed.v !== PROTOCOL_VERSION) {
-      throw new Error(`Version de sauvegarde ${String(parsed.v)} incompatible avec le protocole ${PROTOCOL_VERSION}.`);
+      throw new Error(
+        `Version de sauvegarde ${String(parsed.v)} incompatible avec le protocole ${PROTOCOL_VERSION}.`,
+      );
     }
     const saved = parsed.world;
     const expected = saved.width * saved.height;

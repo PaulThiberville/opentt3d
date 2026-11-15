@@ -304,8 +304,19 @@ function describeSelection(
       if (!target || target.kind !== 'tile') {
         return { selection, title: 'Tuile', detail: 'Sélectionnée sur la carte', colour: null };
       }
-      if (!map || target.x < 0 || target.y < 0 || target.x >= map.width || target.y * map.width + target.x >= map.kind.length) {
-        return { selection, title: `Tuile (${target.x}, ${target.y})`, detail: 'Carte non chargée', colour: null };
+      if (
+        !map ||
+        target.x < 0 ||
+        target.y < 0 ||
+        target.x >= map.width ||
+        target.y * map.width + target.x >= map.kind.length
+      ) {
+        return {
+          selection,
+          title: `Tuile (${target.x}, ${target.y})`,
+          detail: 'Carte non chargée',
+          colour: null,
+        };
       }
       const index = tileIndex(target.x, target.y, map.width);
       const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';

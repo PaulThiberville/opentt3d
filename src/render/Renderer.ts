@@ -60,10 +60,12 @@ export class Renderer {
     this.onFrame = options.onFrame;
     this.maxDelta = Math.max(0.01, options.maxDeltaSeconds ?? 0.1);
 
-    const guessed = options.quality ?? detectQuality(
-      typeof window === 'undefined' ? 1 : window.devicePixelRatio,
-      typeof navigator === 'undefined' ? 4 : navigator.hardwareConcurrency,
-    );
+    const guessed =
+      options.quality ??
+      detectQuality(
+        typeof window === 'undefined' ? 1 : window.devicePixelRatio,
+        typeof navigator === 'undefined' ? 4 : navigator.hardwareConcurrency,
+      );
     this.qualityLevel = guessed;
     this.settings = qualitySettings(guessed);
 
@@ -84,12 +86,7 @@ export class Renderer {
     this.fog = new THREE.Fog(0x9dc3dc, this.settings.fogNear, this.settings.drawDistance);
     this.scene.fog = this.fog;
 
-    this.camera = new THREE.PerspectiveCamera(
-      52,
-      1,
-      0.4,
-      this.settings.drawDistance,
-    );
+    this.camera = new THREE.PerspectiveCamera(52, 1, 0.4, this.settings.drawDistance);
     this.camera.position.set(0, 60, 60);
     this.camera.lookAt(0, 0, 0);
 

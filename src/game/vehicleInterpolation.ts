@@ -29,7 +29,9 @@ export interface RenderVehicle {
 /** Au-delà de ce seuil (en tuiles), on considère un téléport et on recale. */
 export const TELEPORT_DISTANCE_SQUARED = 64;
 
-export function modelKindFor(vehicle: Pick<VehicleSnapshot, 'kind' | 'cargo' | 'id'>): VehicleModelKind {
+export function modelKindFor(
+  vehicle: Pick<VehicleSnapshot, 'kind' | 'cargo' | 'id'>,
+): VehicleModelKind {
   switch (vehicle.kind) {
     case 'train':
       return 'train';
@@ -102,7 +104,6 @@ export class VehicleInterpolator {
       } else {
         const dx = target.x - source.x;
         const dy = target.y - source.y;
-        const dz = target.z - source.z;
         if (dx * dx + dy * dy > TELEPORT_DISTANCE_SQUARED) {
           slot.x = target.x;
           slot.y = target.y;

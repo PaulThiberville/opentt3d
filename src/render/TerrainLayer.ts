@@ -15,7 +15,13 @@
 
 import * as THREE from 'three';
 import type { MapSnapshot } from '../engine/protocol';
-import { HEIGHT_SCALE, cornerHeightWorld, isWaterKind, sampleHeightWorld, tileKindFromIndex } from '../game/mapGrid';
+import {
+  HEIGHT_SCALE,
+  cornerHeightWorld,
+  isWaterKind,
+  sampleHeightWorld,
+  tileKindFromIndex,
+} from '../game/mapGrid';
 import { hashUnit2d } from '../game/prng';
 import { hexToRgb, rgbToHex, shallowWaterColour, tileColour } from './tileVisuals';
 import { qualitySettings, type QualityLevel } from './quality';
@@ -140,8 +146,7 @@ export class TerrainLayer {
 
   /** Applique une carte complète (premier snapshot ou changement de carte). */
   setMap(map: MapSnapshot): void {
-    const sizeChanged =
-      !this.map || this.map.width !== map.width || this.map.height !== map.height;
+    const sizeChanged = !this.map || this.map.width !== map.width || this.map.height !== map.height;
     this.map = map;
     if (sizeChanged) {
       this.disposeChunks();
@@ -258,7 +263,11 @@ export class TerrainLayer {
         // Léger éclat aléatoire pour casser les aplats.
         const shade = 0.968 + variation * 0.064;
         hexToRgb(
-          rgbToHex(((colour >> 16) & 0xff) * shade, ((colour >> 8) & 0xff) * shade, (colour & 0xff) * shade),
+          rgbToHex(
+            ((colour >> 16) & 0xff) * shade,
+            ((colour >> 8) & 0xff) * shade,
+            (colour & 0xff) * shade,
+          ),
           rgb,
         );
 
@@ -318,8 +327,14 @@ export class TerrainLayer {
     }
 
     const groundGeometry = new THREE.BufferGeometry();
-    groundGeometry.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, vertex * 3), 3));
-    groundGeometry.setAttribute('color', new THREE.BufferAttribute(colours.subarray(0, vertex * 3), 3));
+    groundGeometry.setAttribute(
+      'position',
+      new THREE.BufferAttribute(positions.subarray(0, vertex * 3), 3),
+    );
+    groundGeometry.setAttribute(
+      'color',
+      new THREE.BufferAttribute(colours.subarray(0, vertex * 3), 3),
+    );
     groundGeometry.computeVertexNormals();
     groundGeometry.computeBoundingSphere();
     const ground = new THREE.Mesh(groundGeometry, this.groundMaterial);
@@ -353,11 +368,16 @@ export class TerrainLayer {
             (wx > 0 && !isWaterKind(tileKindFromIndex(map.kind[index - 1] ?? 0))) ||
             (wx + 1 < map.width && !isWaterKind(tileKindFromIndex(map.kind[index + 1] ?? 0))) ||
             (wy > 0 && !isWaterKind(tileKindFromIndex(map.kind[index - map.width] ?? 0))) ||
-            (wy + 1 < map.height && !isWaterKind(tileKindFromIndex(map.kind[index + map.width] ?? 0)));
+            (wy + 1 < map.height &&
+              !isWaterKind(tileKindFromIndex(map.kind[index + map.width] ?? 0)));
           const base = landNeighbour ? shallowWaterColour(wx * 31 + wy) : 0x2a6f95;
           const shimmer = 0.965 + hashUnit2d(wx, wy, 91) * 0.06;
           hexToRgb(
-            rgbToHex(((base >> 16) & 0xff) * shimmer, ((base >> 8) & 0xff) * shimmer, (base & 0xff) * shimmer),
+            rgbToHex(
+              ((base >> 16) & 0xff) * shimmer,
+              ((base >> 8) & 0xff) * shimmer,
+              (base & 0xff) * shimmer,
+            ),
             waterRgb,
           );
           const level = (map.heightMap[index] ?? 0) * HEIGHT_SCALE + WATER_OFFSET;
@@ -425,7 +445,8 @@ export class TerrainLayer {
     if (!this.animateWater && this.waterTime) this.waterTime.value = 0;
     const settings = qualitySettings(level);
     this.groundMaterial.dithering = level !== 'low';
-    this.waterMaterial.shininess = settings.level === 'low' ? 40 : settings.level === 'high' ? 130 : 90;
+    this.waterMaterial.shininess =
+      settings.level === 'low' ? 40 : settings.level === 'high' ? 130 : 90;
   }
 
   update(deltaSeconds: number): void {

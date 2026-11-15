@@ -39,12 +39,16 @@ export const TILE_COLOURS: Record<TileKind, number> = {
 
 /** Palette des couleurs d'entreprise OpenTTD (index 0..15). */
 export const COMPANY_COLOURS = [
-  0x1c2f83, 0x2f8f4e, 0xd46a9a, 0xe0c53c, 0xc9463f, 0x4fa3d9, 0x3f9c58, 0x2c6b3a, 0x3d6fc4, 0xe8dcc0,
-  0xa46ac0, 0x7a4aa8, 0xd97b2f, 0x8a5a35, 0x8a8f94, 0xf0f0f0,
+  0x1c2f83, 0x2f8f4e, 0xd46a9a, 0xe0c53c, 0xc9463f, 0x4fa3d9, 0x3f9c58, 0x2c6b3a, 0x3d6fc4,
+  0xe8dcc0, 0xa46ac0, 0x7a4aa8, 0xd97b2f, 0x8a5a35, 0x8a8f94, 0xf0f0f0,
 ];
 
 export function companyColour(index: number): number {
-  return COMPANY_COLOURS[((index | 0) % COMPANY_COLOURS.length + COMPANY_COLOURS.length) % COMPANY_COLOURS.length] ?? 0x3d6fc4;
+  return (
+    COMPANY_COLOURS[
+      (((index | 0) % COMPANY_COLOURS.length) + COMPANY_COLOURS.length) % COMPANY_COLOURS.length
+    ] ?? 0x3d6fc4
+  );
 }
 
 export function rgbToHex(r: number, g: number, b: number): number {
@@ -77,7 +81,12 @@ function mixHex(a: number, b: number, amount: number): number {
  * @param steepness nombre de voisins de hauteur différente (0..4)
  * @param seed graine pour la variation déterministe
  */
-export function tileColour(kind: TileKind, heightLevel: number, steepness: number, seed = 1): number {
+export function tileColour(
+  kind: TileKind,
+  heightLevel: number,
+  steepness: number,
+  seed = 1,
+): number {
   const base = TILE_COLOURS[kind] ?? TILE_COLOURS.void;
   const variation = 0.9 + hashUnit2d(seed, heightLevel, steepness) * 0.16;
   let colour = mixHex(0x000000, base, Math.min(1, variation));

@@ -104,8 +104,16 @@ export class CityLayer {
       }
 
       if (placements.length === 0) continue;
-      const bodies = new THREE.InstancedMesh(this.bodyGeometry, this.bodyMaterial, placements.length);
-      const roofs = new THREE.InstancedMesh(this.roofGeometry, this.roofMaterial, placements.length);
+      const bodies = new THREE.InstancedMesh(
+        this.bodyGeometry,
+        this.bodyMaterial,
+        placements.length,
+      );
+      const roofs = new THREE.InstancedMesh(
+        this.roofGeometry,
+        this.roofMaterial,
+        placements.length,
+      );
       bodies.name = `city-${town.id}-bodies`;
       roofs.name = `city-${town.id}-roofs`;
       bodies.castShadow = this.shadows;

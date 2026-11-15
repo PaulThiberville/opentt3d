@@ -138,7 +138,14 @@ export function valueNoise(seed: number, x: number, y: number): number {
 }
 
 /** Fractal brownian motion normalisé dans [0, 1]. */
-export function fbm(seed: number, x: number, y: number, octaves = 4, lacunarity = 2, gain = 0.5): number {
+export function fbm(
+  seed: number,
+  x: number,
+  y: number,
+  octaves = 4,
+  lacunarity = 2,
+  gain = 0.5,
+): number {
   let amplitude = 1;
   let frequency = 1;
   let sum = 0;

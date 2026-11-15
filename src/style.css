@@ -154,7 +154,10 @@ body {
   padding: 5px 9px;
   min-width: 30px;
   cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
 }
 
 .hud-button:hover {
@@ -265,7 +268,9 @@ body {
   box-shadow: var(--hud-shadow);
   font-size: 12px;
   animation: hud-toast-in 160ms ease-out;
-  transition: opacity 300ms ease, transform 300ms ease;
+  transition:
+    opacity 300ms ease,
+    transform 300ms ease;
   pointer-events: auto;
 }
 

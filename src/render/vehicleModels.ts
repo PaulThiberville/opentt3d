@@ -18,7 +18,13 @@ const WINDOW = 0x24313d;
 const CHASSIS = 0x2a2c31;
 const ROOF = 0xdfe3e6;
 
-function paint(geometry: THREE.BufferGeometry, colour: number, x = 0, y = 0, z = 0): THREE.BufferGeometry {
+function paint(
+  geometry: THREE.BufferGeometry,
+  colour: number,
+  x = 0,
+  y = 0,
+  z = 0,
+): THREE.BufferGeometry {
   geometry.translate(x, y, z);
   const count = geometry.attributes.position?.count ?? 0;
   const colours = new Float32Array(count * 3);
@@ -32,7 +38,15 @@ function paint(geometry: THREE.BufferGeometry, colour: number, x = 0, y = 0, z =
   return geometry;
 }
 
-function box(width: number, height: number, depth: number, colour: number, x: number, y: number, z: number): THREE.BufferGeometry {
+function box(
+  width: number,
+  height: number,
+  depth: number,
+  colour: number,
+  x: number,
+  y: number,
+  z: number,
+): THREE.BufferGeometry {
   return paint(new THREE.BoxGeometry(width, height, depth), colour, x, y, z);
 }
 
@@ -108,6 +122,8 @@ export function buildVehicleGeometries(): Record<VehicleModelKind, THREE.BufferG
   };
 }
 
-export function disposeVehicleGeometries(geometries: Record<VehicleModelKind, THREE.BufferGeometry>): void {
+export function disposeVehicleGeometries(
+  geometries: Record<VehicleModelKind, THREE.BufferGeometry>,
+): void {
   for (const geometry of Object.values(geometries)) geometry.dispose();
 }
