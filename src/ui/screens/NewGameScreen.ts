@@ -5,6 +5,8 @@
 
 import { QUALITY_LEVELS } from '../../render/quality';
 import type { EngineMode } from '../../engine/loadEngine';
+import type { EngineAvailability } from '../engineAvailability';
+import { EnginePicker } from '../enginePicker';
 import { el, fieldLabel, enableListNavigation } from '../dom';
 import { qualityLabel, t, tn, type TranslationKey } from '../i18n';
 import {
@@ -23,10 +25,18 @@ import { BaseScreen } from './BaseScreen';
 
 export interface NewGameScreenOptions {
   initial: NewGameOptions;
-  onStart: (options: NewGameOptions) => void;
+  onStart: (options: NewGameOptions, engine: EngineMode) => void;
   onBack: () => void;
-  /** Moteur qui sera utilisé (?engine=mock|wasm). */
+  /** Moteur proposé par défaut (réglage persistant ou `?engine=`). */
   engineMode?: EngineMode;
+  /** Moteur persisté, pour distinguer le réglage d'un forçage URL. */
+  storedEngineMode?: EngineMode;
+  /** `?engine=` explicite : verrouille le sélecteur. */
+  engineUrlMode?: EngineMode | null;
+  /** Disponibilité des artefacts WASM, mise à jour en asynchrone. */
+  engineAvailability?: EngineAvailability | null;
+  /** Le joueur change de moteur : le réglage peut être persisté. */
+  onEngineChange?: (mode: EngineMode) => void;
 }
 
 const DIFFICULTY_KEYS: Record<number, TranslationKey> = {
@@ -53,10 +63,14 @@ export class NewGameScreen extends BaseScreen {
   private yearInput: HTMLInputElement;
   private sizeInputs: HTMLInputElement[] = [];
   private cleanupNavigation: () => void;
+  private enginePicker!: EnginePicker;
+  private engineStored: EngineMode;
+  private unsubscribeEngine: (() => void) | null = null;
 
   constructor(options: NewGameScreenOptions) {
     super('panel-screen new-game-screen');
     this.options = options;
+    this.engineStored = options.storedEngineMode ?? options.engineMode ?? 'mock';
     const initial = options.initial;
 
     const panel = el('div', { className: 'panel panel-wide' });
@@ -71,6 +85,33 @@ export class NewGameScreen extends BaseScreen {
     );
 
     const form = el('form', { className: 'form', attrs: { novalidate: '' } });
+
+    // Moteur -----------------------------------------------------------------
+    this.enginePicker = new EnginePicker({
+      idPrefix: 'new',
+      legend: t('newgame.engine.label'),
+      hint: t('newgame.engine.hint'),
+      storedMode: this.engineStored,
+      urlMode: options.engineUrlMode ?? null,
+      artifacts: options.engineAvailability?.get() ?? null,
+      onChange: (mode) => {
+        this.engineStored = mode;
+        options.onEngineChange?.(mode);
+      },
+    });
+    const availability = options.engineAvailability ?? null;
+    if (availability) {
+      this.unsubscribeEngine = availability.subscribe((artifacts) => {
+        const state = this.enginePicker.update({
+          artifacts,
+          storedMode: this.engineStored,
+        });
+        if (state.downgraded && !state.locked) {
+          this.engineStored = state.mode;
+          options.onEngineChange?.(state.mode);
+        }
+      });
+    }
 
     // Graine -----------------------------------------------------------------
     this.seedInput = el('input', {
@@ -207,6 +248,7 @@ export class NewGameScreen extends BaseScreen {
     const yearField = this.field(t('newgame.year.label'), 'startYear', this.yearInput);
 
     form.append(
+      this.enginePicker.element,
       seedField,
       sizeField,
       qualityField,
@@ -236,7 +278,7 @@ export class NewGameScreen extends BaseScreen {
       this.submit();
     });
 
-    panel.append(header, this.engineInfo(), form);
+    panel.append(header, form);
     this.element.append(panel);
     this.cleanupNavigation = enableListNavigation(panel);
 
@@ -245,27 +287,6 @@ export class NewGameScreen extends BaseScreen {
       text: t('newgame.footer'),
     });
     panel.append(footer);
-  }
-
-  /** Indicateur du moteur actif et avertissement sur les options non gérées. */
-  private engineInfo(): HTMLElement {
-    const mode = this.options.engineMode ?? 'mock';
-    const block = el('div', { className: 'field-hint' });
-    const badges = el('div', { className: 'menu-badges' });
-    badges.append(
-      el('span', {
-        className: 'badge',
-        text: t(mode === 'wasm' ? 'newgame.engine.wasm' : 'newgame.engine.mock'),
-      }),
-    );
-    block.append(badges);
-    block.append(
-      el('p', {
-        className: 'field-hint',
-        text: t(mode === 'wasm' ? 'newgame.engine.wasmHint' : 'newgame.engine.mockHint'),
-      }),
-    );
-    return block;
   }
 
   protected override onKeyDown(event: KeyboardEvent): void {
@@ -317,7 +338,7 @@ export class NewGameScreen extends BaseScreen {
       this.showErrors(result.errors);
       return;
     }
-    this.options.onStart(result.value);
+    this.options.onStart(result.value, this.enginePicker.selection);
   }
 
   private clearErrors(): void {
@@ -343,6 +364,8 @@ export class NewGameScreen extends BaseScreen {
   }
 
   override dispose(): void {
+    this.unsubscribeEngine?.();
+    this.unsubscribeEngine = null;
     this.cleanupNavigation();
     super.dispose();
   }

@@ -94,6 +94,28 @@ describe('réglages persistants', () => {
     expect(updated.quality).toBe('low');
   });
 
+  it('normalise le moteur persistant et migre les anciens réglages', () => {
+    expect(DEFAULT_SETTINGS.engine).toBe('mock');
+    expect(sanitizeSettings({}).engine).toBe('mock');
+    expect(sanitizeSettings({ engine: 'wasm' }).engine).toBe('wasm');
+    expect(sanitizeSettings({ engine: ' WAsm ' }).engine).toBe('wasm');
+    expect(sanitizeSettings({ engine: 'webgl' }).engine).toBe('mock');
+    expect(sanitizeSettings({ engine: 42 }).engine).toBe('mock');
+    // Ancienne clé `engineMode` : migration douce sans perdre les autres champs.
+    expect(sanitizeSettings({ engineMode: 'wasm', quality: 'high' })).toMatchObject({
+      engine: 'wasm',
+      quality: 'high',
+    });
+    expect(updateSettings(DEFAULT_SETTINGS, { engine: 'wasm' }).engine).toBe('wasm');
+  });
+
+  it('conserve un réglage moteur existant lors d’une mise à jour partielle', () => {
+    const source = { ...DEFAULT_SETTINGS, engine: 'wasm' as const };
+    const updated = updateSettings(source, { musicVolume: 10 });
+    expect(updated.engine).toBe('wasm');
+    expect(source.engine).toBe('wasm');
+  });
+
   it('signale un échec d’écriture sans lever', () => {
     const storage = new MemoryStorage();
     storage.failWrites = true;

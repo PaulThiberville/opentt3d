@@ -8,6 +8,9 @@
  */
 
 import { QUALITY_LEVELS } from '../../render/quality';
+import type { EngineMode } from '../../engine/loadEngine';
+import type { EngineAvailability } from '../engineAvailability';
+import { EnginePicker } from '../enginePicker';
 import { el, fieldLabel } from '../dom';
 import { normalizeLanguage, qualityLabel, setLanguage, t } from '../i18n';
 import { DEFAULT_P2P_RELAY, updateSettings, type GameSettings } from '../settings';
@@ -17,6 +20,10 @@ export interface SettingsScreenOptions {
   settings: GameSettings;
   onChange: (settings: GameSettings) => void;
   onBack: () => void;
+  /** `?engine=` explicite : verrouille le choix du moteur. */
+  engineUrlMode?: EngineMode | null;
+  /** Disponibilité des artefacts WASM, mise à jour en asynchrone. */
+  engineAvailability?: EngineAvailability | null;
 }
 
 export class SettingsScreen extends BaseScreen {
@@ -32,6 +39,8 @@ export class SettingsScreen extends BaseScreen {
   private volumeInputs = new Map<keyof GameSettings, HTMLInputElement>();
   private volumeOutputs = new Map<keyof GameSettings, HTMLOutputElement>();
   private status!: HTMLParagraphElement;
+  private enginePicker!: EnginePicker;
+  private unsubscribeEngine: (() => void) | null = null;
 
   constructor(options: SettingsScreenOptions) {
     super('panel-screen settings-screen');
@@ -47,6 +56,8 @@ export class SettingsScreen extends BaseScreen {
     this.element.setAttribute('aria-label', t('settings.title'));
     this.volumeInputs.clear();
     this.volumeOutputs.clear();
+    this.unsubscribeEngine?.();
+    this.unsubscribeEngine = null;
 
     const panel = el('div', { className: 'panel panel-wide' });
     const header = el('div', { className: 'panel-header' });
@@ -57,6 +68,30 @@ export class SettingsScreen extends BaseScreen {
     );
 
     const grid = el('div', { className: 'settings-grid' });
+
+    // Moteur -----------------------------------------------------------------
+    this.enginePicker = new EnginePicker({
+      idPrefix: 'settings',
+      legend: t('settings.engine.label'),
+      hint: t('settings.engine.hint'),
+      storedMode: this.settings.engine,
+      urlMode: this.options.engineUrlMode ?? null,
+      artifacts: this.options.engineAvailability?.get() ?? null,
+      onChange: (mode) => this.patch({ engine: mode }),
+    });
+    if (this.options.engineAvailability) {
+      this.unsubscribeEngine = this.options.engineAvailability.subscribe((artifacts) => {
+        const state = this.enginePicker.update({
+          artifacts,
+          storedMode: this.settings.engine,
+        });
+        if (state.downgraded && !state.locked) {
+          this.settings = updateSettings(this.settings, { engine: state.mode });
+          this.options.onChange(this.settings);
+        }
+      });
+    }
+    grid.append(this.enginePicker.element);
 
     // Qualité ----------------------------------------------------------------
     this.qualitySelect = el('select', {
@@ -311,5 +346,11 @@ export class SettingsScreen extends BaseScreen {
     if (active instanceof HTMLSelectElement) return;
     event.preventDefault();
     this.options.onBack();
+  }
+
+  override dispose(): void {
+    this.unsubscribeEngine?.();
+    this.unsubscribeEngine = null;
+    super.dispose();
   }
 }
