@@ -1236,10 +1236,12 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
 
   for (const tile of plan.tiles) {
     if (tool === 'clear') {
-      world.kind[tile.index] = K.grass;
+      // Un pont démoli laisse apparaître l'eau qu'il franchissait.
+      const wasBridge = ((world.flags[tile.index] ?? 0) & TILE_FLAG.BRIDGE) !== 0;
+      world.kind[tile.index] = wasBridge ? K.water : K.grass;
+      world.flags[tile.index] = wasBridge ? TILE_FLAG.WATER : 0;
       world.owner[tile.index] = COMPANY_NONE;
       world.trackBits[tile.index] = 0;
-      world.flags[tile.index] = 0;
       continue;
     }
     world.kind[tile.index] = BUILT_KIND[tool];
