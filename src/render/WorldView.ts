@@ -21,6 +21,7 @@ import { IndustryLayer } from './IndustryLayer';
 import { InfrastructureLayer } from './InfrastructureLayer';
 import { Picking, type PickResult } from './Picking';
 import { SignalLayer } from './SignalLayer';
+import { SurroundingsLayer } from './SurroundingsLayer';
 import { TerrainLayer } from './TerrainLayer';
 import { TrackLayer } from './TrackLayer';
 import { VegetationLayer } from './VegetationLayer';
@@ -78,6 +79,7 @@ export class WorldView {
   readonly depots = new DepotLayer();
   readonly infrastructure = new InfrastructureLayer();
   readonly atmosphere = new AtmosphereLayer();
+  readonly surroundings = new SurroundingsLayer();
 
   private scene: THREE.Scene;
   private canvas: HTMLCanvasElement;
@@ -142,6 +144,7 @@ export class WorldView {
     this.scene.add(this.depots.group);
     this.scene.add(this.infrastructure.group);
     this.scene.add(this.atmosphere.group);
+    this.scene.add(this.surroundings.group);
     this.scene.add(this.buildOverlay.group);
 
     this.picking = new Picking(
@@ -186,7 +189,9 @@ export class WorldView {
       this.cityLayer.build(snapshot.towns, map);
       this.industries.build(snapshot.industries, map, this.quality);
       this.vegetation.build(map, this.quality);
+      this.signals.setMap(map);
       this.catenary.setMap(map);
+      this.surroundings.build(map, this.quality);
       this.mapApplied = true;
       if (first) {
         this.controller.setBounds({ minX: 0, maxX: map.width, minZ: 0, maxZ: map.height });
@@ -221,6 +226,7 @@ export class WorldView {
     this.depots.setNight(amount);
     this.infrastructure.setNight(amount);
     this.atmosphere.setNight(amount);
+    this.surroundings.setNight(amount);
   }
 
   /** Phase visuelle courante (0 = minuit, 0,5 = midi). */
@@ -275,6 +281,7 @@ export class WorldView {
     this.cityLayer.update(this.camera.position);
     this.industries.update(deltaSeconds, this.camera.position);
     this.atmosphere.update(deltaSeconds, this.camera.position, this.dayNight.phase);
+    this.surroundings.update(deltaSeconds);
     this.dayNight.advance(deltaSeconds);
     this.applyDayNightPhase();
     this.applyNight(this.timeOfDay?.nightAmount ?? this.night);
@@ -463,6 +470,7 @@ export class WorldView {
     this.vehicles.setQuality(level);
     this.industries.setShadows(level === 'high');
     this.atmosphere.setQuality(level);
+    this.surroundings.setQuality(level);
   }
 
   getCameraController(): CameraController {
@@ -534,8 +542,18 @@ export class WorldView {
       this.depots.drawCallCount +
       this.tracks.drawCallCount +
       this.atmosphere.drawCallCount +
+      this.surroundings.drawCallCount +
       this.vehicles.accessoryDrawCalls
     );
+  }
+
+  /** Triangles ajoutés par le décor hors carte (diagnostic). */
+  getSurroundingsTriangleCount(): number {
+    return this.surroundings.triangleCount;
+  }
+
+  getSurroundingsDrawCalls(): number {
+    return this.surroundings.drawCallCount;
   }
 
   getScene(): THREE.Scene {
@@ -556,6 +574,7 @@ export class WorldView {
     this.scene.remove(this.depots.group);
     this.scene.remove(this.infrastructure.group);
     this.scene.remove(this.atmosphere.group);
+    this.scene.remove(this.surroundings.group);
     this.scene.remove(this.buildOverlay.group);
     this.terrain.dispose();
     this.tracks.dispose();
@@ -568,6 +587,7 @@ export class WorldView {
     this.depots.dispose();
     this.infrastructure.dispose();
     this.atmosphere.dispose();
+    this.surroundings.dispose();
     this.buildOverlay.dispose();
     this.renderVehicles = [];
     this.currentMap = null;
