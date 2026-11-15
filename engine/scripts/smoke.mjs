@@ -24,6 +24,13 @@ const VERBOSE = process.argv.includes('--verbose');
 const SEED = 42;
 const MAP_SIZE = 128;
 const TICKS = 2000;
+/**
+ * Hash de référence du scénario sans configuration (seed 42, 128×128,
+ * 2 000 ticks après `ottd_new_game`). Il doit rester stable : toute
+ * modification du pont, du baseset ou d'OpenTTD doit le mettre à jour
+ * consciemment (voir wiki, Moteur-WASM > Déterminisme).
+ */
+const REFERENCE_HASH = '0xd60509d5b2eb3fe1';
 
 function log(...args) {
   console.log(...args);
@@ -197,6 +204,13 @@ log(`Scénario : seed ${SEED}, ${MAP_SIZE}×${MAP_SIZE}, ${TICKS} ticks\n`);
 
 const first = await run('instance-1');
 const second = await run('instance-2');
+
+if (first.hash !== REFERENCE_HASH) {
+  fail(
+    `hash de référence rompu : ${first.hash} ≠ ${REFERENCE_HASH}\n` +
+      '  Vérifiez les réglages par défaut ou mettez à jour REFERENCE_HASH en connaissance de cause.',
+  );
+}
 
 if (first.hash !== second.hash) {
   fail(

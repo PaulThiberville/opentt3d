@@ -113,6 +113,8 @@ function wrap(engine) {
     engine,
     boot: engine.cwrap('ottd_boot', 'number', []),
     newGame: engine.cwrap('ottd_new_game', 'number', ['number', 'number', 'number']),
+    newGameEx: engine.cwrap('ottd_new_game_ex', 'number', ['number', 'number', 'number', 'string']),
+    setGameConfig: engine.cwrap('ottd_set_game_config', 'number', ['string']),
     step: engine.cwrap('ottd_step', 'number', ['number']),
     lastError: engine.cwrap('ottd_last_error', 'string', []),
   };
@@ -474,6 +476,22 @@ async function bootGame(label, size) {
   return { api, json, map: makeMapReader(api.engine), initial };
 }
 
+/** Démarre une partie configurée via `ottd_new_game_ex` (issue #60). */
+async function bootConfigured(label, seed, size, config, ticks) {
+  const api = wrap(await createInstance(label));
+  if (api.boot() !== 0) fail(`ottd_boot() : ${readError(api)}`);
+  const created = api.newGameEx(seed, size, size, JSON.stringify(config));
+  if (created !== 0) fail(`ottd_new_game_ex() = ${created} : ${readError(api)}`);
+
+  const json = makeJsonReader(api.engine);
+  const initial = waitForMap(api, json, size, size);
+  if (ticks > 0 && api.step(ticks) !== ticks) {
+    fail(`ottd_step(${ticks}) : ${readError(api)}`);
+  }
+
+  return { api, json, map: makeMapReader(api.engine), initial };
+}
+
 /** Mesure les deux snapshots sur une instance déjà initialisée. */
 function collect(game) {
   const { json, map } = game;
@@ -572,6 +590,207 @@ for (const [label, timing] of [
 }
 log('\n✅ Objectif < 10 ms tenu pour la carte et le JSON (128×128 et 256×256).');
 
+/* --- Issue #60 : configuration, IA et erreurs ---------------------------- */
+const SETUP_TICKS = 5000;
+/* Graine du scénario #60 : identique au smoke 128×128 (seed 42) pour que le
+ * comportement sans configuration reste comparable. */
+const AI_SEED = 42;
+const AI_CONFIG = {
+  climate: 'subarctic',
+  start_year: 2000,
+  difficulty: 2,
+  ai_companies: 2,
+  towns: 12,
+  industries: 16,
+  map_size: 128,
+  game_name: 'scénario #60',
+};
+
+log(
+  `\n#60 : ${AI_CONFIG.ai_companies} IA, ${AI_CONFIG.climate}, ${AI_CONFIG.start_year}, ` +
+    `${AI_CONFIG.towns} villes, ${AI_CONFIG.industries} industries, ` +
+    `${SETUP_TICKS} ticks sur 128×128`,
+);
+
+const configured = await bootConfigured('cfg-128', AI_SEED, 128, AI_CONFIG, SETUP_TICKS);
+const configuredResult = collect(configured);
+validateMap(configuredResult.map, 'cfg-128', 128);
+validateJson(configuredResult.state, 'cfg-128', 128);
+
+const configuredState = configuredResult.state;
+const aiCompanies = configuredState.companies.filter((company) => company.isAI);
+assert(
+  configuredState.counts.companies === 3,
+  `cfg-128 : ${configuredState.counts.companies} entreprises au lieu de 3 (1 locale + 2 IA)`,
+);
+assert(aiCompanies.length === 2, `cfg-128 : ${aiCompanies.length} entreprise(s) IA au lieu de 2`);
+assert(
+  configuredState.companies.filter((company) => company.isLocal).length === 1,
+  'cfg-128 : entreprise locale absente ou multiple',
+);
+assert(
+  configuredState.counts.vehicles > 0,
+  'cfg-128 : aucune entreprise IA n’a de véhicule après 5 000 ticks',
+);
+assert(
+  configuredState.counts.stations > 0,
+  'cfg-128 : aucune gare construite par les IA après 5 000 ticks',
+);
+assert(
+  aiCompanies.every((company) => company.vehicles > 0),
+  'cfg-128 : une entreprise IA n’a aucun véhicule',
+);
+assert(
+  aiCompanies.some((company) => company.stations > 0),
+  'cfg-128 : aucune entreprise IA n’a de gare',
+);
+
+/* Configuration effectivement appliquée, telle que renvoyée par le moteur. */
+assert(configuredState.config.climate === AI_CONFIG.climate, 'cfg-128 : climat non appliqué');
+assert(configuredState.config.startYear === AI_CONFIG.start_year, 'cfg-128 : année non appliquée');
+assert(
+  configuredState.config.difficulty === AI_CONFIG.difficulty,
+  'cfg-128 : difficulté non appliquée',
+);
+assert(
+  configuredState.config.aiCompanies === AI_CONFIG.ai_companies,
+  'cfg-128 : IA non appliquées',
+);
+assert(configuredState.config.towns === AI_CONFIG.towns, 'cfg-128 : nombre de villes non appliqué');
+assert(
+  configuredState.config.industries === AI_CONFIG.industries,
+  'cfg-128 : nombre d’industries non appliqué',
+);
+assert(configuredState.config.mapSize === 128, 'cfg-128 : mapSize incohérent');
+assert(configuredState.config.seed === AI_SEED, 'cfg-128 : graine incohérente');
+assert(configuredState.config.gameName === AI_CONFIG.game_name, 'cfg-128 : nom de partie perdu');
+assert(
+  configuredState.economy.year === AI_CONFIG.start_year,
+  `cfg-128 : année simulée ${configuredState.economy.year} ≠ ${AI_CONFIG.start_year}`,
+);
+assert(
+  configuredState.counts.towns === AI_CONFIG.towns,
+  `cfg-128 : ${configuredState.counts.towns} villes au lieu de ${AI_CONFIG.towns}`,
+);
+/* Le nombre d'industries demandé est une cible : la génération peut en
+ * placer une de moins si le terrain manque (15/16 observé en subarctique). */
+assert(
+  configuredState.counts.industries > 0 &&
+    configuredState.counts.industries <= AI_CONFIG.industries,
+  `cfg-128 : ${configuredState.counts.industries} industries pour ${AI_CONFIG.industries} demandées`,
+);
+
+const configuredHash = hashHex(configured.api.engine);
+log(
+  `[cfg-128] ${configuredState.counts.vehicles} véhicules, ` +
+    `${configuredState.counts.stations} gares, ` +
+    `${configuredState.counts.towns} villes, ${configuredState.counts.industries} industries`,
+);
+log(
+  `[cfg-128] entreprises : ${configuredState.companies
+    .map(
+      (company) =>
+        `${company.name}${company.isAI ? ' (IA)' : ''} ` +
+        `v=${company.vehicles} g=${company.stations}`,
+    )
+    .join(' | ')}`,
+);
+
+/* --- Déterminisme à configuration égale ---------------------------------- */
+const configuredReplay = await bootConfigured(
+  'cfg-128-replay',
+  AI_SEED,
+  128,
+  AI_CONFIG,
+  SETUP_TICKS,
+);
+const configuredReplayResult = collect(configuredReplay);
+validateJson(configuredReplayResult.state, 'cfg-128-replay', 128);
+const configuredReplayHash = hashHex(configuredReplay.api.engine);
+
+assert(
+  configuredHash === configuredReplayHash,
+  `#60 : déterminisme rompu avec configuration (${configuredHash} ≠ ${configuredReplayHash})`,
+);
+assert(
+  configuredResult.mapDigest === configuredReplayResult.mapDigest,
+  `#60 : carte différente pour une configuration identique`,
+);
+assert(
+  configuredReplayResult.state.counts.vehicles === configuredState.counts.vehicles &&
+    configuredReplayResult.state.counts.stations === configuredState.counts.stations,
+  '#60 : compteurs d’entités différents pour une configuration identique',
+);
+log(`\n✅ #60 : configuration reproductible (hash ${configuredHash}).`);
+
+/* --- Deux configurations produisent des mondes différents ---------------- */
+const OTHER_CONFIG = {
+  climate: 'toyland',
+  start_year: 1950,
+  difficulty: 0,
+  ai_companies: 0,
+  map_size: 128,
+};
+const other = await bootConfigured('cfg-alt', AI_SEED, 128, OTHER_CONFIG, SETUP_TICKS);
+const otherResult = collect(other);
+validateJson(otherResult.state, 'cfg-alt', 128);
+const otherHash = hashHex(other.api.engine);
+
+assert(otherHash !== configuredHash, '#60 : deux configurations distinctes donnent le même hash');
+assert(
+  otherResult.mapDigest !== configuredResult.mapDigest,
+  '#60 : deux configurations distinctes donnent la même carte',
+);
+assert(otherResult.state.counts.companies === 1, '#60 : IA créées alors que ai_companies=0');
+assert(otherResult.state.counts.vehicles === 0, '#60 : véhicules sans IA');
+assert(otherResult.state.config.climate === 'toyland', '#60 : climat toyland non appliqué');
+log(`✅ #60 : configuration alternative (toyland, 1950, 0 IA) → hash ${otherHash}.`);
+
+/* --- Validation stricte : erreur sans crash, module réutilisable ---------- */
+const invalid = wrap(await createInstance('cfg-invalid'));
+if (invalid.boot() !== 0) fail(`ottd_boot() : ${readError(invalid)}`);
+
+const expectError = (code, contains, what) => {
+  assert(code !== 0, `${what} : configuration invalide acceptée (code 0)`);
+  const message = invalid.lastError();
+  assert(
+    typeof message === 'string' && message.includes(contains),
+    `${what} : message « ${message} » sans « ${contains} »`,
+  );
+};
+
+expectError(invalid.setGameConfig('{"climate":"lunaire"}'), 'climat inconnu', 'climat');
+expectError(invalid.setGameConfig('{"champ_inconnu":1}'), 'champ inconnu', 'champ inconnu');
+expectError(invalid.setGameConfig('{"ai_companies":"deux"}'), 'entier', 'type IA');
+expectError(invalid.setGameConfig('{'), 'incomplet', 'JSON tronqué');
+expectError(invalid.newGameEx(AI_SEED, 128, 128, '{"ai_companies":99}'), 'IA 99', 'IA hors bornes');
+expectError(invalid.newGameEx(AI_SEED, 128, 128, '{"map_size":256}'), 'incompatible', 'taille');
+
+/* Aucune de ces erreurs ne doit avoir démarré de partie ni cassé le module. */
+const stillAlive = invalid.newGameEx(AI_SEED, 128, 128, '{"ai_companies":0}');
+assert(stillAlive === 0, `#60 : partie valide refusée après une erreur (${readError(invalid)})`);
+const invalidJson = makeJsonReader(invalid.engine);
+waitForMap(invalid, invalidJson, 128, 128);
+invalid.step(10);
+const recovered = invalidJson.read();
+assert(recovered.counts.companies === 1, '#60 : partie de secours invalide');
+assert(recovered.config.startYear === 1950, '#60 : défauts non restaurés après erreur');
+
+/* `ottd_set_game_config` + `ottd_new_game` : API compatible. */
+assert(invalid.setGameConfig('{"start_year":2010}') === 0, '#60 : set_game_config valide refusé');
+assert(
+  invalid.newGame(SEED, 128, 128) === 0,
+  `#60 : new_game après set_game_config : ${readError(invalid)}`,
+);
+waitForMap(invalid, invalidJson, 128, 128);
+const afterSet = invalidJson.read();
+assert(afterSet.config.startYear === 2010, '#60 : configuration en attente non appliquée');
+assert(afterSet.counts.companies === 1, '#60 : IA inattendues via new_game');
+
+invalidJson.free();
+invalid.engine._ottd_shutdown();
+log('✅ #60 : configurations invalides rejetées, module toujours utilisable.');
+
 /* --- Aperçu JSON ---------------------------------------------------------- */
 log('\nExtrait JSON (tableaux tronqués à 1 élément) :');
 log(JSON.stringify(truncate(referenceResult.state), null, 2));
@@ -587,7 +806,7 @@ log(
     `hauteur max=${referenceMapStats.maxHeight} pente max=${referenceMapStats.maxSlope}`,
 );
 
-for (const game of [reference, replay, small]) {
+for (const game of [reference, replay, small, configured, configuredReplay, other]) {
   game.map.free();
   game.json.free();
   game.api.engine._ottd_shutdown();
