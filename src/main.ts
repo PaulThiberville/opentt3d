@@ -12,6 +12,9 @@
  */
 
 import './style.css';
+import { AudioEngine, volumesFromSettings } from './audio/AudioEngine';
+import { loadAudioPreferences, saveAudioPreferences } from './audio/preferences';
+import { installAudioUi } from './audio/ui';
 import {
   EngineLoadError,
   describeUnknownError,
@@ -112,6 +115,21 @@ let session: GameSession | null = null;
 let settingsOrigin: SettingsOrigin = 'menu';
 let saveStorePromise: Promise<SaveStoreHandle> | null = null;
 let autosavePending = false;
+
+/**
+ * Moteur audio unique pour la page : il survit aux sessions (clics de menu) et
+ * se déverrouille au premier geste. Les volumes viennent de `settings` ; le
+ * mute est persisté à part (`opentt3d.audio.v1`).
+ */
+const audioPreferences = loadAudioPreferences(window.localStorage);
+const audio = new AudioEngine({
+  muted: audioPreferences.muted,
+  volumes: volumesFromSettings(settings),
+});
+audio.subscribe((state) => {
+  saveAudioPreferences(window.localStorage, { muted: state.muted });
+});
+installAudioUi({ engine: audio, win: window, doc: document });
 
 /**
  * Ouvre le stockage local une seule fois par page. `openSaveStore` retombe sur
@@ -251,6 +269,7 @@ function stopLateProbe(): void {
 function persistSettings(next: GameSettings): void {
   settings = next;
   saveSettings(window.localStorage, next);
+  audio.setVolumes(volumesFromSettings(next));
 }
 
 function disposeSession(): void {
@@ -618,6 +637,7 @@ async function startGame(options: NewGameOptions): Promise<void> {
     config: options,
     settings,
     engine: engineMode,
+    audio,
     callbacks: soloCallbacks(loading),
   });
   session = next;
@@ -706,6 +726,7 @@ async function startLoadedGame(record: SaveRecord): Promise<void> {
     config: options,
     settings,
     engine: record.engine,
+    audio,
     loadedGame: {
       bytes: record.bytes,
       options,
@@ -807,6 +828,7 @@ async function startNetworkGame(info: StartInfo): Promise<void> {
     settings,
     engine: info.settings.engine,
     network: info,
+    audio,
     callbacks: networkCallbacks((progress, message) => loading.setProgress(progress, message)),
   });
   session = next;
@@ -863,6 +885,7 @@ async function startJoinedGame(prepared: LateJoinPrepared, screen: JoinScreen): 
     engine: start.settings.engine,
     network: start,
     preparedJoin: prepared,
+    audio,
     callbacks: networkCallbacks((progress, message) => screen.setPreparation(progress, message)),
   });
   session = next;
@@ -1017,6 +1040,9 @@ function exposeDebug(current: GameSession): void {
     },
     get netStatus() {
       return current.networkSession?.stats() ?? null;
+    },
+    get audio() {
+      return current.audioEngine ?? audio;
     },
     get buildTool() {
       return current.getBuildTool();
