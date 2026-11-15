@@ -21,7 +21,7 @@ import {
 import { createDirectory, newRoomId, type Directory } from './net/directory';
 import { createLobby, type Lobby } from './net/lobby';
 import type { StartInfo } from './net/lobby-types';
-import { createTransport, type TransportKind } from './net/transport';
+import { createTransport, type Transport, type TransportKind } from './net/transport';
 import { Renderer } from './render/Renderer';
 import { detectQuality } from './render/quality';
 import {
@@ -37,14 +37,28 @@ import {
 } from './ui/gameOptions';
 import { createLocalDirectory } from './ui/localDirectory';
 import {
+  LateJoinClient,
+  LateJoinError,
+  LateJoinProbe,
+  type LateJoinPrepared,
+} from './ui/lateJoinClient';
+import { LateJoinHost } from './ui/lateJoinHost';
+import { LateJoinPanel } from './ui/lateJoinPanel';
+import {
+  buildRoomInvite,
   detachableTransport,
-  installStartedGate,
   mapStartInfoToGameOptions,
   readNetworkParams,
   transportKindFor,
   type DetachableTransport,
   type JoinTarget,
 } from './ui/netlobby';
+import {
+  checkLateJoinCompatibility,
+  hostPeerIdFromPayload,
+  offerRejectMessage,
+  type LateJoinOffer,
+} from './ui/netjoin';
 import {
   SETTINGS_STORAGE_KEY,
   loadSettings,
@@ -63,6 +77,7 @@ import { AboutScreen } from './ui/screens/AboutScreen';
 import { DisconnectedScreen } from './ui/screens/DisconnectedScreen';
 import { GameOverScreen } from './ui/screens/GameOverScreen';
 import { LobbyScreen } from './ui/screens/LobbyScreen';
+import { JoinScreen } from './ui/screens/JoinScreen';
 import { LoadingScreen } from './ui/screens/LoadingScreen';
 import { MainMenuScreen } from './ui/screens/MainMenuScreen';
 import { MultiplayerScreen, type CreateRoomRequest } from './ui/screens/MultiplayerScreen';
@@ -162,8 +177,12 @@ let replayOptions: NewGameOptions = boot.options;
 let playerName = readPlayerName();
 let activeLobby: Lobby | null = null;
 let lobbyHandle: DetachableTransport | null = null;
-let startedGateOff: (() => void) | null = null;
 let networkDirectory: Directory | null = null;
+let lateHost: LateJoinHost | null = null;
+let latePanel: LateJoinPanel | null = null;
+let lateProbe: LateJoinProbe | null = null;
+let lateProbeLobbyOff: (() => void) | null = null;
+let lateClient: LateJoinClient | null = null;
 
 function readPlayerName(): string {
   try {
@@ -215,9 +234,18 @@ function detachLobbyHandlers(): void {
   activeLobby = null;
 }
 
-function disposeNetworkGate(): void {
-  startedGateOff?.();
-  startedGateOff = null;
+function disposeLateHost(): void {
+  latePanel?.dispose();
+  latePanel = null;
+  lateHost?.dispose();
+  lateHost = null;
+}
+
+function stopLateProbe(): void {
+  lateProbeLobbyOff?.();
+  lateProbeLobbyOff = null;
+  lateProbe?.stop();
+  lateProbe = null;
 }
 
 function persistSettings(next: GameSettings): void {
@@ -226,14 +254,14 @@ function persistSettings(next: GameSettings): void {
 }
 
 function disposeSession(): void {
+  stopLateProbe();
+  disposeLateHost();
   if (!session) {
-    disposeNetworkGate();
     closeNetworkDirectory();
     return;
   }
   session.dispose();
   session = null;
-  disposeNetworkGate();
   closeNetworkDirectory();
 }
 
@@ -357,14 +385,151 @@ function joinRoom(target: JoinTarget, name: string): void {
     });
     activeLobby = lobby;
     lobbyHandle = handle;
+    startLateProbe(target, name, handle.transport, lobby);
     showLobby(lobby);
   } catch (error) {
+    stopLateProbe();
     handle?.transport.leave();
     showMultiplayer({
       join: target.roomId,
       notice: `Impossible de rejoindre le salon : ${lobbyErrorMessage(error)}`,
     });
   }
+}
+
+/**
+ * Découverte d'une partie déjà démarrée (#92). Le probe questionne le salon
+ * sur un canal distinct : tant que la partie n'a pas démarré, personne ne
+ * répond et le salon reste le chemin normal. Dès qu'une offre arrive, le
+ * salon local est détaché (le transport reste ouvert) et l'écran de join prend
+ * le relais.
+ */
+function startLateProbe(
+  target: JoinTarget,
+  name: string,
+  transport: Transport,
+  lobby: Lobby,
+): void {
+  stopLateProbe();
+  // Dès que le salon répond normalement (place attribuée, partie pas encore
+  // démarrée), la découverte tardive n'a plus lieu d'être.
+  let offLobby: (() => void) | null = null;
+  offLobby = lobby.onChange((state) => {
+    if (state.closed || state.started || state.slots.some((slot) => slot.id === lobby.selfId)) {
+      offLobby?.();
+      lateProbeLobbyOff = null;
+      stopLateProbe();
+    }
+  });
+  lateProbeLobbyOff = offLobby;
+  const probe = new LateJoinProbe({
+    transport,
+    ...(target.hostId ? { hostId: target.hostId } : {}),
+    playerName: name,
+    onOffer: (offer, from) => {
+      // Le `lobby-start` peut arriver juste après le démarrage : si ce client
+      // fait partie de la partie, il suit le chemin normal, pas le join tardif.
+      const lobby = activeLobby;
+      if (lobby?.state.started && lobby.state.slots.some((slot) => slot.id === lobby.selfId)) {
+        return;
+      }
+      stopLateProbe();
+      detachLobbyHandlers();
+      enterLateJoin(offer, from, transport, target);
+    },
+    onDenied: (offer) => {
+      stopLateProbe();
+      detachLobbyHandlers();
+      transport.leave();
+      showMultiplayer({
+        join: target.roomId,
+        notice: offerRejectMessage(offer),
+      });
+    },
+  });
+  lateProbe = probe;
+  probe.start();
+}
+
+/** Bascule vers l'écran de progression et lance le vrai join. */
+function enterLateJoin(
+  offer: LateJoinOffer,
+  from: string,
+  transport: Transport,
+  target: JoinTarget,
+): void {
+  const payload = offer.payload;
+  if (!payload) {
+    transport.leave();
+    showMultiplayer({ join: target.roomId, notice: 'L’hôte n’a pas annoncé sa configuration.' });
+    return;
+  }
+  const compatibility = checkLateJoinCompatibility(payload);
+  if (compatibility) {
+    transport.leave();
+    showMultiplayer({ join: target.roomId, notice: compatibility });
+    return;
+  }
+  const expectedHost = hostPeerIdFromPayload(payload);
+  if (expectedHost !== null && expectedHost !== from) {
+    transport.leave();
+    showMultiplayer({
+      join: target.roomId,
+      notice: 'Réponse de join incohérente : l’hôte annoncé ne correspond pas au pair.',
+    });
+    return;
+  }
+
+  let cancelled = false;
+  const screen: JoinScreen = new JoinScreen({
+    payload,
+    onCancel: () => {
+      cancelled = true;
+      screen.setCancelling();
+      lateClient?.cancel();
+      lateClient = null;
+      transport.leave();
+      showMultiplayer({ join: target.roomId, notice: 'Join annulé.' });
+    },
+    onBack: () => showMainMenu(),
+  });
+  screens.show('join', screen);
+
+  const client = new LateJoinClient({
+    transport,
+    payload,
+    hostId: from,
+    playerName,
+    onState: (state) => screen.setState(state),
+  });
+  lateClient = client;
+
+  void (async () => {
+    try {
+      const prepared = await client.prepare();
+      if (cancelled) {
+        prepared.session.dispose();
+        prepared.engine.dispose();
+        return;
+      }
+      lateClient = null;
+      await startJoinedGame(prepared, screen);
+    } catch (error) {
+      lateClient = null;
+      if (cancelled) return;
+      const reason =
+        error instanceof LateJoinError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      console.warn('[OpenTT3D] join tardif impossible', error);
+      // La session partielle est libérée par `cancel` (idempotent).
+      client.cancel();
+      transport.leave();
+      screen.setError('Impossible de rejoindre la partie', reason);
+    }
+  })();
 }
 
 function showLobby(lobby: Lobby): void {
@@ -381,6 +546,7 @@ function showLobby(lobby: Lobby): void {
 
 function leaveLobby(): void {
   const lobby = activeLobby;
+  stopLateProbe();
   detachLobbyHandlers();
   lobby?.leave();
   closeNetworkDirectory();
@@ -388,8 +554,9 @@ function leaveLobby(): void {
 }
 
 function beginNetworkGame(info: StartInfo): void {
-  // Le salon a rempli son rôle : on garde le transport pour le lockstep et on
-  // refuse explicitement les retardataires.
+  // Le salon a rempli son rôle : on garde le transport pour le lockstep.
+  // Depuis #92, les retardataires sont acceptés via le broker de join tardif.
+  stopLateProbe();
   detachLobbyHandlers();
   closeNetworkDirectory();
   if (!webglAvailable) {
@@ -594,12 +761,33 @@ async function runAutosave(): Promise<void> {
   }
 }
 
+function networkCallbacks(
+  onProgress: (progress: number, message: string) => void,
+): GameSessionCallbacks {
+  return {
+    onProgress,
+    onPauseRequested: () => showPause(),
+    onOpenSettings: () => {
+      session?.setInputEnabled(false);
+      showSettings('pause');
+    },
+    onGameOver: (summary) => showGameOver(summary),
+    onNetworkLost: (reason) => showNetworkLost(reason),
+    onQualityChange: (quality) => {
+      persistSettings(updateSettings(settings, { quality }));
+      pendingOptions = { ...pendingOptions, quality };
+    },
+  };
+}
+
 async function startNetworkGame(info: StartInfo): Promise<void> {
   disposeSession();
   // Le transport vient du salon : il ne doit pas être fermé par le nettoyage
-  // du menu. On installe la porte de refus des retardataires.
-  disposeNetworkGate();
-  startedGateOff = installStartedGate(info.transport, Object.values(info.peers));
+  // du menu. L'hôte répond aux retardataires via `LateJoinHost`, créé avant le
+  // chargement pour qu'une demande pendant la génération ne reste pas muette.
+  if (info.isHost) {
+    lateHost = new LateJoinHost({ transport: info.transport, start: info });
+  }
 
   const mapped = mapStartInfoToGameOptions(info, pendingOptions.quality);
   const token: LoadToken = { cancelled: false };
@@ -619,23 +807,65 @@ async function startNetworkGame(info: StartInfo): Promise<void> {
     settings,
     engine: info.settings.engine,
     network: info,
-    callbacks: {
-      onProgress: (progress, message) => loading.setProgress(progress, message),
-      onPauseRequested: () => showPause(),
-      onOpenSettings: () => {
-        session?.setInputEnabled(false);
-        showSettings('pause');
-      },
-      onGameOver: (summary) => showGameOver(summary),
-      onNetworkLost: (reason) => showNetworkLost(reason),
-      onQualityChange: (quality) => {
-        persistSettings(updateSettings(settings, { quality }));
-        pendingOptions = { ...pendingOptions, quality };
-      },
-    },
+    callbacks: networkCallbacks((progress, message) => loading.setProgress(progress, message)),
   });
   session = next;
 
+  try {
+    await next.load(token);
+    if (token.cancelled) throw new LoadCancelledError();
+    screens.hide();
+    next.setInputEnabled(true);
+    exposeDebug(next);
+    if (info.isHost && lateHost) {
+      const net = next.networkSession;
+      if (net) lateHost.attachSession(net);
+      const roomId = info.transport.roomId;
+      if (roomId) {
+        latePanel = new LateJoinPanel({
+          mount: uiMount,
+          host: lateHost,
+          roomId,
+          inviteLink: buildRoomInvite(
+            roomId,
+            info.transport.selfId,
+            networkKind,
+            window.location.href,
+          ),
+        });
+      }
+    }
+  } catch (error) {
+    const cancelled = token.cancelled || error instanceof LoadCancelledError;
+    next.dispose();
+    if (session === next) session = null;
+    disposeLateHost();
+    if (cancelled) {
+      showMainMenu();
+      return;
+    }
+    loading.setError('Impossible de rejoindre la partie', describeUnknownError(error));
+  }
+}
+
+/** Démarre le rendu et le HUD autour de la session déjà chargée par le join. */
+async function startJoinedGame(prepared: LateJoinPrepared, screen: JoinScreen): Promise<void> {
+  const start = prepared.start;
+  disposeSession();
+  const mapped = mapStartInfoToGameOptions(start, pendingOptions.quality);
+  pendingOptions = { ...pendingOptions, quality: mapped.options.quality };
+  const token: LoadToken = { cancelled: false };
+  const next = new GameSession({
+    canvas: sceneCanvas,
+    uiRoot: uiMount,
+    config: mapped.options,
+    settings,
+    engine: start.settings.engine,
+    network: start,
+    preparedJoin: prepared,
+    callbacks: networkCallbacks((progress, message) => screen.setPreparation(progress, message)),
+  });
+  session = next;
   try {
     await next.load(token);
     if (token.cancelled) throw new LoadCancelledError();
@@ -646,12 +876,11 @@ async function startNetworkGame(info: StartInfo): Promise<void> {
     const cancelled = token.cancelled || error instanceof LoadCancelledError;
     next.dispose();
     if (session === next) session = null;
-    disposeNetworkGate();
     if (cancelled) {
       showMainMenu();
       return;
     }
-    loading.setError('Impossible de rejoindre la partie', describeUnknownError(error));
+    screen.setError('Impossible de démarrer la partie rejointe', describeUnknownError(error));
   }
 }
 

@@ -113,6 +113,19 @@ export interface LoadedGameInput {
   name?: string;
 }
 
+/**
+ * Session réseau déjà établie par le join tardif (#92). Le moteur a chargé la
+ * sauvegarde de l'hôte et le hash a été vérifié par `NetSession` : la session
+ * de jeu n'a plus qu'à construire le rendu et le HUD autour de cet état.
+ */
+export interface PreparedJoinInput {
+  start: StartInfo;
+  engine: EngineDriver;
+  runner: EngineRunner;
+  session: NetSession;
+  restored: { tick: number; hash: string };
+}
+
 /** Instantané sérialisable d'une partie, prêt pour `SaveStore.save`. */
 export interface CapturedSave {
   bytes: Uint8Array;
@@ -140,6 +153,8 @@ export interface GameSessionOptions {
    * `StartInfo` (`settings.engine`), identique sur tous les pairs (#93).
    */
   network?: StartInfo;
+  /** Session déjà chargée par le join tardif (#92). */
+  preparedJoin?: PreparedJoinInput;
   /** Restaure une sauvegarde au lieu de générer une nouvelle partie. */
   loadedGame?: LoadedGameInput;
   /** Autosave : intervalles réels/ticks, ou `false` pour désactiver. */
@@ -195,6 +210,7 @@ export class GameSession {
   private netSession: NetSession | null = null;
   private netRunner: EngineRunner | null = null;
   private lockstep: LockstepGameDriver | null = null;
+  private preparedJoin: PreparedJoinInput | null;
   private lastNetUpdate: NetUpdate | null = null;
   private peerNames: Record<string, string> = {};
   private networkWarnings: string[] = [];
@@ -223,7 +239,8 @@ export class GameSession {
   constructor(options: GameSessionOptions) {
     this.canvas = options.canvas;
     this.uiRoot = options.uiRoot;
-    this.network = options.network ?? null;
+    this.preparedJoin = options.preparedJoin ?? null;
+    this.network = this.preparedJoin?.start ?? options.network ?? null;
     this.loadedGame = this.network ? null : (options.loadedGame ?? null);
     this.config = this.network
       ? mapStartInfoToGameOptions(this.network, options.config.quality).options
@@ -306,53 +323,67 @@ export class GameSession {
             ? 'Chargement du moteur OpenTTD (WebAssembly)…'
             : 'Initialisation du moteur mock…',
     );
-    const engine: EngineDriver = wasm ? new WasmEngine() : new MockEngine();
-    this.engine = engine;
-    await engine.init({
-      moduleUrl: wasm ? this.engineModuleUrl : 'mock://engine',
-      onProgress: (progress, message) => {
-        this.report(0.04 + Math.max(0, Math.min(1, progress)) * 0.34, message);
-      },
-      onWarning: (message) => this.recordEngineWarning(message),
-    });
-    this.collectEngineWarnings();
-    this.ensureActive(token);
-
-    if (this.loadedGame) {
-      this.report(0.42, 'Restauration de la sauvegarde…');
+    const prepared = this.preparedJoin;
+    let engine: EngineDriver;
+    if (prepared) {
+      engine = prepared.engine;
+      this.engine = engine;
+      this.restoredState = { ...prepared.restored };
+      this.report(0.34, `Partie rejointe au tick ${prepared.restored.tick} : chargement du rendu…`);
       await nextFrame();
-      this.ensureActive(token);
-      // `load()` du pilote remplace l'état atomiquement : la première snapshot
-      // reçue est complète (les séquences repartent à zéro côté pont).
-      await engine.load(this.loadedGame.bytes);
-      this.restoredState = { tick: engine.status().tick, hash: engine.hash() };
-      this.collectEngineWarnings();
       this.ensureActive(token);
     } else {
-      this.report(
-        0.42,
-        wasm
-          ? 'Génération de la carte OpenTTD…'
-          : this.isNetwork
-            ? 'Génération déterministe du monde partagé…'
-            : 'Génération de la carte et des réseaux…',
-      );
-      await nextFrame();
-      this.ensureActive(token);
-      await engine.newGame({
-        seed: config.seed,
-        width: config.size,
-        height: config.size,
-        aiCompanies: config.aiCompanies,
-        difficulty: config.difficulty,
-        startYear: config.startYear,
-        climate: config.climate,
+      engine = wasm ? new WasmEngine() : new MockEngine();
+      this.engine = engine;
+      await engine.init({
+        moduleUrl: wasm ? this.engineModuleUrl : 'mock://engine',
+        onProgress: (progress, message) => {
+          this.report(0.04 + Math.max(0, Math.min(1, progress)) * 0.34, message);
+        },
+        onWarning: (message) => this.recordEngineWarning(message),
       });
       this.collectEngineWarnings();
       this.ensureActive(token);
+
+      if (this.loadedGame) {
+        this.report(0.42, 'Restauration de la sauvegarde…');
+        await nextFrame();
+        this.ensureActive(token);
+        // `load()` du pilote remplace l'état atomiquement : la première snapshot
+        // reçue est complète (les séquences repartent à zéro côté pont).
+        await engine.load(this.loadedGame.bytes);
+        this.restoredState = { tick: engine.status().tick, hash: engine.hash() };
+        this.collectEngineWarnings();
+        this.ensureActive(token);
+      } else {
+        this.report(
+          0.42,
+          wasm
+            ? 'Génération de la carte OpenTTD…'
+            : this.isNetwork
+              ? 'Génération déterministe du monde partagé…'
+              : 'Génération de la carte et des réseaux…',
+        );
+        await nextFrame();
+        this.ensureActive(token);
+        await engine.newGame({
+          seed: config.seed,
+          width: config.size,
+          height: config.size,
+          aiCompanies: config.aiCompanies,
+          difficulty: config.difficulty,
+          startYear: config.startYear,
+          climate: config.climate,
+        });
+        this.collectEngineWarnings();
+        this.ensureActive(token);
+      }
     }
 
-    if (this.network) this.createNetworkSession(engine);
+    if (this.network) {
+      if (prepared) this.adoptPreparedJoin(prepared, engine);
+      else this.createNetworkSession(engine);
+    }
     this.ensureActive(token);
 
     this.report(0.52, 'Création de la boucle de jeu…');
@@ -390,6 +421,12 @@ export class GameSession {
         `Partie restaurée${this.loadedGame.name ? ` : « ${this.loadedGame.name} »` : ''}.`,
       );
     }
+    if (this.preparedJoin) {
+      this.hud.notify(
+        'info',
+        `Partie rejointe en cours : tick ${this.preparedJoin.restored.tick}, hash vérifié avec l’hôte.`,
+      );
+    }
 
     this.report(0.82, 'Construction du terrain…');
     const buildStart = performance.now();
@@ -412,7 +449,9 @@ export class GameSession {
       'info',
       this.loadedGame
         ? `Sauvegarde restaurée en ${buildMs} ms.`
-        : `Monde ${config.size}×${config.size} généré en ${buildMs} ms.`,
+        : this.preparedJoin
+          ? `Partie rejointe en ${buildMs} ms : rendu prêt au tick ${this.preparedJoin.restored.tick}.`
+          : `Monde ${config.size}×${config.size} généré en ${buildMs} ms.`,
     );
     this.hud.notify(
       'info',
@@ -436,9 +475,11 @@ export class GameSession {
     if (this.isNetwork) {
       hud.notify(
         'info',
-        this.engineMode === 'wasm'
-          ? 'Session réseau lockstep : moteur OpenTTD WASM, état partagé par hashes.'
-          : 'Session réseau lockstep : moteur mock déterministe, état partagé par hashes.',
+        this.preparedJoin
+          ? `Session réseau rejointe en cours (${this.engineMode === 'wasm' ? 'WASM' : 'mock'}) : sauvegarde de l’hôte chargée, hash vérifié, reprise des ticks.`
+          : this.engineMode === 'wasm'
+            ? 'Session réseau lockstep : moteur OpenTTD WASM, état partagé par hashes.'
+            : 'Session réseau lockstep : moteur mock déterministe, état partagé par hashes.',
       );
     } else if (this.engineMode === 'wasm') {
       hud.notify('info', 'Moteur WASM : simulation OpenTTD réelle.');
@@ -474,6 +515,20 @@ export class GameSession {
     });
   }
 
+  /**
+   * Adopte la session déjà chargée par le join tardif (#92). Le moteur, le
+   * runner et le `NetSession` ont vérifié la sauvegarde et le hash : on ne
+   * recrée ni moteur ni session, on rebranche seulement le rendu et le HUD.
+   */
+  private adoptPreparedJoin(prepared: PreparedJoinInput, engine: EngineDriver): void {
+    this.netRunner = prepared.runner;
+    this.lockstep = createLockstepDriver(engine);
+    this.netSession = prepared.session;
+    this.peerNames = peerNamesFromStart(prepared.start);
+    this.lastNetworkSaveAt = this.networkNow();
+    this.attachNetHandlers();
+  }
+
   /** Ouvre le lockstep : hellos, tours et hashes commencent ici. */
   private startNetworkSession(): void {
     const start = this.network;
@@ -490,15 +545,26 @@ export class GameSession {
       ...(start.isHost ? {} : { hostId }),
       peers: start.peers,
       engine: engineBuildId(this.engineMode),
+      maxPlayers: start.settings.maxPlayers,
+      // Une sauvegarde WASM peut être volumineuse : garder la fenêtre ouverte
+      // plus longtemps que le défaut de 15 s, sans bloquer la partie au-delà.
+      joinTimeoutMs: 60_000,
       ...(playerName ? { playerName } : {}),
     });
-    this.netSession.onDesync(() => {
+    this.attachNetHandlers();
+  }
+
+  /** Abonnements communs au démarrage initial et au join tardif. */
+  private attachNetHandlers(): void {
+    const session = this.netSession;
+    if (!session) return;
+    session.onDesync(() => {
       this.hud?.notify('warning', 'Divergence détectée : resynchronisation avec l’hôte…');
       // Le runner vient de recharger un tick plus avancé : rafraîchit la vue
       // sans attendre le prochain snapshot périodique.
       this.game?.refresh();
     });
-    this.netSession.onChat(({ player, text }) => {
+    session.onChat(({ player, text }) => {
       const name = this.network?.players.find((item) => item.player === player)?.name ?? 'Joueur';
       this.hud?.notify('info', `${name} : ${text}`);
     });
