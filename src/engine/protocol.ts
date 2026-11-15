@@ -245,15 +245,7 @@ export type EngineCommand =
   | { type: 'console'; command: string }
   | {
       type: 'build';
-      tool:
-        | 'road'
-        | 'rail'
-        | 'station'
-        | 'depot'
-        | 'signal'
-        | 'bridge'
-        | 'tunnel'
-        | 'clear';
+      tool: 'road' | 'rail' | 'station' | 'depot' | 'signal' | 'bridge' | 'tunnel' | 'clear';
       company: CompanyId;
       /** Points en coordonnées tuiles, arrondis par le pont. */
       from: { x: number; y: number };
