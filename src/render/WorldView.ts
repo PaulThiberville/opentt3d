@@ -242,7 +242,7 @@ export class WorldView {
     this.controller.update(deltaSeconds);
     this.terrain.update(deltaSeconds);
     this.tracks.update(this.camera.position);
-    this.vegetation.update(deltaSeconds);
+    this.vegetation.update(deltaSeconds, this.camera.position);
     this.cityLayer.update(this.camera.position);
     this.industries.update(deltaSeconds, this.camera.position);
     this.dayNight.advance(deltaSeconds);
