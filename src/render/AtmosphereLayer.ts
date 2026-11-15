@@ -12,6 +12,11 @@
  * coupe toutes les particules animées (les nuages restent figés) ; la météo est
  * désactivée par défaut et n'est jamais animée sous reduced motion.
  *
+ * La poussière de chantier est une bouffée brève et locale : quelques particules
+ * sur les tuiles du plan, un rayon d'une demi-tuile, un fondu de moins d'une
+ * seconde. Elle ne doit jamais masquer le fantôme de construction ni le curseur
+ * (elle est rendue sous l'overlay et reste très transparente).
+ *
  * Aucun asset binaire : les textures de nuage sont générées en canvas à
  * l'exécution (absentes sous Node, où les matériaux restent valides).
  */
@@ -62,7 +67,7 @@ export const ATMOSPHERE_BUDGETS: Record<QualityLevel, AtmosphereBudget> = {
     nightLights: 32,
     rain: 400,
     snow: 300,
-    dust: 32,
+    dust: 10,
   },
   high: {
     skyDome: true,
@@ -72,7 +77,7 @@ export const ATMOSPHERE_BUDGETS: Record<QualityLevel, AtmosphereBudget> = {
     nightLights: 64,
     rain: 800,
     snow: 600,
-    dust: 64,
+    dust: 16,
   },
 };
 
@@ -89,7 +94,21 @@ const BIRD_HEIGHT = 7;
 const NIGHT_LIGHT_HEIGHT = 2.2;
 const RAIN_BOX_XZ = 46;
 const RAIN_BOX_Y = 34;
-const DUST_RADIUS = 2.2;
+
+/**
+ * Réglages de la poussière de chantier (#179). Volontairement discrets : la
+ * bouffée dure moins d'une seconde, reste dans l'emprise construite et ne
+ * dépasse jamais une demi-tuile de rayon.
+ */
+const DUST_SIZE = 0.55;
+const DUST_OPACITY = 0.18;
+const DUST_LIFE = 0.55;
+const DUST_STAGGER = 0.14;
+const DUST_TOTAL = DUST_LIFE + DUST_STAGGER;
+/** Au-delà, la bouffée n'est plus lisible : inutile de la simuler. */
+const DUST_RANGE = 110;
+/** Nombre maximal de tuiles du plan conservées comme ancres. */
+const DUST_TILE_CAP = 48;
 
 const FNV_OFFSET = 0x811c9dc5;
 const FNV_PRIME = 0x01000193;
@@ -114,6 +133,19 @@ interface ConstructionSite {
   x: number;
   z: number;
   ground: number;
+}
+
+/** Tuile d'un plan de construction, au format minimal attendu par l'atmosphère. */
+export interface ConstructionTile {
+  x: number;
+  y: number;
+}
+
+/** Emprise d'un chantier : centre, et si possible les tuiles du plan. */
+export interface ConstructionSiteInput {
+  x: number;
+  z: number;
+  tiles?: readonly ConstructionTile[];
 }
 
 const DOME_VERTEX = /* glsl */ `
@@ -296,6 +328,13 @@ export class AtmosphereLayer {
   private lightAnchors: LightAnchor[] = [];
   private construction: ConstructionSite | null = null;
   private dustInRange = true;
+  /** Âge de la bouffée courante ; >= DUST_TOTAL quand elle est éteinte. */
+  private dustAge = DUST_TOTAL;
+  /** Forme fixe de chaque particule : angle, rayon, montée, retard. */
+  private dustShape: Float32Array;
+  /** Tuiles du plan (centre + sol) servant d'ancres à la bouffée. */
+  private dustAnchors: Float32Array;
+  private dustAnchorCount = 0;
 
   // --- Systèmes (capacités fixes) -----------------------------------------
   private dome: THREE.Mesh;
@@ -516,11 +555,22 @@ export class AtmosphereLayer {
 
     // --- Poussière de construction ---------------------------------------
     this.dustPositions = new Float32Array(MAX.dust * 3);
+    this.dustShape = new Float32Array(MAX.dust * 4);
+    this.dustAnchors = new Float32Array(DUST_TILE_CAP * 3);
+    const dustRng = new Prng(0x2d0571);
+    for (let index = 0; index < MAX.dust; index += 1) {
+      const meta = index * 4;
+      this.dustShape[meta] = dustRng.float(0, Math.PI * 2);
+      this.dustShape[meta + 1] = dustRng.float(0.12, 0.45);
+      this.dustShape[meta + 2] = dustRng.float(0.24, 0.55);
+      this.dustShape[meta + 3] = dustRng.float(0, DUST_STAGGER);
+    }
     this.dustMaterial = new THREE.PointsMaterial({
-      color: 0xd8c7a6,
-      size: 1.15,
+      color: 0xd6cdbb,
+      size: DUST_SIZE,
+      map: this.softSnowTexture,
       transparent: true,
-      opacity: 0.34,
+      opacity: 0,
       depthWrite: false,
       fog: true,
       sizeAttenuation: true,
@@ -631,14 +681,20 @@ export class AtmosphereLayer {
     return this.nightAmount;
   }
 
-  /** Zone de chantier : poussière tant que le plan est affiché. */
-  setConstructionSite(site: { x: number; z: number } | null): void {
+  /**
+   * Zone de chantier : une bouffée discrète au changement de plan. Les tuiles
+   * du plan, quand elles sont fournies, bornent strictement la poussière à
+   * l'emprise construite (pas de nuage autour).
+   */
+  setConstructionSite(site: ConstructionSiteInput | null): void {
     if (!site) {
       this.construction = null;
+      this.dustAnchorCount = 0;
+      this.dustAge = DUST_TOTAL;
       this.dust.visible = false;
+      this.dustMaterial.opacity = 0;
       return;
     }
-    this.dustInRange = true;
     const ground = this.map ? sampleHeightWorld(this.map, site.x, site.z) : 0;
     if (this.construction) {
       this.construction.x = site.x;
@@ -647,11 +703,41 @@ export class AtmosphereLayer {
     } else {
       this.construction = { x: site.x, z: site.z, ground };
     }
+    this.captureDustAnchors(site, ground);
+    // Chaque nouveau plan relance une bouffée courte : elle s'éteint d'elle-même
+    // même si l'aperçu reste affiché.
+    this.dustAge = 0;
+    this.dustInRange = true;
     this.dust.visible = this.dustEnabled();
   }
 
   get hasConstructionSite(): boolean {
     return this.construction !== null;
+  }
+
+  /** Bouffée de poussière encore visible (diagnostic/tests). */
+  get dustVisible(): boolean {
+    return this.dust.visible;
+  }
+
+  /** Opacité courante de la poussière (diagnostic/tests). */
+  get dustOpacity(): number {
+    return this.dustMaterial.opacity;
+  }
+
+  /** Taille courante d'une particule de poussière (diagnostic/tests). */
+  get dustSize(): number {
+    return this.dustMaterial.size;
+  }
+
+  /** Âge de la bouffée en secondes (diagnostic/tests). */
+  get dustElapsed(): number {
+    return this.dustAge;
+  }
+
+  /** Nombre de tuiles du plan utilisées comme ancres (diagnostic/tests). */
+  get dustTileAnchorCount(): number {
+    return this.dustAnchorCount;
   }
 
   // -------------------------------------------------------------------------
@@ -675,7 +761,7 @@ export class AtmosphereLayer {
     this.updateBirds(animate);
     this.updateButterflies(animate);
     this.updateWeather(camera, delta, animate);
-    this.updateDust(camera, animate);
+    this.updateDust(camera, delta, animate);
     this.applyNightVisibility();
   }
 
@@ -795,30 +881,100 @@ export class AtmosphereLayer {
     points.geometry.attributes.position!.needsUpdate = true;
   }
 
-  private updateDust(camera: THREE.Vector3, animate: boolean): void {
-    if (!this.dust.visible) return;
+  private updateDust(camera: THREE.Vector3, delta: number, animate: boolean): void {
     const site = this.construction;
     if (!site) {
       this.dust.visible = false;
+      this.dustMaterial.opacity = 0;
       return;
     }
+    // Qualité basse ou reduced motion : aucune particule à simuler.
+    if (!animate || this.budget.dust <= 0) {
+      this.dust.visible = false;
+      this.dustMaterial.opacity = 0;
+      return;
+    }
+    if (this.dustAge >= DUST_TOTAL) {
+      this.dust.visible = false;
+      this.dustMaterial.opacity = 0;
+      return;
+    }
+    this.dustAge += delta;
+    if (this.dustAge >= DUST_TOTAL) {
+      this.dust.visible = false;
+      this.dustMaterial.opacity = 0;
+      return;
+    }
+
     const count = this.budget.dust;
+    const anchorCount = Math.max(1, this.dustAnchorCount);
+    const anchors = this.dustAnchors;
+    const shape = this.dustShape;
     const positions = this.dustPositions;
     for (let index = 0; index < count; index += 1) {
       const offset = index * 3;
-      const seed = index / Math.max(1, count);
-      const t = animate ? (this.elapsed * 0.45 + seed) % 1 : seed;
-      const angle = seed * Math.PI * 2 * 7.13;
-      const radius = (0.25 + t * DUST_RADIUS) * (0.6 + (seed % 0.4));
-      positions[offset] = site.x + Math.cos(angle) * radius;
-      positions[offset + 1] = site.ground + 0.25 + t * 2.4;
-      positions[offset + 2] = site.z + Math.sin(angle) * radius;
+      const meta = index * 4;
+      const delay = shape[meta + 3]!;
+      const t = (this.dustAge - delay) / DUST_LIFE;
+      if (t <= 0 || t >= 1) {
+        // Hors de sa fenêtre : le point est garé sous le terrain.
+        positions[offset + 1] = -1_000;
+        continue;
+      }
+      const anchorIndex = Math.min(anchorCount - 1, Math.floor((index * anchorCount) / count));
+      const anchor = anchorIndex * 3;
+      const angle = shape[meta]! + t * 0.9;
+      const radius = shape[meta + 1]! * (0.7 + t * 0.6);
+      positions[offset] = anchors[anchor]! + Math.cos(angle) * radius;
+      positions[offset + 1] = anchors[anchor + 2]! + 0.06 + t * shape[meta + 2]!;
+      positions[offset + 2] = anchors[anchor + 1]! + Math.sin(angle) * radius;
     }
-    // La poussière n'est utile que proche de la caméra.
-    const distance = Math.hypot(site.x - camera.x, site.z - camera.z);
-    this.dustInRange = distance < 140;
-    this.dust.visible = this.dustInRange;
     this.dust.geometry.attributes.position!.needsUpdate = true;
+
+    // Apparition quasi immédiate puis extinction rapide : la bouffée ne reste
+    // jamais devant l'aperçu au-delà de quelques dixièmes de seconde.
+    const elapsed = this.dustAge / DUST_TOTAL;
+    const fadeIn = Math.min(1, this.dustAge / 0.06);
+    const fadeOut = 1 - Math.max(0, (elapsed - 0.25) / 0.75);
+    this.dustMaterial.opacity = DUST_OPACITY * fadeIn * fadeOut;
+    this.dustMaterial.size = DUST_SIZE * (1 - elapsed * 0.28);
+
+    const distance = Math.hypot(site.x - camera.x, site.z - camera.z);
+    this.dustInRange = distance < DUST_RANGE;
+    this.dust.visible = this.dustInRange;
+  }
+
+  /** Mémorise les tuiles du plan comme ancres (sans allocation par frame). */
+  private captureDustAnchors(site: ConstructionSiteInput, centerGround: number): void {
+    this.dustAnchorCount = 0;
+    const push = (x: number, z: number, ground: number): void => {
+      if (this.dustAnchorCount >= DUST_TILE_CAP) return;
+      const offset = this.dustAnchorCount * 3;
+      this.dustAnchors[offset] = x;
+      this.dustAnchors[offset + 1] = z;
+      this.dustAnchors[offset + 2] = ground;
+      this.dustAnchorCount += 1;
+    };
+    const tiles = site.tiles;
+    if (tiles && tiles.length > 0) {
+      const step = Math.max(1, Math.ceil(tiles.length / DUST_TILE_CAP));
+      for (let index = 0; index < tiles.length; index += step) {
+        const tile = tiles[index];
+        if (!tile) continue;
+        const x = tile.x + 0.5;
+        const z = tile.y + 0.5;
+        push(x, z, this.map ? sampleHeightWorld(this.map, x, z) : centerGround);
+      }
+      // Un long tracé doit aussi pétiller à son extrémité (curseur).
+      const last = tiles[tiles.length - 1];
+      if (last && step > 1 && this.dustAnchorCount < DUST_TILE_CAP) {
+        const x = last.x + 0.5;
+        const z = last.y + 0.5;
+        push(x, z, this.map ? sampleHeightWorld(this.map, x, z) : centerGround);
+      }
+      return;
+    }
+    push(site.x, site.z, centerGround);
   }
 
   // -------------------------------------------------------------------------
@@ -1025,7 +1181,9 @@ export class AtmosphereLayer {
     this.clouds.visible = this.budget.clouds > 0;
     this.clouds.geometry.setDrawRange(0, this.budget.clouds);
     this.dome.visible = this.budget.skyDome;
-    this.dust.visible = this.dustEnabled() && this.dustInRange;
+    const showDust = this.dustEnabled() && this.dustInRange && this.dustAge < DUST_TOTAL;
+    this.dust.visible = showDust;
+    if (!showDust) this.dustMaterial.opacity = 0;
   }
 
   private applyWeatherVisibility(): void {
@@ -1210,8 +1368,12 @@ export class AtmosphereLayer {
     this.habitats = [];
     this.forestHabitats = [];
     this.lightAnchors = [];
+    this.dust.visible = false;
+    this.dustMaterial.opacity = 0;
     this.construction = null;
     this.dustInRange = true;
+    this.dustAnchorCount = 0;
+    this.dustAge = DUST_TOTAL;
     this.map = null;
     this.towns = [];
     this.stations = [];
