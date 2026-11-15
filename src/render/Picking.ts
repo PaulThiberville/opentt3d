@@ -107,17 +107,31 @@ export class Picking {
       }
     }
 
+    const tile = this.pickTileWithCamera(ndc, camera);
+    return tile ? { kind: 'tile', ...tile } : null;
+  }
+
+  /**
+   * Cible uniquement le terrain, sans véhicule ni bâtiment. Utilisé par le mode
+   * construction : un camion garé sur la tuile ne doit pas détourner le clic.
+   */
+  pickTileWithCamera(
+    ndc: { x: number; y: number },
+    camera: THREE.Camera,
+  ): { x: number; y: number; point: THREE.Vector3; distance: number } | null {
+    this.pointer.set(ndc.x, ndc.y);
+    this.raycaster.setFromCamera(this.pointer, camera);
     const terrain = this.sources.terrain();
-    if (terrain.length > 0) {
-      const hits = this.raycaster.intersectObjects(terrain, false);
-      const first = hits[0];
-      if (first) {
-        const x = Math.floor(first.point.x);
-        const y = Math.floor(first.point.z);
-        return { kind: 'tile', x, y, point: first.point.clone(), distance: first.distance };
-      }
-    }
-    return null;
+    if (terrain.length === 0) return null;
+    const hits = this.raycaster.intersectObjects(terrain, false);
+    const first = hits[0];
+    if (!first) return null;
+    return {
+      x: Math.floor(first.point.x),
+      y: Math.floor(first.point.z),
+      point: first.point.clone(),
+      distance: first.distance,
+    };
   }
 
   /** Met à jour le marqueur visuel du survol. */
