@@ -1,13 +1,21 @@
 /**
  * Terrain 3D en chunks.
  *
- * Chaque chunk de 32×32 tuiles est un `Mesh` non indexé (une tuile = deux
- * triangles, couleur plate) avec ses normales calculées : rendu low-poly net,
- * frustum culling efficace et reconstruction indépendante.
+ * Une tuile reste un quad (deux triangles) en basse et moyenne qualité : la
+ * géométrie est simplement indexée, avec des sommets partagés à l'intérieur du
+ * chunk et des bords identiques de part et d'autre des jonctions. Les facettes
+ * disparaissent par le shading, pas par la topologie :
  *
- * Les hauteurs de coin sont moyennées sur les tuiles adjacentes de façon
- * identique de part et d'autre d'une jonction : les bords de chunks partagent
- * exactement les mêmes sommets (pas de fissure ni de z-fighting).
+ * - normales de sommets lissées (`computeVertexNormals` sur une grille avec
+ *   une couronne de sommets hors chunk, pour que les bords restent cohérents) ;
+ * - couleurs par sommet interpolées entre tuiles voisines, avec occlusion
+ *   locale calculée depuis les hauteurs ;
+ * - peau procédurale dans le matériau : bruit multi-échelles world-space,
+ *   blending herbe/terre/roche par pente et altitude, micro-perturbation de
+ *   normale atténuée avec la distance (anti-moiré).
+ *
+ * La haute qualité subdivise chaque tuile (2×2) pour adoucir la silhouette ;
+ * la moyenne garde exactement le budget de triangles d'avant #122.
  *
  * L'eau est un second maillage par chunk, plaqué 6 cm au-dessus du lit, dont
  * le shader animé donne le clapot.
@@ -17,7 +25,7 @@ import * as THREE from 'three';
 import type { MapSnapshot, TileKind } from '../engine/protocol';
 import {
   HEIGHT_SCALE,
-  cornerHeightWorld,
+  clamp,
   isWaterKind,
   sampleHeightWorld,
   tileKindFromIndex,
@@ -25,9 +33,12 @@ import {
 import { hashUnit2d } from '../game/prng';
 import { hexToRgb, rgbToHex, shallowWaterColour, tileColour } from './tileVisuals';
 import { qualitySettings, type QualityLevel } from './quality';
+import { TERRAIN_CHUNK_SIZE, terrainSkinStrength, terrainSubdivision } from './terrainSurface';
 
-export const CHUNK_SIZE = 32;
+export const CHUNK_SIZE = TERRAIN_CHUNK_SIZE;
 const WATER_OFFSET = 0.5;
+/** Demi-pas (en tuiles) utilisé pour l'AO et les dérivées de la peau. */
+const AO_STEP = 0.5;
 
 /**
  * Émission nocturne par type de tuile : les routes, rails et ouvrages restent
@@ -45,6 +56,32 @@ const NIGHT_GLOW: Partial<Record<TileKind, readonly [number, number, number]>> =
   river: [0.015, 0.04, 0.07],
   canal: [0.015, 0.04, 0.07],
 };
+
+/**
+ * Bruit de valeur GLSL, déterministe et sans texture. Les octaves sont
+ * volontairement peu nombreuses : le but est une variation de teinte, pas un
+ * détail qui scintille au loin.
+ */
+const SKIN_NOISE_GLSL = `
+float skinHash( vec2 p ) {
+  // Hash de Dave Hoskins : bien moins directionnel que fract( p * vec2(...) ),
+  // ce qui évite les rayures diagonales et le moiré.
+  vec3 p3 = fract( vec3( p.xyx ) * 0.1031 );
+  p3 += dot( p3, p3.yzx + 33.33 );
+  return fract( ( p3.x + p3.y ) * p3.z );
+}
+
+float skinNoise( vec2 p ) {
+  vec2 i = floor( p );
+  vec2 f = fract( p );
+  vec2 u = f * f * ( 3.0 - 2.0 * f );
+  float a = skinHash( i );
+  float b = skinHash( i + vec2( 1.0, 0.0 ) );
+  float c = skinHash( i + vec2( 0.0, 1.0 ) );
+  float d = skinHash( i + vec2( 1.0, 1.0 ) );
+  return mix( mix( a, b, u.x ), mix( c, d, u.x ), u.y );
+}
+`;
 
 interface Chunk {
   cx: number;
@@ -88,7 +125,10 @@ export class TerrainLayer {
   private waterMaterial: THREE.MeshPhongMaterial;
   private waterTime: { value: number } | null = null;
   private nightUniform: { value: number } = { value: 0 };
+  private skinUniform: { value: number } = { value: 1 };
   private nightAmount = 0;
+  private quality: QualityLevel = 'medium';
+  private subdivision = terrainSubdivision('medium');
   private oceanDayColor = new THREE.Color(0x1b4664);
   private oceanNightColor = new THREE.Color(0x0a1828);
   private elapsed = 0;
@@ -106,23 +146,104 @@ export class TerrainLayer {
     this.groundMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: false });
     this.groundMaterial.onBeforeCompile = (shader) => {
       shader.uniforms.uNight = this.nightUniform;
+      shader.uniforms.uSkin = this.skinUniform;
       shader.vertexShader = shader.vertexShader
         .replace(
           '#include <common>',
-          '#include <common>\nattribute vec3 aNightGlow;\nvarying vec3 vNightGlow;',
+          `#include <common>
+attribute float aAo;
+attribute vec3 aNightGlow;
+varying vec3 vNightGlow;
+varying float vAo;
+varying vec3 vSkinWorld;
+varying vec3 vSkinNormal;
+varying float vSkinDistance;`,
         )
-        .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vNightGlow = aNightGlow;');
+        .replace(
+          '#include <beginnormal_vertex>',
+          `#include <beginnormal_vertex>
+  vSkinNormal = normalize( mat3( modelMatrix ) * objectNormal );`,
+        )
+        .replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+  vec4 skinWorld = modelMatrix * vec4( transformed, 1.0 );
+  vSkinWorld = skinWorld.xyz;
+  vSkinDistance = -( modelViewMatrix * vec4( transformed, 1.0 ) ).z;
+  vAo = aAo;
+  vNightGlow = aNightGlow;`,
+        );
       shader.fragmentShader = shader.fragmentShader
         .replace(
           '#include <common>',
-          '#include <common>\nuniform float uNight;\nvarying vec3 vNightGlow;',
+          `#include <common>
+uniform float uNight;
+uniform float uSkin;
+varying vec3 vNightGlow;
+varying float vAo;
+varying vec3 vSkinWorld;
+varying vec3 vSkinNormal;
+varying float vSkinDistance;
+${SKIN_NOISE_GLSL}`,
+        )
+        .replace(
+          '#include <color_fragment>',
+          `#include <color_fragment>
+  float skinFade = 1.0 - smoothstep( 70.0, 210.0, vSkinDistance );
+  vec3 skinNormalWorld = normalize( vSkinNormal );
+  float skinSlope = clamp( 1.0 - skinNormalWorld.y, 0.0, 1.0 );
+  float skinAltitude = clamp( vSkinWorld.y / 7.5, 0.0, 1.0 );
+  float skinMacro = skinNoise( vSkinWorld.xz * 0.11 + 4.7 ) - 0.5;
+  float skinMeso = skinNoise( vSkinWorld.xz * 0.37 - 1.9 ) - 0.5;
+  float skinFine = ( skinNoise( vSkinWorld.xz * 1.15 + 9.3 ) - 0.5 ) * skinFade;
+
+  // Terre/roche sur les pentes, herbe en plaques douces.
+  float skinEarth = smoothstep( 0.10, 0.42, skinSlope )
+    + smoothstep( 0.45, 0.85, skinMacro * 0.5 + 0.5 ) * 0.22;
+  skinEarth = clamp( skinEarth, 0.0, 1.0 ) * uSkin;
+  float skinRock = smoothstep( 0.26, 0.62, skinSlope )
+    + smoothstep( 0.72, 0.95, skinAltitude ) * 0.5;
+  skinRock = clamp( skinRock, 0.0, 1.0 ) * uSkin;
+
+  // Variation de teinte et de rugosité perçue (le Lambert n'a pas de roughness).
+  diffuseColor.rgb *= 1.0 + ( skinMeso * 0.10 + skinFine * 0.06 ) * uSkin;
+  diffuseColor.rgb = mix(
+    diffuseColor.rgb,
+    diffuseColor.rgb * vec3( 1.06, 1.0, 0.88 ) + vec3( 0.015, 0.008, 0.0 ),
+    skinEarth * 0.45
+  );
+  diffuseColor.rgb = mix(
+    diffuseColor.rgb,
+    vec3( 0.40, 0.39, 0.35 ) + skinFine * 0.06,
+    skinRock * 0.35
+  );
+  // Creux légèrement assombris, reliefs intacts.
+  diffuseColor.rgb *= mix( 1.0, vAo, 0.65 * uSkin );
+  diffuseColor.rgb = max( diffuseColor.rgb, vec3( 0.0 ) );`,
+        )
+        .replace(
+          '#include <normal_fragment_begin>',
+          `#include <normal_fragment_begin>
+  float bumpSlope = clamp( 1.0 - normalize( vSkinNormal ).y, 0.0, 1.0 );
+  float bumpFade = ( 1.0 - smoothstep( 35.0, 115.0, vSkinDistance ) )
+    * ( 1.0 - smoothstep( 0.32, 0.72, bumpSlope ) );
+  float bumpHeight = skinNoise( vSkinWorld.xz * 2.4 ) * 0.65
+    + skinNoise( vSkinWorld.xz * 5.7 + 5.0 ) * 0.35;
+  vec2 bumpGrad = clamp(
+    vec2( dFdx( bumpHeight ), dFdy( bumpHeight ) ) * 18.0,
+    vec2( -0.4 ),
+    vec2( 0.4 )
+  );
+  vec3 bumpView = mat3( viewMatrix ) * vec3( -bumpGrad.x, 0.0, -bumpGrad.y );
+  normal = normalize( normal + bumpView * 0.22 * uSkin * bumpFade );`,
         )
         .replace(
           '#include <emissivemap_fragment>',
-          '#include <emissivemap_fragment>\n  totalEmissiveRadiance += vNightGlow * uNight;',
+          `#include <emissivemap_fragment>
+  totalEmissiveRadiance += vNightGlow * uNight;`,
         );
     };
-    this.groundMaterial.customProgramCacheKey = () => 'opentt3d-terrain-night-v1';
+    this.groundMaterial.customProgramCacheKey = () => 'opentt3d-terrain-skin-v2';
     this.waterMaterial = this.createWaterMaterial();
     // Fond océanique : masque la découpe de la carte et donne une île crédible.
     this.oceanGeometry = new THREE.PlaneGeometry(1, 1);
@@ -133,6 +254,7 @@ export class TerrainLayer {
     this.ocean.position.y = -0.45;
     this.ocean.frustumCulled = false;
     this.group.add(this.ocean);
+    this.setQuality('medium');
   }
 
   get mapSnapshot(): MapSnapshot | null {
@@ -141,6 +263,16 @@ export class TerrainLayer {
 
   get chunkCount(): number {
     return this.chunks.size;
+  }
+
+  /** Subdivision courante (1 en basse/moyenne, 2 en haute). */
+  get tileSubdivision(): number {
+    return this.subdivision;
+  }
+
+  /** Qualité courante appliquée à la peau. */
+  get qualityLevel(): QualityLevel {
+    return this.quality;
   }
 
   private createWaterMaterial(): THREE.MeshPhongMaterial {
@@ -226,11 +358,17 @@ export class TerrainLayer {
     this.previous = copyArrays(map);
   }
 
+  /**
+   * Un chunk dépend d'une couronne d'une tuile : les hauteurs de coin, les
+   * couleurs interpolées et l'eau de bord lisent les tuiles voisines. Sans
+   * cette marge, modifier une tuile en bord de chunk laisserait une fissure
+   * ou une couleur figée sur le chunk d'à côté.
+   */
   private chunkDiffers(map: MapSnapshot, previous: MapArrays, cx: number, cy: number): boolean {
-    const x0 = cx * CHUNK_SIZE;
-    const y0 = cy * CHUNK_SIZE;
-    const x1 = Math.min(map.width, x0 + CHUNK_SIZE);
-    const y1 = Math.min(map.height, y0 + CHUNK_SIZE);
+    const x0 = Math.max(0, cx * CHUNK_SIZE - 1);
+    const y0 = Math.max(0, cy * CHUNK_SIZE - 1);
+    const x1 = Math.min(map.width, (cx + 1) * CHUNK_SIZE + 1);
+    const y1 = Math.min(map.height, (cy + 1) * CHUNK_SIZE + 1);
     for (let y = y0; y < y1; y += 1) {
       const row = y * map.width;
       for (let x = x0; x < x1; x += 1) {
@@ -280,35 +418,40 @@ export class TerrainLayer {
     const height = Math.min(CHUNK_SIZE, map.height - y0);
     if (width <= 0 || height <= 0) return;
 
-    const tileCount = width * height;
-    const positions = new Float32Array(tileCount * 6 * 3);
-    const colours = new Float32Array(tileCount * 6 * 3);
-    const nightColours = new Float32Array(tileCount * 6 * 3);
-    let vertex = 0;
+    const subdivision = this.subdivision;
+    const invSubdivision = 1 / subdivision;
+    const nx = width * subdivision + 1;
+    const nz = height * subdivision + 1;
+    const vertexCount = nx * nz;
+    const positions = new Float32Array(vertexCount * 3);
+    const colours = new Float32Array(vertexCount * 3);
+    const nightColours = new Float32Array(vertexCount * 3);
+    const occlusion = new Float32Array(vertexCount);
 
-    // Hauteurs de coin du chunk, calculées une fois (33×33 au maximum).
-    const cornerCountX = width + 1;
-    const corners = new Float32Array(cornerCountX * (height + 1));
-    for (let gy = 0; gy <= height; gy += 1) {
-      for (let gx = 0; gx <= width; gx += 1) {
-        corners[gy * cornerCountX + gx] = cornerHeightWorld(map, x0 + gx, y0 + gy);
-      }
-    }
-    const cornerAt = (gx: number, gy: number): number => corners[gy * cornerCountX + gx] ?? 0;
-
+    // Couleurs et émissions par tuile, avec une couronne d'une tuile : les
+    // sommets de bord interpolent ainsi exactement les mêmes valeurs de part
+    // et d'autre d'un chunk.
+    const haloW = width + 2;
+    const haloH = height + 2;
+    const haloR = new Float32Array(haloW * haloH);
+    const haloG = new Float32Array(haloW * haloH);
+    const haloB = new Float32Array(haloW * haloH);
+    const haloGlowR = new Float32Array(haloW * haloH);
+    const haloGlowG = new Float32Array(haloW * haloH);
+    const haloGlowB = new Float32Array(haloW * haloH);
     const rgb = { r: 0, g: 0, b: 0 };
-    for (let ty = 0; ty < height; ty += 1) {
-      for (let tx = 0; tx < width; tx += 1) {
-        const wx = x0 + tx;
-        const wy = y0 + ty;
-        const index = wy * map.width + wx;
+    for (let hy = 0; hy < haloH; hy += 1) {
+      const ty = clamp(y0 + hy - 1, 0, map.height - 1);
+      for (let hx = 0; hx < haloW; hx += 1) {
+        const tx = clamp(x0 + hx - 1, 0, map.width - 1);
+        const index = ty * map.width + tx;
         const kind = tileKindFromIndex(map.kind[index] ?? 0);
         const level = map.heightMap[index] ?? 0;
         const steepness = map.slope[index] ?? 0;
-        const variation = hashUnit2d(map.width, wx, wy);
         const colour = tileColour(kind, level, steepness, map.width);
-        // Léger éclat aléatoire pour casser les aplats.
-        const shade = 0.968 + variation * 0.064;
+        // Très légère variation par tuile : casse la régularité sans créer
+        // d'aplat visible, le bruit fin étant ajouté par le shader.
+        const shade = 0.986 + hashUnit2d(map.width + 7, tx, ty) * 0.028;
         hexToRgb(
           rgbToHex(
             ((colour >> 16) & 0xff) * shade,
@@ -317,98 +460,132 @@ export class TerrainLayer {
           ),
           rgb,
         );
+        const slot = hy * haloW + hx;
+        haloR[slot] = rgb.r;
+        haloG[slot] = rgb.g;
+        haloB[slot] = rgb.b;
         const glow = NIGHT_GLOW[kind];
-        const glowR = glow?.[0] ?? 0;
-        const glowG = glow?.[1] ?? 0;
-        const glowB = glow?.[2] ?? 0;
+        haloGlowR[slot] = glow?.[0] ?? 0;
+        haloGlowG[slot] = glow?.[1] ?? 0;
+        haloGlowB[slot] = glow?.[2] ?? 0;
+      }
+    }
 
-        const hA = cornerAt(tx, ty);
-        const hB = cornerAt(tx + 1, ty);
-        const hC = cornerAt(tx + 1, ty + 1);
-        const hD = cornerAt(tx, ty + 1);
-        const px = wx;
-        const pz = wy;
+    const heightAt = (x: number, z: number): number =>
+      sampleHeightWorld(map, clamp(x, 0, map.width), clamp(z, 0, map.height));
 
-        // Triangle A, C, B
-        positions[vertex * 3] = px;
-        positions[vertex * 3 + 1] = hA;
-        positions[vertex * 3 + 2] = pz;
-        colours[vertex * 3] = rgb.r;
-        colours[vertex * 3 + 1] = rgb.g;
-        colours[vertex * 3 + 2] = rgb.b;
-        nightColours[vertex * 3] = glowR;
-        nightColours[vertex * 3 + 1] = glowG;
-        nightColours[vertex * 3 + 2] = glowB;
-        vertex += 1;
-        positions[vertex * 3] = px + 1;
-        positions[vertex * 3 + 1] = hC;
-        positions[vertex * 3 + 2] = pz + 1;
-        colours[vertex * 3] = rgb.r;
-        colours[vertex * 3 + 1] = rgb.g;
-        colours[vertex * 3 + 2] = rgb.b;
-        nightColours[vertex * 3] = glowR;
-        nightColours[vertex * 3 + 1] = glowG;
-        nightColours[vertex * 3 + 2] = glowB;
-        vertex += 1;
-        positions[vertex * 3] = px + 1;
-        positions[vertex * 3 + 1] = hB;
-        positions[vertex * 3 + 2] = pz;
-        colours[vertex * 3] = rgb.r;
-        colours[vertex * 3 + 1] = rgb.g;
-        colours[vertex * 3 + 2] = rgb.b;
-        nightColours[vertex * 3] = glowR;
-        nightColours[vertex * 3 + 1] = glowG;
-        nightColours[vertex * 3 + 2] = glowB;
-        vertex += 1;
+    let vertex = 0;
+    for (let gz = 0; gz < nz; gz += 1) {
+      const tileZ = gz * invSubdivision;
+      const z = y0 + tileZ;
+      const cellY = Math.floor(tileZ - 0.5);
+      const fz = tileZ - 0.5 - cellY;
+      const rowA = cellY + 1;
+      const rowB = rowA + 1;
+      const wRowA = 1 - fz;
+      for (let gx = 0; gx < nx; gx += 1) {
+        const tileX = gx * invSubdivision;
+        const x = x0 + tileX;
+        const cellX = Math.floor(tileX - 0.5);
+        const fx = tileX - 0.5 - cellX;
+        const colA = cellX + 1;
+        const colB = colA + 1;
+        const wColA = 1 - fx;
 
-        // Triangle A, D, C
-        positions[vertex * 3] = px;
-        positions[vertex * 3 + 1] = hA;
-        positions[vertex * 3 + 2] = pz;
-        colours[vertex * 3] = rgb.r;
-        colours[vertex * 3 + 1] = rgb.g;
-        colours[vertex * 3 + 2] = rgb.b;
-        nightColours[vertex * 3] = glowR;
-        nightColours[vertex * 3 + 1] = glowG;
-        nightColours[vertex * 3 + 2] = glowB;
-        vertex += 1;
-        positions[vertex * 3] = px;
-        positions[vertex * 3 + 1] = hD;
-        positions[vertex * 3 + 2] = pz + 1;
-        colours[vertex * 3] = rgb.r;
-        colours[vertex * 3 + 1] = rgb.g;
-        colours[vertex * 3 + 2] = rgb.b;
-        nightColours[vertex * 3] = glowR;
-        nightColours[vertex * 3 + 1] = glowG;
-        nightColours[vertex * 3 + 2] = glowB;
-        vertex += 1;
-        positions[vertex * 3] = px + 1;
-        positions[vertex * 3 + 1] = hC;
-        positions[vertex * 3 + 2] = pz + 1;
-        colours[vertex * 3] = rgb.r;
-        colours[vertex * 3 + 1] = rgb.g;
-        colours[vertex * 3 + 2] = rgb.b;
-        nightColours[vertex * 3] = glowR;
-        nightColours[vertex * 3 + 1] = glowG;
-        nightColours[vertex * 3 + 2] = glowB;
+        const i00 = rowA * haloW + colA;
+        const i10 = rowA * haloW + colB;
+        const i01 = rowB * haloW + colA;
+        const i11 = rowB * haloW + colB;
+        const w00 = wColA * wRowA;
+        const w10 = fx * wRowA;
+        const w01 = wColA * fz;
+        const w11 = fx * fz;
+        const r =
+          (haloR[i00] ?? 0) * w00 +
+          (haloR[i10] ?? 0) * w10 +
+          (haloR[i01] ?? 0) * w01 +
+          (haloR[i11] ?? 0) * w11;
+        const g =
+          (haloG[i00] ?? 0) * w00 +
+          (haloG[i10] ?? 0) * w10 +
+          (haloG[i01] ?? 0) * w01 +
+          (haloG[i11] ?? 0) * w11;
+        const b =
+          (haloB[i00] ?? 0) * w00 +
+          (haloB[i10] ?? 0) * w10 +
+          (haloB[i01] ?? 0) * w01 +
+          (haloB[i11] ?? 0) * w11;
+
+        const height = heightAt(x, z);
+        const base = vertex * 3;
+        positions[base] = x;
+        positions[base + 1] = height;
+        positions[base + 2] = z;
+        colours[base] = r;
+        colours[base + 1] = g;
+        colours[base + 2] = b;
+        nightColours[base] = Math.max(
+          haloGlowR[i00] ?? 0,
+          haloGlowR[i10] ?? 0,
+          haloGlowR[i01] ?? 0,
+          haloGlowR[i11] ?? 0,
+        );
+        nightColours[base + 1] = Math.max(
+          haloGlowG[i00] ?? 0,
+          haloGlowG[i10] ?? 0,
+          haloGlowG[i01] ?? 0,
+          haloGlowG[i11] ?? 0,
+        );
+        nightColours[base + 2] = Math.max(
+          haloGlowB[i00] ?? 0,
+          haloGlowB[i10] ?? 0,
+          haloGlowB[i01] ?? 0,
+          haloGlowB[i11] ?? 0,
+        );
+
+        // AO locale : un creux (sommet plus bas que ses voisins) s'assombrit.
+        const average =
+          (heightAt(x - AO_STEP, z) +
+            heightAt(x + AO_STEP, z) +
+            heightAt(x, z - AO_STEP) +
+            heightAt(x, z + AO_STEP)) *
+          0.25;
+        const concavity = Math.max(0, average - height);
+        occlusion[vertex] = Math.max(0.58, 1 - concavity * 0.85);
         vertex += 1;
       }
     }
 
+    const indexCount = width * height * subdivision * subdivision * 6;
+    const indices =
+      vertexCount > 65_535 ? new Uint32Array(indexCount) : new Uint16Array(indexCount);
+    let cursor = 0;
+    for (let gz = 0; gz < nz - 1; gz += 1) {
+      for (let gx = 0; gx < nx - 1; gx += 1) {
+        const a = gz * nx + gx;
+        const b = a + 1;
+        const c = a + nx;
+        const d = c + 1;
+        // Même diagonale et même sens que l'ancien maillage non indexé.
+        indices[cursor] = a;
+        indices[cursor + 1] = d;
+        indices[cursor + 2] = b;
+        indices[cursor + 3] = a;
+        indices[cursor + 4] = c;
+        indices[cursor + 5] = d;
+        cursor += 6;
+      }
+    }
+
+    const normals = this.computeChunkNormals(map, x0, y0, nx, nz, invSubdivision);
+
     const groundGeometry = new THREE.BufferGeometry();
-    groundGeometry.setAttribute(
-      'position',
-      new THREE.BufferAttribute(positions.subarray(0, vertex * 3), 3),
-    );
-    groundGeometry.setAttribute(
-      'color',
-      new THREE.BufferAttribute(colours.subarray(0, vertex * 3), 3),
-    );
-    groundGeometry.setAttribute(
-      'aNightGlow',
-      new THREE.BufferAttribute(nightColours.subarray(0, vertex * 3), 3),
-    );
-    groundGeometry.computeVertexNormals();
+    groundGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    groundGeometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    groundGeometry.setAttribute('color', new THREE.BufferAttribute(colours, 3));
+    groundGeometry.setAttribute('aNightGlow', new THREE.BufferAttribute(nightColours, 3));
+    groundGeometry.setAttribute('aAo', new THREE.BufferAttribute(occlusion, 1));
+    groundGeometry.setIndex(new THREE.BufferAttribute(indices, 1));
     groundGeometry.computeBoundingSphere();
     const ground = new THREE.Mesh(groundGeometry, this.groundMaterial);
     ground.name = `terrain-${cx}-${cy}`;
@@ -489,6 +666,70 @@ export class TerrainLayer {
     this.chunks.set(key, { cx, cy, ground, water });
   }
 
+  /**
+   * Normales lissées par `computeVertexNormals` sur une grille entourée d'une
+   * couronne d'un pas. Les sommets de bord d'un chunk voient ainsi exactement
+   * les mêmes faces que son voisin : aucune couture d'éclairage à la jonction.
+   */
+  private computeChunkNormals(
+    map: MapSnapshot,
+    x0: number,
+    y0: number,
+    nx: number,
+    nz: number,
+    invSubdivision: number,
+  ): Float32Array {
+    const haloNx = nx + 2;
+    const haloNz = nz + 2;
+    const haloPositions = new Float32Array(haloNx * haloNz * 3);
+    for (let hz = 0; hz < haloNz; hz += 1) {
+      const z = clamp(y0 + (hz - 1) * invSubdivision, 0, map.height);
+      for (let hx = 0; hx < haloNx; hx += 1) {
+        const x = clamp(x0 + (hx - 1) * invSubdivision, 0, map.width);
+        const offset = (hz * haloNx + hx) * 3;
+        haloPositions[offset] = x;
+        haloPositions[offset + 1] = sampleHeightWorld(map, x, z);
+        haloPositions[offset + 2] = z;
+      }
+    }
+    const cellCount = (haloNx - 1) * (haloNz - 1);
+    const haloIndices =
+      haloNx * haloNz > 65_535 ? new Uint32Array(cellCount * 6) : new Uint16Array(cellCount * 6);
+    let cursor = 0;
+    for (let hz = 0; hz < haloNz - 1; hz += 1) {
+      for (let hx = 0; hx < haloNx - 1; hx += 1) {
+        const a = hz * haloNx + hx;
+        const b = a + 1;
+        const c = a + haloNx;
+        const d = c + 1;
+        haloIndices[cursor] = a;
+        haloIndices[cursor + 1] = d;
+        haloIndices[cursor + 2] = b;
+        haloIndices[cursor + 3] = a;
+        haloIndices[cursor + 4] = c;
+        haloIndices[cursor + 5] = d;
+        cursor += 6;
+      }
+    }
+    const haloGeometry = new THREE.BufferGeometry();
+    haloGeometry.setAttribute('position', new THREE.BufferAttribute(haloPositions, 3));
+    haloGeometry.setIndex(new THREE.BufferAttribute(haloIndices, 1));
+    haloGeometry.computeVertexNormals();
+    const haloNormals = haloGeometry.getAttribute('normal').array;
+    const normals = new Float32Array(nx * nz * 3);
+    for (let gz = 0; gz < nz; gz += 1) {
+      for (let gx = 0; gx < nx; gx += 1) {
+        const source = ((gz + 1) * haloNx + (gx + 1)) * 3;
+        const target = (gz * nx + gx) * 3;
+        normals[target] = haloNormals[source] ?? 0;
+        normals[target + 1] = haloNormals[source + 1] ?? 1;
+        normals[target + 2] = haloNormals[source + 2] ?? 0;
+      }
+    }
+    haloGeometry.dispose();
+    return normals;
+  }
+
   /** Maillages ciblables au raycast (exclut le fond océanique). */
   pickTargets(): THREE.Object3D[] {
     const meshes: THREE.Object3D[] = [];
@@ -514,12 +755,19 @@ export class TerrainLayer {
   }
 
   setQuality(level: QualityLevel): void {
-    this.animateWater = qualitySettings(level).waterAnimation;
-    if (!this.animateWater && this.waterTime) this.waterTime.value = 0;
+    this.quality = level;
     const settings = qualitySettings(level);
+    this.animateWater = settings.waterAnimation;
+    if (!this.animateWater && this.waterTime) this.waterTime.value = 0;
     this.groundMaterial.dithering = level !== 'low';
+    this.skinUniform.value = terrainSkinStrength(level);
     this.waterMaterial.shininess =
       settings.level === 'low' ? 40 : settings.level === 'high' ? 130 : 90;
+    const subdivision = terrainSubdivision(level);
+    if (subdivision !== this.subdivision) {
+      this.subdivision = subdivision;
+      if (this.map) this.rebuildAll();
+    }
   }
 
   /** 0 = jour, 1 = nuit : active l'émission des routes, rails et de l'eau. */
