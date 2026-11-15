@@ -51,12 +51,22 @@ import type { StartInfo } from '../net/lobby-types';
 import { NET_TICK_MS, createNetSession, type NetSession, type NetUpdate } from '../net/session';
 import { Renderer } from '../render/Renderer';
 import { WorldView, type WorldTarget } from '../render/WorldView';
+import { CinematicIntro } from '../render/cinematicIntro';
+import {
+  PhotoMode,
+  downloadDataUrl,
+  type PhotoAnchor,
+  type PhotoCapture,
+  type PhotoPresetId,
+} from '../render/PhotoMode';
 import { nextQuality, type QualityLevel } from '../render/quality';
 import { Hud } from './Hud';
 import { BuildController } from './buildController';
 import { describeBuildPlan } from './buildHint';
+import { prefersReducedMotion } from './dom';
 import type { NewGameOptions } from './gameOptions';
 import { formatGameDate, formatMoney } from './format';
+import { t } from './i18n';
 import type { BuildToolId } from './hud/Toolbar';
 import {
   AutosaveScheduler,
@@ -186,6 +196,13 @@ const BUILD_TOOL_INTROS: Record<BuildTool, string> = {
   signal: 'Signaux : cliquez ou glissez le long d’une voie ferrée',
 };
 
+/** Touches 1/2/3 du mode photo, alignées sur `PHOTO_PRESET_IDS`. */
+const PHOTO_KEYS: Record<string, PhotoPresetId> = {
+  '1': 'map',
+  '2': 'street',
+  '3': 'train',
+};
+
 function nextFrame(): Promise<void> {
   return new Promise((resolve) => {
     if (typeof requestAnimationFrame === 'function') {
@@ -250,6 +267,10 @@ export class GameSession {
   private autosave: AutosaveScheduler | null = null;
   private saveChip: HTMLDivElement | null = null;
   private saveChipTimer = 0;
+  private photoMode: PhotoMode | null = null;
+  private intro: CinematicIntro | null = null;
+  private introHint: HTMLDivElement | null = null;
+  private reduceMotion = false;
 
   constructor(options: GameSessionOptions) {
     this.canvas = options.canvas;
@@ -269,6 +290,7 @@ export class GameSession {
     this.settings = options.settings;
     this.callbacks = options.callbacks;
     this.sharedAudio = options.audio ?? null;
+    this.reduceMotion = prefersReducedMotion();
     this.quality = this.config.quality;
     this.engineMode = this.network
       ? this.network.settings.engine
@@ -436,6 +458,7 @@ export class GameSession {
     this.attachListeners();
     this.createEngineBadge();
     this.createSaveChip();
+    this.photoMode = this.createPhotoMode();
 
     // `game.start()` capture le premier snapshot et émet les news initiales,
     // désormais écoutées par le HUD.
@@ -467,6 +490,7 @@ export class GameSession {
     this.ensureActive(token);
     this.startNetworkSession();
     this.renderer.start((delta) => this.frame(delta));
+    this.startCinematicIntro();
     this.updateCameraFrame();
     this.refreshHud();
     this.report(1, 'Monde prêt');
@@ -680,6 +704,232 @@ export class GameSession {
     this.saveChip = chip;
   }
 
+  /**
+   * Assemble le mode photo sur le renderer et le contrôleur existants. La
+   * capture force un rendu synchrone : le PNG est lu juste après, dans la même
+   * tâche, donc `preserveDrawingBuffer` n'est pas nécessaire.
+   */
+  private createPhotoMode(): PhotoMode {
+    const world = this.world;
+    if (!world) throw new Error('Mode photo : monde 3D indisponible.');
+    return new PhotoMode({
+      camera: world.getCameraController(),
+      bounds: this.mapBounds(),
+      captureFrame: () => {
+        const renderer = this.renderer;
+        if (!renderer) return null;
+        try {
+          renderer.renderNow();
+          return renderer.webgl.domElement.toDataURL('image/png');
+        } catch {
+          return null;
+        }
+      },
+      setUiHidden: (hidden) => this.setPhotoUiHidden(hidden),
+      pause: () => this.pauseForPhoto(),
+      anchor: () => this.photoAnchor(),
+      followAnchor: () => this.followPhotoAnchor(),
+      reducedMotion: this.reduceMotion,
+      ...(typeof performance !== 'undefined' ? { now: () => performance.now() } : {}),
+      mount: this.uiRoot,
+      labels: this.photoLabels(),
+      onCapture: () => this.capturePhoto(),
+    });
+  }
+
+  /** Libellés du mode photo, retraduits quand les réglages changent. */
+  private photoLabels(): {
+    title: string;
+    hint: string;
+    capture: string;
+    exit: string;
+    captured: string;
+    preset: Record<PhotoPresetId, string>;
+  } {
+    return {
+      title: t('photo.title'),
+      hint: t('photo.hint'),
+      capture: t('photo.capture'),
+      exit: t('photo.exit'),
+      captured: t('photo.captured'),
+      preset: {
+        map: t('photo.preset.map'),
+        street: t('photo.preset.street'),
+        train: t('photo.preset.train'),
+      },
+    };
+  }
+
+  private mapBounds(): { minX: number; maxX: number; minZ: number; maxZ: number } {
+    const map = this.world?.getMap() ?? null;
+    if (map) return { minX: 0, maxX: map.width, minZ: 0, maxZ: map.height };
+    const size = this.config.size;
+    return { minX: 0, maxX: size, minZ: 0, maxZ: size };
+  }
+
+  /** Masque HUD, pastilles et panneaux ; le canvas reste interactif. */
+  private setPhotoUiHidden(hidden: boolean): void {
+    if (typeof document !== 'undefined') {
+      document.body.classList.toggle('photo-mode', hidden);
+    }
+    if (hidden) {
+      this.hud?.closePanels();
+      this.hud?.hideHelp();
+      this.hud?.root.setAttribute('aria-hidden', 'true');
+      // Le HUD devient invisible et non focusable : le clavier revient au canvas.
+      if (
+        typeof document !== 'undefined' &&
+        document.activeElement instanceof HTMLElement &&
+        this.hud?.root.contains(document.activeElement)
+      ) {
+        this.canvas.focus();
+      }
+    } else {
+      this.hud?.root.removeAttribute('aria-hidden');
+    }
+  }
+
+  /** Pause dédiée : ne reprend pas une partie qui était déjà en pause. */
+  private pauseForPhoto(): (() => void) | null {
+    const game = this.game;
+    if (!game || this.isNetwork || game.isPaused()) return null;
+    this.pause();
+    return () => this.resume();
+  }
+
+  /** Point de cadrage du mode photo : véhicule sélectionné, cible ou ville. */
+  private photoAnchor(): PhotoAnchor | null {
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    const selection = this.game?.getSelection() ?? null;
+    if (snapshot && selection?.kind === 'vehicle') {
+      const vehicle = snapshot.vehicles.find((item) => item.id === selection.id);
+      if (vehicle) return { x: vehicle.x, z: vehicle.y };
+    }
+    const target = this.lastTarget;
+    if (target?.kind === 'tile') return { x: target.x + 0.5, z: target.y + 0.5 };
+    if (target?.kind === 'building') return { x: target.x + 0.5, z: target.y + 0.5 };
+    const town = snapshot?.towns[0];
+    if (town) return { x: town.x, z: town.y };
+    return null;
+  }
+
+  /** Suivi vivant du véhicule sélectionné pour le preset train. */
+  private followPhotoAnchor(): (() => PhotoAnchor | null) | null {
+    const selection = this.game?.getSelection() ?? null;
+    if (selection?.kind !== 'vehicle') return null;
+    return () => {
+      const vehicle = this.game
+        ?.getLatestSnapshot()
+        ?.vehicles.find((item) => item.id === selection.id);
+      return vehicle ? { x: vehicle.x, z: vehicle.y } : null;
+    };
+  }
+
+  /** Bascule le mode photo ; `preset` entre directement sur un cadrage. */
+  togglePhotoMode(preset?: PhotoPresetId): boolean {
+    const photo = this.photoMode;
+    if (!photo || this.disposed) return false;
+    if (photo.isActive()) {
+      photo.exit();
+      this.hud?.setPhotoMode(false);
+      this.refreshHud();
+      return false;
+    }
+    if (this.buildTool) this.applyBuildTool(null);
+    this.closeDepot();
+    this.photoMode?.enter(preset);
+    this.hud?.setPhotoMode(this.photoMode?.isActive() ?? false);
+    this.refreshHud();
+    return true;
+  }
+
+  private capturePhoto(): PhotoCapture | null {
+    const shot = this.photoMode?.capture() ?? null;
+    if (!shot) return null;
+    downloadDataUrl(shot.dataUrl, shot.filename);
+    return shot;
+  }
+
+  /** Démarre l'intro si elle est autorisée (réglage, mouvement, mode de jeu). */
+  private startCinematicIntro(): void {
+    const world = this.world;
+    const game = this.game;
+    if (!world || !game || this.reduceMotion) return;
+    if (!this.settings.cinematicIntro) return;
+    if (this.loadedGame || this.preparedJoin || this.isNetwork) return;
+    const map = world.getMap();
+    if (!map) return;
+    const snapshot = game.getLatestSnapshot();
+    const anchors: PhotoAnchor[] = [];
+    for (const town of snapshot?.towns.slice(0, 3) ?? []) anchors.push({ x: town.x, z: town.y });
+    for (const station of snapshot?.stations.slice(0, 2) ?? []) {
+      anchors.push({ x: station.x, z: station.y });
+    }
+    this.intro = new CinematicIntro({
+      bounds: { minX: 0, maxX: map.width, minZ: 0, maxZ: map.height },
+      ...(anchors.length > 0 ? { anchors } : {}),
+    });
+    this.showIntroHint();
+    window.addEventListener('pointerdown', this.skipIntroOnInput, true);
+    window.addEventListener('keydown', this.skipIntroOnInput, true);
+    window.addEventListener('wheel', this.skipIntroOnInput, { capture: true, passive: true });
+  }
+
+  private showIntroHint(): void {
+    const hint = document.createElement('div');
+    hint.className = 'intro-hint';
+    hint.setAttribute('role', 'status');
+    hint.textContent = t('intro.skip');
+    this.uiRoot.append(hint);
+    this.introHint = hint;
+  }
+
+  /** Clic, touche ou molette : l'intro est coupée sans déclencher l'action. */
+  private skipIntroOnInput = (event: Event): void => {
+    if (!this.intro) return;
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.closest('button, select, a[href]'))
+    ) {
+      return;
+    }
+    // Espace garde son rôle de pause : l'intro se termine, puis la simulation
+    // se met en pause comme le joueur l'a demandé.
+    if (event.type === 'keydown' && (event as KeyboardEvent).code === 'Space') {
+      this.finishIntro(this.intro);
+      return;
+    }
+    event.stopPropagation();
+    if (event.type !== 'pointerdown' && event.cancelable) event.preventDefault();
+    this.finishIntro(this.intro);
+  };
+
+  private finishIntro(intro: CinematicIntro): void {
+    if (this.intro !== intro) return;
+    intro.skip();
+    const controller = this.world?.getCameraController();
+    controller?.setScriptedPose(null);
+    controller?.applyPose(intro.finishPose(), { immediate: true });
+    this.intro = null;
+    window.removeEventListener('pointerdown', this.skipIntroOnInput, true);
+    window.removeEventListener('keydown', this.skipIntroOnInput, true);
+    window.removeEventListener('wheel', this.skipIntroOnInput, true);
+    this.introHint?.remove();
+    this.introHint = null;
+    this.updateCameraFrame();
+  }
+
+  isCinematicIntroRunning(): boolean {
+    return this.intro !== null;
+  }
+
+  getPhotoMode(): PhotoMode | null {
+    return this.photoMode;
+  }
+
   /** Affiche brièvement la pastille d'autosave et le toast correspondant. */
   notifySave(text: string): void {
     this.hud?.notify('info', text);
@@ -829,6 +1079,7 @@ export class GameSession {
       onMoveOrder: (vehicleId, index, delta) => this.moveOrder(vehicleId, index, delta),
       onCloseVehicle: () => this.clearSelection(),
       onToggleAudio: () => this.toggleAudioMute(),
+      onPhotoMode: () => this.togglePhotoMode(),
     });
   }
 
@@ -871,6 +1122,15 @@ export class GameSession {
       ) {
         return;
       }
+    }
+    if (this.photoMode?.isActive()) {
+      this.handlePhotoKey(event);
+      return;
+    }
+    if (event.code === 'KeyP') {
+      event.preventDefault();
+      this.togglePhotoMode();
+      return;
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
       event.preventDefault();
@@ -917,6 +1177,39 @@ export class GameSession {
     }
   };
 
+  /**
+   * Raccourcis du mode photo. Les flèches/WASD restent au `CameraController`,
+   * qui écoute la même fenêtre : on ne consomme ici que les commandes du mode.
+   */
+  private handlePhotoKey(event: KeyboardEvent): void {
+    if (event.code === 'KeyP' || event.key === 'Escape') {
+      event.preventDefault();
+      this.togglePhotoMode();
+      return;
+    }
+    if (event.code === 'KeyC') {
+      event.preventDefault();
+      this.capturePhoto();
+      return;
+    }
+    const preset = this.presetForKey(event.code);
+    if (preset) {
+      event.preventDefault();
+      this.photoMode?.setPreset(preset);
+      return;
+    }
+    if (event.code === 'Space') {
+      // La pause est déjà tenue par le mode photo : ne pas la relancer.
+      event.preventDefault();
+    }
+  }
+
+  private presetForKey(code: string): PhotoPresetId | null {
+    const match = /^(?:Digit|Numpad)([1-3])$/.exec(code);
+    if (!match) return null;
+    return PHOTO_KEYS[match[1] ?? ''] ?? null;
+  }
+
   private handleContextLost = (event: Event): void => {
     event.preventDefault();
     this.audio?.play('ui.error');
@@ -931,6 +1224,8 @@ export class GameSession {
     const game = this.game;
     const world = this.world;
     if (!game || !world) return;
+
+    this.updateIntro(delta);
 
     const session = this.netSession;
     const lockstep = this.lockstep;
@@ -971,6 +1266,19 @@ export class GameSession {
       this.minimapTimer = 0;
       this.updateCameraFrame();
     }
+  }
+
+  /** Avance l'intro cinématique et raccorde la caméra à sa pose finale. */
+  private updateIntro(delta: number): void {
+    const intro = this.intro;
+    if (!intro) return;
+    const pose = intro.update(delta);
+    const controller = this.world?.getCameraController();
+    if (pose && controller) {
+      controller.setScriptedPose(pose);
+      return;
+    }
+    if (intro.finished) this.finishIntro(intro);
   }
 
   private networkNow(): number {
@@ -1632,6 +1940,7 @@ export class GameSession {
     this.setQuality(settings.quality);
     this.world?.setDayNightCycle(settings.dayNightCycle, settings.dayNightCycleSeconds);
     this.audio?.setSettings(settings);
+    this.photoMode?.setLabels(this.photoLabels());
   }
 
   getSettings(): GameSettings {
@@ -1736,6 +2045,14 @@ export class GameSession {
     this.disposed = true;
     window.removeEventListener('keydown', this.handleKeyDown);
     this.canvas.removeEventListener('webglcontextlost', this.handleContextLost);
+    window.removeEventListener('pointerdown', this.skipIntroOnInput, true);
+    window.removeEventListener('keydown', this.skipIntroOnInput, true);
+    window.removeEventListener('wheel', this.skipIntroOnInput, true);
+    this.intro = null;
+    this.introHint?.remove();
+    this.introHint = null;
+    this.photoMode?.dispose();
+    this.photoMode = null;
     this.renderer?.stop();
     this.audio?.dispose();
     this.audio = null;
