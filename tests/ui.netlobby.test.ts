@@ -3,6 +3,7 @@ import type { Directory } from '../src/net/directory';
 import { newRoomId } from '../src/net/directory';
 import { LOBBY_CHANNELS, type StartInfo, type StartPlayer } from '../src/net/lobby-types';
 import { createMemoryBus, createTransport, type Transport } from '../src/net/transport';
+import { engineBuildId } from '../src/engine/loadEngine';
 import {
   buildRoomInvite,
   describeNetworkStatus,
@@ -12,6 +13,7 @@ import {
   mapStartInfoToGameOptions,
   parseJoinTarget,
   peerNamesFromStart,
+  planNetworkEngine,
   readNetworkParams,
 } from '../src/ui/netlobby';
 
@@ -62,6 +64,7 @@ function startFixture(): Pick<StartInfo, 'seed' | 'settings' | 'players' | 'peer
   return {
     seed: 42,
     settings: {
+      engine: 'mock',
       mapSize: 256,
       climate: 'arctic',
       difficulty: 'hard',
@@ -130,6 +133,50 @@ describe('mapping StartInfo → options moteur', () => {
     );
     expect(mapped.options.size).toBe(512);
     expect(mapped.warnings.join(' ')).toMatch(/512/);
+  });
+
+  it('conserve la même configuration en mode WASM', () => {
+    const info = startFixture();
+    const mapped = mapStartInfoToGameOptions(
+      {
+        ...info,
+        settings: { ...info.settings, engine: 'wasm', mapSize: 512 },
+      },
+      'medium',
+    );
+    expect(mapped.options.size).toBe(512);
+    expect(mapped.options.seed).toBe(42);
+    expect(mapped.options.climate).toBe('subarctic');
+    expect(mapped.options.aiCompanies).toBe(1);
+    expect(mapped.warnings).toEqual([]);
+  });
+
+  it('refuse un build moteur ou un mode incohérent', () => {
+    const info = startFixture();
+    const mock = planNetworkEngine({
+      settings: info.settings,
+      engineBuild: engineBuildId('mock'),
+    });
+    expect(mock).toEqual({ mode: 'mock', build: engineBuildId('mock'), error: null });
+
+    const wasm = planNetworkEngine({
+      settings: { ...info.settings, engine: 'wasm' },
+      engineBuild: engineBuildId('wasm'),
+    });
+    expect(wasm.error).toBeNull();
+
+    const mixed = planNetworkEngine({
+      settings: { ...info.settings, engine: 'wasm' },
+      engineBuild: engineBuildId('mock'),
+    });
+    expect(mixed.mode).toBe('wasm');
+    expect(mixed.error).toMatch(/incompatible/i);
+
+    const otherVersion = planNetworkEngine({
+      settings: info.settings,
+      engineBuild: 'opentt3d-mock-999',
+    });
+    expect(otherVersion.error).toMatch(/incompatible/i);
   });
 
   it('nomme les pairs et calcule les attentes du salon', () => {

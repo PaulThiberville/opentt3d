@@ -15,7 +15,7 @@ import type { EngineCommand, EngineDriver, WorldSnapshot } from '../engine/proto
 import { TILE_FLAG } from '../engine/protocol';
 import { MockEngine } from '../engine/MockEngine';
 import { WasmEngine } from '../engine/WasmEngine';
-import { resolveEngineModuleUrl, type EngineMode } from '../engine/loadEngine';
+import { engineBuildId, resolveEngineModuleUrl, type EngineMode } from '../engine/loadEngine';
 import { Game, type GameSpeed, type Selection } from '../game/Game';
 import {
   cloneBuildSettings,
@@ -63,6 +63,7 @@ import {
   mapStartInfoToGameOptions,
   networkControlsLocked,
   peerNamesFromStart,
+  planNetworkEngine,
 } from './netlobby';
 import {
   createEngineRunner,
@@ -134,7 +135,10 @@ export interface GameSessionOptions {
   engine?: EngineMode;
   /** Force l'URL du module WASM (défaut : `public/engine/`). */
   engineModuleUrl?: string;
-  /** Démarre une partie lockstep à partir du salon. Force le moteur mock. */
+  /**
+   * Démarre une partie lockstep à partir du salon. Le moteur vient du
+   * `StartInfo` (`settings.engine`), identique sur tous les pairs (#93).
+   */
   network?: StartInfo;
   /** Restaure une sauvegarde au lieu de générer une nouvelle partie. */
   loadedGame?: LoadedGameInput;
@@ -233,7 +237,9 @@ export class GameSession {
     this.settings = options.settings;
     this.callbacks = options.callbacks;
     this.quality = this.config.quality;
-    this.engineMode = this.network ? 'mock' : (this.loadedGame?.engine ?? options.engine ?? 'mock');
+    this.engineMode = this.network
+      ? this.network.settings.engine
+      : (this.loadedGame?.engine ?? options.engine ?? 'mock');
     this.engineModuleUrl = options.engineModuleUrl ?? resolveEngineModuleUrl();
     this.autosave =
       this.network || options.autosave === false
@@ -282,12 +288,20 @@ export class GameSession {
     const config = this.config;
     const wasm = this.engineMode === 'wasm';
     const restoring = this.loadedGame !== null;
+    if (this.network) {
+      // Refus explicite d'un mélange mock/WASM ou d'un build différent avant
+      // toute allocation de moteur : les pairs doivent partir du même état.
+      const plan = planNetworkEngine(this.network);
+      if (plan.error) throw new Error(plan.error);
+    }
     this.report(
       0.03,
       restoring
         ? 'Préparation de la restauration…'
         : this.isNetwork
-          ? 'Préparation de la session réseau (moteur mock déterministe)…'
+          ? wasm
+            ? 'Préparation de la session réseau (moteur OpenTTD WASM)…'
+            : 'Préparation de la session réseau (moteur mock déterministe)…'
           : wasm
             ? 'Chargement du moteur OpenTTD (WebAssembly)…'
             : 'Initialisation du moteur mock…',
@@ -422,7 +436,9 @@ export class GameSession {
     if (this.isNetwork) {
       hud.notify(
         'info',
-        'Session réseau lockstep : moteur mock déterministe, aucun transfert de sauvegarde.',
+        this.engineMode === 'wasm'
+          ? 'Session réseau lockstep : moteur OpenTTD WASM, état partagé par hashes.'
+          : 'Session réseau lockstep : moteur mock déterministe, état partagé par hashes.',
       );
     } else if (this.engineMode === 'wasm') {
       hud.notify('info', 'Moteur WASM : simulation OpenTTD réelle.');
@@ -445,9 +461,14 @@ export class GameSession {
     this.netRunner = createEngineRunner(engine);
     this.lockstep = createLockstepDriver(engine);
     this.peerNames = peerNamesFromStart(start);
-    // Amorce le cache de sauvegarde : si un resync est demandé, le host aura
-    // au moins un état chargeable au lieu d'un message vide (#38 fera mieux).
     this.lastNetworkSaveAt = this.networkNow();
+    if (this.netRunner.synchronous) {
+      // `serialize()` WASM est exact et synchrone : aucun cache à amorcer, le
+      // resync sérialise à la demande depuis le tick courant.
+      return;
+    }
+    // Amorce le cache de sauvegarde mock : si un resync est demandé, l'hôte a
+    // au moins un état chargeable au lieu d'un message vide.
     void this.netRunner.saveNow().catch((error: unknown) => {
       console.warn('[net:session] sauvegarde initiale indisponible', error);
     });
@@ -460,6 +481,7 @@ export class GameSession {
     if (!start || !runner || this.netSession) return;
     const hostPlayer = start.players.find((player) => player.isHost);
     const hostId = hostPlayer ? start.peers[hostPlayer.player] : undefined;
+    const playerName = start.players.find((player) => player.player === start.localPlayer)?.name;
     this.netSession = createNetSession({
       runner,
       localPlayer: start.localPlayer,
@@ -467,9 +489,14 @@ export class GameSession {
       isHost: start.isHost,
       ...(start.isHost ? {} : { hostId }),
       peers: start.peers,
+      engine: engineBuildId(this.engineMode),
+      ...(playerName ? { playerName } : {}),
     });
     this.netSession.onDesync(() => {
       this.hud?.notify('warning', 'Divergence détectée : resynchronisation avec l’hôte…');
+      // Le runner vient de recharger un tick plus avancé : rafraîchit la vue
+      // sans attendre le prochain snapshot périodique.
+      this.game?.refresh();
     });
     this.netSession.onChat(({ player, text }) => {
       const name = this.network?.players.find((item) => item.player === player)?.name ?? 'Joueur';
@@ -514,14 +541,16 @@ export class GameSession {
     const badge = this.engineBadge;
     if (!badge) return;
     const label = this.isNetwork
-      ? 'Mock · réseau'
+      ? this.engineMode === 'wasm'
+        ? 'WASM · réseau'
+        : 'Mock · réseau'
       : this.engineMode === 'wasm'
         ? 'Moteur WASM'
         : 'Mock';
     badge.textContent = label;
     const details: string[] = [
       this.isNetwork
-        ? `Lockstep réseau · seed ${this.config.seed} · ${this.network?.players.length ?? 0} participants`
+        ? `Lockstep réseau · ${this.engineMode === 'wasm' ? engineBuildId('wasm') : 'mock déterministe'} · seed ${this.config.seed} · ${this.network?.players.length ?? 0} participants`
         : this.engineMode === 'wasm'
           ? `OpenTTD WASM · ${this.engineModuleUrl}`
           : 'Moteur simulé déterministe',
@@ -802,7 +831,11 @@ export class GameSession {
       const now = this.networkNow();
       const update = session.update(now);
       this.lastNetUpdate = update;
-      if (update.ticks > 0) lockstep.addExecuted(update.ticks);
+      // Le lockstep est la seule source d'avancement. On aligne `Game` sur le
+      // tick moteur : en marche normale le delta vaut `update.ticks`, après un
+      // resync/join il rattrape aussi le saut de tick.
+      const drift = session.stats().tick - game.getTick();
+      if (drift > 0) lockstep.addExecuted(drift);
       game.advance(delta);
       world.update(delta, { ...game.getInterpolation(), alpha: session.alpha(now) });
       this.refreshNetworkSave(now, session.stats().isHost);
@@ -841,6 +874,9 @@ export class GameSession {
    */
   private refreshNetworkSave(now: number, isHost: boolean): void {
     if (!isHost || this.networkSavePending || !this.netRunner) return;
+    // Le WASM sérialise à la demande, exactement au tick courant : inutile de
+    // recopier plusieurs mégaoctets toutes les 10 s.
+    if (this.netRunner.synchronous) return;
     if (now - this.lastNetworkSaveAt < 10_000) return;
     this.lastNetworkSaveAt = now;
     this.networkSavePending = true;

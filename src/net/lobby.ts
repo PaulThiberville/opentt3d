@@ -41,6 +41,7 @@ import {
   isClimate,
   isLobbyChatMessage,
   isLobbyClosedMessage,
+  isLobbyEngine,
   isLobbyErrorMessage,
   isLobbyJoinMessage,
   isLobbyKickMessage,
@@ -62,6 +63,7 @@ import {
   type StartPeers,
   type StartPlayer,
 } from './lobby-types.js';
+import { engineBuildId } from '../engine/loadEngine.js';
 import type { Transport } from './transport.js';
 import { isFiniteNumber, isInt } from './types.js';
 
@@ -207,6 +209,7 @@ function normalizeSettings(input: Partial<LobbySettings> | undefined): LobbySett
       ? Math.floor(requestedMoney)
       : base.startingMoney;
   return {
+    engine: isLobbyEngine(input?.engine) ? input.engine : base.engine,
     mapSize: isMapSize(input?.mapSize) ? input.mapSize : base.mapSize,
     climate: isClimate(input?.climate) ? input.climate : base.climate,
     difficulty: isAIDifficulty(input?.difficulty) ? input.difficulty : base.difficulty,
@@ -605,6 +608,7 @@ export function createLobby(options: CreateLobbyOptions): Lobby {
     const payload: StartPayload = {
       seed: data.seed,
       settings: cloneSettings(data.settings),
+      engineBuild: data.engineBuild,
       players: data.players.map((player) => ({ ...player })),
       peers: { ...data.peers },
     };
@@ -905,6 +909,13 @@ export function createLobby(options: CreateLobbyOptions): Lobby {
     }
     if (!canMutate()) return;
     const next = cloneSettings(state.settings);
+    if (partial.engine !== undefined) {
+      if (!isLobbyEngine(partial.engine)) {
+        fail('Moteur de partie invalide.');
+        return;
+      }
+      next.engine = partial.engine;
+    }
     if (partial.mapSize !== undefined) {
       if (!isMapSize(partial.mapSize)) {
         fail('Taille de carte invalide.');
@@ -980,6 +991,7 @@ export function createLobby(options: CreateLobbyOptions): Lobby {
     const payload: StartPayload = {
       seed,
       settings: cloneSettings(state.settings),
+      engineBuild: engineBuildId(state.settings.engine),
       players,
       peers,
     };

@@ -10,17 +10,19 @@ import type { Lobby } from '../../net/lobby';
 import type {
   AIDifficulty,
   Climate,
+  LobbyEngine,
   LobbyState,
   MapSize,
   Slot,
   StartInfo,
 } from '../../net/lobby-types';
-import { LOBBY_COLOURS } from '../../net/lobby-types';
+import { LOBBY_COLOURS, LOBBY_ENGINES } from '../../net/lobby-types';
 import { el, fieldLabel } from '../dom';
 import { formatMoney } from '../format';
 import {
   CLIMATE_LABELS,
   DIFFICULTY_LABELS,
+  ENGINE_LABELS,
   MAP_SIZE_LABELS,
   buildRoomInvite,
   lobbyStartReadiness,
@@ -481,6 +483,12 @@ export class LobbyScreen extends BaseScreen {
       const grid = el('div', { className: 'lobby-settings-grid' });
       grid.append(
         this.settingSelect(
+          'Moteur',
+          LOBBY_ENGINES.map((value) => ({ value, label: ENGINE_LABELS[value] })),
+          settings.engine,
+          (value) => this.lobby.setSettings({ engine: value as LobbyEngine }),
+        ),
+        this.settingSelect(
           'Taille',
           MAP_SIZES.map((size) => ({ value: `${size}`, label: MAP_SIZE_LABELS[size] })),
           `${settings.mapSize}`,
@@ -520,6 +528,7 @@ export class LobbyScreen extends BaseScreen {
 
     const badges = el('div', { className: 'menu-badges' });
     badges.append(
+      el('span', { className: 'badge', text: ENGINE_LABELS[settings.engine] }),
       el('span', { className: 'badge', text: `Carte ${MAP_SIZE_LABELS[settings.mapSize]}` }),
       el('span', { className: 'badge', text: CLIMATE_LABELS[settings.climate] }),
       el('span', {

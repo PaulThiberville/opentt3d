@@ -406,7 +406,15 @@ export class WasmEngine implements EngineDriver {
     return `0x${BigInt.asUintN(64, value).toString(16).padStart(16, '0')}`;
   }
 
-  async save(): Promise<Uint8Array> {
+  /**
+   * Sérialise l'état courant de façon synchrone (#93).
+   *
+   * Le pont copie la sauvegarde dans le heap WASM puis rend la main : il n'y a
+   * aucune promesse à attendre. Le lockstep réseau s'appuie sur cette variante
+   * pour que `Runner.serialize()` soit réellement synchrone et corresponde
+   * exactement au tick courant au moment du hash.
+   */
+  saveSync(): Uint8Array {
     const module = this.requireModule();
     if (typeof module._ottd_save_size !== 'function' || typeof module._ottd_save !== 'function') {
       throw new Error('WasmEngine.save : ce build du pont n’expose pas la sauvegarde.');
@@ -423,7 +431,12 @@ export class WasmEngine implements EngineDriver {
     }
   }
 
-  async load(data: Uint8Array): Promise<void> {
+  /**
+   * Recharge une sauvegarde de façon synchrone (#93). Utilisé par le Runner
+   * réseau : l'état est remplacé avant que `load()` ne rende la main, donc le
+   * hash et le tick lus juste après sont ceux du pair source.
+   */
+  loadSync(data: Uint8Array): void {
     const module = this.requireModule();
     if (typeof module._ottd_load !== 'function') {
       throw new Error('WasmEngine.load : ce build du pont n’expose pas le chargement.');
@@ -441,6 +454,16 @@ export class WasmEngine implements EngineDriver {
     } finally {
       module._free(pointer);
     }
+  }
+
+  /** Variante asynchrone de `saveSync`, compatible `EngineDriver`. */
+  async save(): Promise<Uint8Array> {
+    return this.saveSync();
+  }
+
+  /** Variante asynchrone de `loadSync`, compatible `EngineDriver`. */
+  async load(data: Uint8Array): Promise<void> {
+    this.loadSync(data);
   }
 
   status(): EngineStatus {
