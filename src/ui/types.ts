@@ -160,6 +160,200 @@ export interface HudState {
   networkStatus?: NetworkStatusView | null;
 }
 
+/** Action de rapport : désactivée quand le protocole ne l'expose pas. */
+export interface ReportActionView {
+  id: string;
+  label: string;
+  supported: boolean;
+  reason?: string;
+}
+
+export interface ReportOption {
+  value: string;
+  label: string;
+}
+
+/** Catégorie de revenu ou de dépense, fournie par un snapshot étendu. */
+export interface FinanceCategoryView {
+  id: string;
+  label: string;
+  amount: number;
+  amountLabel: string;
+  /** Largeur relative 0..100 pour la barre SVG. */
+  percent: number;
+}
+
+export interface FinanceHistoryPoint {
+  tick: number;
+  money: number;
+  income: number;
+  expenses: number;
+}
+
+export interface FinanceRankingRow {
+  id: number;
+  rank: number;
+  name: string;
+  colour: number;
+  value: number | null;
+  valueLabel: string;
+  share: number | null;
+  shareLabel: string;
+  isLocal: boolean;
+  bankrupt: boolean;
+}
+
+export interface FinanceAlertView {
+  id: string;
+  tone: 'info' | 'warning' | 'error';
+  title: string;
+  detail: string;
+}
+
+export interface FinancePanelView {
+  companyId: number | null;
+  companyName: string;
+  money: number | null;
+  moneyLabel: string;
+  value: number | null;
+  valueLabel: string;
+  loan: number | null;
+  loanLabel: string;
+  loanLimitLabel: string | null;
+  interestRateLabel: string | null;
+  income: number | null;
+  incomeLabel: string;
+  expenses: number | null;
+  expensesLabel: string;
+  result: number | null;
+  resultLabel: string;
+  resultTone: 'good' | 'bad' | 'muted';
+  revenue: FinanceCategoryView[];
+  expensesByCategory: FinanceCategoryView[];
+  /** Faux quand le snapshot n'expose que les totaux du protocole v1. */
+  breakdownAvailable: boolean;
+  history: FinanceHistoryPoint[];
+  ranking: FinanceRankingRow[];
+  alerts: FinanceAlertView[];
+  actions: ReportActionView[];
+  hint: string;
+}
+
+export type VehicleListSort = 'profit' | 'age' | 'id' | 'type' | 'status' | 'group';
+export type VehicleListStatusFilter = 'all' | 'moving' | 'stopped' | 'depot';
+export type VehicleListProfitFilter = 'all' | 'profit' | 'loss';
+export type VehicleListAgeFilter = 'all' | 'recent' | 'old';
+
+export interface VehicleListFilters {
+  kind: string;
+  group: string;
+  status: VehicleListStatusFilter;
+  profit: VehicleListProfitFilter;
+  age: VehicleListAgeFilter;
+  query: string;
+  sort: VehicleListSort;
+}
+
+export interface VehicleGroupView {
+  id: string;
+  label: string;
+  count: number;
+}
+
+export interface VehicleListRowView {
+  id: number;
+  title: string;
+  detail: string;
+  companyName: string;
+  colour: number;
+  kind: string;
+  groupLabel: string;
+  status: number | null;
+  statusLabel: string;
+  profit: number | null;
+  profitLabel: string;
+  ageDays: number | null;
+  ageLabel: string;
+  orders: number;
+  isLocal: boolean;
+  canSelect: boolean;
+  canStart: boolean;
+  canStop: boolean;
+  canSell: boolean;
+  note: string | null;
+}
+
+export interface VehicleListSummary {
+  count: number;
+  moving: number;
+  profit: number;
+  profitLabel: string;
+  averageAgeLabel: string;
+}
+
+export interface VehicleListPanelView {
+  summary: VehicleListSummary;
+  rows: VehicleListRowView[];
+  groups: VehicleGroupView[];
+  kindOptions: ReportOption[];
+  groupOptions: ReportOption[];
+  groupActions: ReportActionView[];
+  groupNote: string;
+  empty: string;
+  hint: string;
+}
+
+export interface IndustryStatsRow {
+  id: number;
+  name: string;
+  kindLabel: string;
+  production: number;
+  transported: number;
+  detail: string;
+  rate: number | null;
+  rateLabel: string;
+  percent: number;
+  transportedPercent: number;
+}
+
+export interface TownStatsRow {
+  id: number;
+  name: string;
+  population: number;
+  detail: string;
+  stations: number;
+  served: number;
+  percent: number;
+}
+
+export interface MarketShareRow {
+  id: number;
+  name: string;
+  colour: number;
+  value: number;
+  valueLabel: string;
+  share: number | null;
+  shareLabel: string;
+  isLocal: boolean;
+}
+
+export interface StatsPanelView {
+  industryCount: number;
+  totalProduction: number;
+  totalTransported: number;
+  totalProductionLabel: string;
+  totalTransportedLabel: string;
+  townCount: number;
+  totalPopulation: number;
+  totalPopulationLabel: string;
+  industries: IndustryStatsRow[];
+  towns: TownStatsRow[];
+  market: MarketShareRow[];
+  marketBasis: string;
+  alerts: FinanceAlertView[];
+  hint: string;
+}
+
 export interface NewsFeedItem {
   id: number;
   kind: NewsKind;
