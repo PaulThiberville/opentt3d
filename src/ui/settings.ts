@@ -6,6 +6,7 @@
  * retombe silencieusement sur les valeurs par défaut.
  */
 
+import type { EngineMode } from '../engine/loadEngine';
 import type { QualityLevel } from '../render/quality';
 import { QUALITY_LEVELS } from '../render/quality';
 import { DEFAULT_DAY_NIGHT_CYCLE_SECONDS, sanitizeCycleSeconds } from '../render/dayNightCycle';
@@ -14,6 +15,11 @@ export type Language = 'fr' | 'en';
 
 export interface GameSettings {
   quality: QualityLevel;
+  /**
+   * Moteur proposé pour les prochaines parties solo (#78). Une sauvegarde garde
+   * le moteur qui l'a produite et le réseau le fige dans `StartInfo`.
+   */
+  engine: EngineMode;
   language: Language;
   masterVolume: number;
   effectsVolume: number;
@@ -73,6 +79,7 @@ export function p2pRelayUrls(value: unknown): string[] {
 
 export const DEFAULT_SETTINGS: GameSettings = {
   quality: 'medium',
+  engine: 'mock',
   language: 'fr',
   masterVolume: 70,
   effectsVolume: 80,
@@ -102,12 +109,24 @@ function isLanguage(value: unknown): value is Language {
   return value === 'fr' || value === 'en';
 }
 
+/**
+ * Normalise le moteur persistant (#78). Toute valeur inconnue retombe sur le
+ * mock : un ancien réglage sans champ `engine` (ou un `engineMode` d'une version
+ * antérieure) reste donc jouable sans migration destructive de la clé v1.
+ */
+export function sanitizeEngineMode(value: unknown): EngineMode {
+  if (typeof value !== 'string') return DEFAULT_SETTINGS.engine;
+  const normalized = value.trim().toLowerCase();
+  return normalized === 'wasm' ? 'wasm' : 'mock';
+}
+
 /** Normalise un objet inconnu en réglages valides. */
 export function sanitizeSettings(raw: unknown): GameSettings {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_SETTINGS };
   const record = raw as Record<string, unknown>;
   return {
     quality: isQuality(record.quality) ? record.quality : DEFAULT_SETTINGS.quality,
+    engine: sanitizeEngineMode(record.engine ?? record.engineMode),
     language: isLanguage(record.language) ? record.language : DEFAULT_SETTINGS.language,
     masterVolume: clampVolume(record.masterVolume, DEFAULT_SETTINGS.masterVolume),
     effectsVolume: clampVolume(record.effectsVolume, DEFAULT_SETTINGS.effectsVolume),

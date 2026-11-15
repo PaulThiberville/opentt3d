@@ -21,6 +21,7 @@ import {
   parseEngineMode,
   type EngineMode,
 } from './engine/loadEngine';
+import { sharedEngineAvailability } from './ui/engineAvailability';
 import { createDirectory, newRoomId, type Directory } from './net/directory';
 import { createLobby, type Lobby } from './net/lobby';
 import type { StartInfo } from './net/lobby-types';
@@ -161,23 +162,27 @@ const prefersReducedMotion =
   window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /**
- * Moteur sélectionné par `?engine=mock|wasm`. Le mock reste le défaut : le
- * moteur réel n'est activé que sur demande explicite. En réseau, ce choix est
- * le réglage initial du salon ; il est ensuite figé dans `StartInfo` pour que
- * tous les pairs utilisent le même moteur (#93).
+ * Moteur sélectionné par `?engine=mock|wasm` (#78). L'URL reste prioritaire
+ * sur le réglage persistant pour les tests, la CI et les liens partagés. Sans
+ * paramètre, le choix vient de `settings.engine` (défaut : mock).
+ *
+ * En réseau, ce choix est le réglage initial du salon ; il est ensuite figé
+ * dans `StartInfo` pour que tous les pairs utilisent le même moteur (#93).
  */
-function readEngineMode(): EngineMode {
+function readEngineModeOverride(): EngineMode | null {
   const raw = new URLSearchParams(window.location.search).get('engine');
-  if (raw === null || raw.trim() === '') return 'mock';
+  if (raw === null || raw.trim() === '') return null;
   const parsed = parseEngineMode(raw);
   if (parsed) return parsed;
   console.warn(
-    `[OpenTT3D] Moteur inconnu « ${raw} » : moteur mock utilisé. Valeurs acceptées : mock, wasm.`,
+    `[OpenTT3D] Moteur inconnu « ${raw} » : réglage persistant utilisé. Valeurs acceptées : mock, wasm.`,
   );
-  return 'mock';
+  return null;
 }
 
-const engineMode: EngineMode = readEngineMode();
+const engineOverride = readEngineModeOverride();
+const engineAvailability = sharedEngineAvailability();
+let engineMode: EngineMode = engineOverride ?? settings.engine;
 const networkBoot = readNetworkParams(window.location.search);
 const networkKind = networkBoot.kind;
 const transportKind: TransportKind = transportKindFor(networkKind);
@@ -299,7 +304,22 @@ function persistSettings(next: GameSettings): void {
   settings = next;
   saveSettings(window.localStorage, next);
   audio.setVolumes(volumesFromSettings(next));
+  engineMode = engineOverride ?? next.engine;
 }
+
+/**
+ * Détection des artefacts au démarrage (#78) : elle ne bloque jamais le menu.
+ * Si un 404 confirme l'absence du WASM, un réglage `wasm` est ramené au mock
+ * pour que « Nouvelle partie » ne propose pas un moteur cassé ; une panne
+ * réseau n'écrase rien et laisse simplement le choix actif.
+ */
+engineAvailability.subscribe((artifacts) => {
+  if (engineOverride || artifacts.reason !== 'missing' || settings.engine !== 'wasm') return;
+  persistSettings(updateSettings(settings, { engine: 'mock' }));
+});
+void engineAvailability.refresh().catch((error: unknown) => {
+  console.warn('[OpenTT3D] Vérification des artefacts moteur impossible', error);
+});
 
 function disposeSession(): void {
   stopLateProbe();
@@ -362,11 +382,23 @@ function showNewGame(): void {
     new NewGameScreen({
       initial: pendingOptions,
       engineMode,
-      onStart: (options) => {
+      storedEngineMode: settings.engine,
+      engineUrlMode: engineOverride,
+      engineAvailability,
+      onEngineChange: (mode) => {
+        if (engineOverride) return;
+        persistSettings(updateSettings(settings, { engine: mode }));
+      },
+      onStart: (options, engine) => {
         pendingOptions = options;
         replayOptions = options;
-        persistSettings(updateSettings(settings, { quality: options.quality }));
-        void startGame(options);
+        persistSettings(
+          updateSettings(settings, {
+            quality: options.quality,
+            ...(engineOverride ? {} : { engine }),
+          }),
+        );
+        void startGame(options, engine);
       },
       onBack: () => showMainMenu(),
     }),
@@ -654,6 +686,8 @@ function showSettings(origin: SettingsOrigin): void {
     'settings',
     new SettingsScreen({
       settings,
+      engineUrlMode: engineOverride,
+      engineAvailability,
       onChange: (next) => {
         persistSettings(next);
         pendingOptions = { ...pendingOptions, quality: next.quality };
@@ -672,7 +706,7 @@ function showAbout(): void {
   screens.show('about', new AboutScreen({ onBack: () => showMainMenu() }));
 }
 
-async function startGame(options: NewGameOptions): Promise<void> {
+async function startGame(options: NewGameOptions, engine: EngineMode = engineMode): Promise<void> {
   stopAttract();
   disposeSession();
   if (!webglAvailable) {
@@ -682,7 +716,13 @@ async function startGame(options: NewGameOptions): Promise<void> {
   pwa.notifyAppBusy();
   replayOptions = options;
   pendingOptions = options;
-  persistSettings(updateSettings(settings, { quality: options.quality }));
+  engineMode = engine;
+  persistSettings(
+    updateSettings(settings, {
+      quality: options.quality,
+      ...(engineOverride ? {} : { engine }),
+    }),
+  );
 
   const token: LoadToken = { cancelled: false };
   const loading: LoadingScreen = new LoadingScreen({
@@ -1072,7 +1112,7 @@ function showGameOver(summary: GameOverSummary): void {
               screens.hide();
               current.dispose();
               if (session === current) session = null;
-              void startGame(replayOptions);
+              void startGame(replayOptions, current.engineMode);
             },
           }),
     }),

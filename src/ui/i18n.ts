@@ -77,12 +77,27 @@ const FR = {
   'newgame.back': 'Retour',
   'newgame.start': 'Démarrer la partie',
   'newgame.footer': 'Astuce : Échap revient au menu. Aucune donnée n’est envoyée sur le réseau.',
-  'newgame.engine.mock': 'Moteur simulé (Mock)',
-  'newgame.engine.wasm': 'Moteur WASM (OpenTTD réel)',
-  'newgame.engine.mockHint':
-    'Simulation déterministe locale. Ajoutez ?engine=wasm à l’URL pour tester le moteur OpenTTD réel.',
-  'newgame.engine.wasmHint':
-    'Les options (climat, année, difficulté, IA) sont transmises au pont OpenTTD. Villes et industries sont des cibles : le nombre final peut varier.',
+  'newgame.engine.label': 'Moteur',
+  'newgame.engine.hint':
+    'Choisit le moteur de cette partie. Une sauvegarde conserve le moteur qui l’a créée.',
+  'engine.mock.label': 'Mock (démo)',
+  'engine.wasm.label': 'OpenTTD réel (expérimental)',
+  'engine.mock.hint': 'Simulation locale déterministe, sans artefact requis.',
+  'engine.wasm.hint':
+    'OpenTTD compilé en WebAssembly. Climat, IA et économie viennent du moteur réel ; certaines fonctions restent partielles.',
+  'engine.status.checking': 'Vérification des artefacts du moteur…',
+  'engine.status.available': 'Artefacts WASM détectés · {build}',
+  'engine.status.missing':
+    'Artefacts WASM absents ({files}). Lancez npm run engine:build puis rechargez la page.',
+  'engine.status.network':
+    'Vérification des artefacts impossible (réseau). Le mode mock reste disponible.',
+  'engine.option.missing': 'Indisponible : les fichiers WASM sont absents.',
+  'engine.option.network':
+    'Vérification réseau impossible : le moteur peut malgré tout fonctionner.',
+  'engine.locked.url': 'Moteur imposé par l’URL (?engine={mode}) : le choix est verrouillé.',
+  'settings.engine.label': 'Moteur des nouvelles parties',
+  'settings.engine.hint':
+    'Appliqué aux prochaines parties solo. Une partie en cours et le réseau gardent leur moteur d’origine.',
   'difficulty.easy': 'Facile',
   'difficulty.normal': 'Normale',
   'difficulty.hard': 'Difficile',
@@ -665,12 +680,25 @@ const EN: Record<TranslationKey, string> = {
   'newgame.back': 'Back',
   'newgame.start': 'Start game',
   'newgame.footer': 'Tip: Escape returns to the menu. No data is sent over the network.',
-  'newgame.engine.mock': 'Simulated engine (Mock)',
-  'newgame.engine.wasm': 'WASM engine (real OpenTTD)',
-  'newgame.engine.mockHint':
-    'Deterministic local simulation. Add ?engine=wasm to the URL to test the real OpenTTD engine.',
-  'newgame.engine.wasmHint':
-    'Options (climate, year, difficulty, AI) are passed to the OpenTTD bridge. Towns and industries are targets: the final count may vary.',
+  'newgame.engine.label': 'Engine',
+  'newgame.engine.hint':
+    'Chooses the engine for this game. A save keeps the engine that created it.',
+  'engine.mock.label': 'Mock (demo)',
+  'engine.wasm.label': 'Real OpenTTD (experimental)',
+  'engine.mock.hint': 'Deterministic local simulation, no artifact required.',
+  'engine.wasm.hint':
+    'OpenTTD compiled to WebAssembly. Climate, AI and economy come from the real engine; some features remain partial.',
+  'engine.status.checking': 'Checking engine artifacts…',
+  'engine.status.available': 'WASM artifacts detected · {build}',
+  'engine.status.missing':
+    'WASM artifacts missing ({files}). Run npm run engine:build then reload the page.',
+  'engine.status.network': 'Could not check artifacts (network). Mock mode remains available.',
+  'engine.option.missing': 'Unavailable: WASM files are missing.',
+  'engine.option.network': 'Network check failed: the engine may still work.',
+  'engine.locked.url': 'Engine forced by the URL (?engine={mode}): the choice is locked.',
+  'settings.engine.label': 'Engine for new games',
+  'settings.engine.hint':
+    'Applies to future solo games. A running game and network sessions keep their original engine.',
   'difficulty.easy': 'Easy',
   'difficulty.normal': 'Normal',
   'difficulty.hard': 'Hard',
