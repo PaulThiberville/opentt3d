@@ -60,6 +60,7 @@ export class IndustryLayer {
   private smoke: THREE.InstancedMesh | null = null;
   private smokeSources: SmokeSource[] = [];
   private smokeEnabled = true;
+  private reducedMotion = false;
   private smokeDistance = 140;
   private lodDistance = 70;
   private elapsed = 0;
@@ -192,7 +193,7 @@ export class IndustryLayer {
       }
     }
     this.smokeSources = sources;
-    if (sources.length === 0 || !this.smokeEnabled) return;
+    if (sources.length === 0 || !qualitySettings(this.quality).industrySmoke) return;
 
     const capacity = sources.length * SMOKE_PUFFS_PER_STACK;
     const geometry = new THREE.IcosahedronGeometry(0.5, 0);
@@ -253,7 +254,7 @@ export class IndustryLayer {
       }
     }
     smoke.instanceMatrix.needsUpdate = true;
-    smoke.visible = this.smokeEnabled && visibleStacks > 0;
+    smoke.visible = this.smokeEnabled && !this.reducedMotion && visibleStacks > 0;
   }
 
   /** Animation de fumée, avec LOD par distance à la caméra. */
@@ -261,8 +262,28 @@ export class IndustryLayer {
     this.cameraPosition = cameraPosition ?? null;
     this.applyLod(this.cameraPosition);
     if (!this.smokeEnabled || !this.smoke) return;
+    if (this.reducedMotion) return;
     this.elapsed += deltaSeconds;
     this.writeSmokeMatrices(cameraPosition ?? null);
+  }
+
+  /**
+   * Coupe la fumée animée (accessibilité). La fumée revient telle quelle au
+   * retour du réglage : aucune ressource n'est recréée.
+   */
+  setReducedMotion(enabled: boolean): void {
+    this.reducedMotion = enabled;
+    if (this.smoke) this.smoke.visible = this.smokeEnabled && !enabled;
+  }
+
+  get isReducedMotion(): boolean {
+    return this.reducedMotion;
+  }
+
+  /** Bouffées de fumée effectivement rendues. */
+  get smokeParticleCount(): number {
+    if (!this.smoke?.visible) return 0;
+    return this.smoke.count;
   }
 
   setQuality(level: QualityLevel): void {
@@ -278,7 +299,7 @@ export class IndustryLayer {
 
   private applyQualitySettings(): void {
     const settings = qualitySettings(this.quality);
-    this.smokeEnabled = settings.industrySmoke;
+    this.smokeEnabled = settings.industrySmoke && !this.reducedMotion;
     this.smokeDistance = this.quality === 'high' ? 210 : 140;
     this.lodDistance = this.quality === 'high' ? 110 : this.quality === 'low' ? 48 : 78;
     if (this.smoke) this.smoke.visible = this.smokeEnabled;

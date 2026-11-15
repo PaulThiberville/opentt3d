@@ -25,7 +25,32 @@ import {
 const STAR_COUNT = 520;
 const STAR_RADIUS = 240;
 const MOON_RADIUS = 220;
+const SUN_RADIUS = 205;
 const SUN_DISTANCE = 180;
+
+const SUN_DISC_VERTEX = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const SUN_DISC_FRAGMENT = /* glsl */ `
+  uniform vec3 uColor;
+  uniform float uOpacity;
+  varying vec2 vUv;
+  void main() {
+    vec2 point = vUv * 2.0 - 1.0;
+    float radius = length(point);
+    // Disque net + halo diffus : un seul draw call pour tout le soleil.
+    float core = smoothstep(0.34, 0.13, radius);
+    float glow = pow(max(0.0, 1.0 - radius), 3.2);
+    float alpha = (core * 0.92 + glow * 0.36) * uOpacity;
+    if (alpha < 0.012) discard;
+    gl_FragColor = vec4(uColor * (0.92 + core * 0.35), alpha);
+  }
+`;
 
 export interface RendererOptions {
   canvas: HTMLCanvasElement;
@@ -61,6 +86,8 @@ export class Renderer {
   private starMaterial: THREE.PointsMaterial;
   private moonDisc: THREE.Mesh;
   private moonDiscMaterial: THREE.MeshBasicMaterial;
+  private sunDisc: THREE.Mesh;
+  private sunDiscMaterial: THREE.ShaderMaterial;
   private phase = 0.35;
   private targetPhase = 0.35;
   private dayState: SunState = sunState(0.35);
@@ -183,6 +210,27 @@ export class Renderer {
     this.moonDisc.renderOrder = -1;
     this.moonDisc.visible = false;
     this.scene.add(this.moonDisc);
+
+    this.sunDiscMaterial = new THREE.ShaderMaterial({
+      name: 'sun-disc',
+      uniforms: {
+        uColor: { value: new THREE.Color(0xfff1c8) },
+        uOpacity: { value: 0 },
+      },
+      vertexShader: SUN_DISC_VERTEX,
+      fragmentShader: SUN_DISC_FRAGMENT,
+      transparent: true,
+      depthWrite: false,
+      fog: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
+    this.sunDisc = new THREE.Mesh(new THREE.CircleGeometry(9.5, 32), this.sunDiscMaterial);
+    this.sunDisc.name = 'sun';
+    this.sunDisc.frustumCulled = false;
+    this.sunDisc.renderOrder = -1;
+    this.sunDisc.visible = false;
+    this.scene.add(this.sunDisc);
 
     this.applyDayNightState();
     this.postfx = this.createPostFx();
@@ -375,6 +423,10 @@ export class Renderer {
       this.scene.background = this.skyColor.clone();
     }
     this.fog.color.setHex(state.fogColour);
+    // Brume plus dense la nuit : les lumières lointaines se fondent sans
+    // réduire la distance de dessin (aucun popping de géométrie).
+    this.fog.near = this.settings.fogNear * (1 - 0.22 * state.night);
+    this.fog.far = this.settings.drawDistance * (1 - 0.08 * state.night);
     this.webgl.toneMappingExposure = 1.12 - 0.1 * state.daylight;
 
     const showSky = this.settings.nightSky;
@@ -382,6 +434,9 @@ export class Renderer {
     this.starMaterial.opacity = state.starOpacity * 0.9;
     this.moonDisc.visible = showSky && state.night > 0.12;
     this.moonDiscMaterial.opacity = Math.min(1, state.night * 0.95);
+    this.sunDisc.visible = showSky && state.daylight > 0.04;
+    this.sunDiscMaterial.uniforms.uOpacity!.value = Math.max(0, state.daylight) * 0.9;
+    this.sunDiscMaterial.uniforms.uColor!.value.setHex(state.colour);
 
     if (this.postfx && Math.abs(state.night - this.lastPostFxNight) > 0.002) {
       this.lastPostFxNight = state.night;
@@ -416,6 +471,8 @@ export class Renderer {
       .copy(this.camera.position)
       .addScaledVector(this.moonDirection, MOON_RADIUS);
     this.moonDisc.lookAt(this.camera.position);
+    this.sunDisc.position.copy(this.camera.position).addScaledVector(this.sunDirection, SUN_RADIUS);
+    this.sunDisc.lookAt(this.camera.position);
   }
 
   private createPostFx(): PostFX | null {
@@ -524,12 +581,15 @@ export class Renderer {
     this.scene.remove(this.moon.target);
     this.scene.remove(this.stars);
     this.scene.remove(this.moonDisc);
+    this.scene.remove(this.sunDisc);
     this.scene.remove(this.hemi);
     this.sun.shadow.map?.dispose();
     this.stars.geometry.dispose();
     this.starMaterial.dispose();
     this.moonDisc.geometry.dispose();
     this.moonDiscMaterial.dispose();
+    this.sunDisc.geometry.dispose();
+    this.sunDiscMaterial.dispose();
     this.webgl.dispose();
     this.scene.clear();
   }
