@@ -50,6 +50,42 @@ const TOOLS: ToolDefinition[] = [
     labelKey: 'toolbar.signal.label',
     hintKey: 'toolbar.signal.hint',
   },
+  {
+    id: 'terraform',
+    icon: '⛰',
+    labelKey: 'toolbar.terraform.label',
+    hintKey: 'toolbar.terraform.hint',
+  },
+  {
+    id: 'tree',
+    icon: '♣',
+    labelKey: 'toolbar.tree.label',
+    hintKey: 'toolbar.tree.hint',
+  },
+  {
+    id: 'canal',
+    icon: '≋',
+    labelKey: 'toolbar.canal.label',
+    hintKey: 'toolbar.canal.hint',
+  },
+  {
+    id: 'lock',
+    icon: '⚓',
+    labelKey: 'toolbar.lock.label',
+    hintKey: 'toolbar.lock.hint',
+  },
+  {
+    id: 'aqueduct',
+    icon: '⌒',
+    labelKey: 'toolbar.aqueduct.label',
+    hintKey: 'toolbar.aqueduct.hint',
+  },
+  {
+    id: 'crossing',
+    icon: '╬',
+    labelKey: 'toolbar.crossing.label',
+    hintKey: 'toolbar.crossing.hint',
+  },
 ];
 
 const SHORT_LABELS: Record<BuildToolId, TranslationKey> = {
@@ -59,6 +95,12 @@ const SHORT_LABELS: Record<BuildToolId, TranslationKey> = {
   depot: 'toolbar.short.depot',
   signal: 'toolbar.short.signal',
   clear: 'toolbar.short.road',
+  terraform: 'toolbar.short.terraform',
+  tree: 'toolbar.short.tree',
+  canal: 'toolbar.short.canal',
+  lock: 'toolbar.short.lock',
+  aqueduct: 'toolbar.short.aqueduct',
+  crossing: 'toolbar.short.crossing',
 };
 
 export interface ToolbarOptions {

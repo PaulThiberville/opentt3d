@@ -93,7 +93,7 @@ export const soloMock = {
     const toolCount = await page.evaluate(
       () => document.querySelectorAll('.hud-toolbar .hud-tool').length,
     );
-    ctx.assert(toolCount === 5, 'les cinq outils de construction sont présents', toolCount);
+    ctx.assert(toolCount === 11, 'les onze outils de construction sont présents', toolCount);
 
     ctx.assert(
       parseMoney(initialState.hud.money) !== null,

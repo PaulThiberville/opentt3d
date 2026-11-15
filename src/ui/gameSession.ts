@@ -225,6 +225,12 @@ const BUILD_TOOL_INTROS: Record<BuildTool, string> = {
   station: 'Gares : réglez la taille et l’orientation, puis cliquez pour poser',
   depot: 'Dépôts : cliquez à côté d’une voie, R oriente l’entrée',
   signal: 'Signaux : cliquez ou glissez le long d’une voie ferrée',
+  terraform: 'Terrassement : choisissez monter/descendre, puis cliquez ou glissez',
+  tree: 'Arbres : cliquez ou glissez pour boiser une zone',
+  canal: 'Canaux : cliquez ou glissez pour creuser un bief',
+  lock: 'Écluses : cliquez sur un canal relié à un bief voisin',
+  aqueduct: 'Aqueducs : glissez d’une rive à l’autre au-dessus du val',
+  crossing: 'Passage à niveau : cliquez sur une voie droite',
 };
 
 /** Touches 1/2/3 du mode photo, alignées sur `PHOTO_PRESET_IDS`. */
@@ -1896,15 +1902,20 @@ export class GameSession {
 
   /** Pivote l'outil actif (R ou bouton « Pivoter »). */
   private rotateBuild(): boolean {
-    if (!this.buildTool || (this.buildTool !== 'station' && this.buildTool !== 'depot')) {
+    if (
+      !this.buildTool ||
+      (this.buildTool !== 'station' && this.buildTool !== 'depot' && this.buildTool !== 'lock')
+    ) {
       return false;
     }
     if (this.buildTool === 'station') {
       this.buildSettings.station.direction = nextDirection(this.buildSettings.station.direction);
-    } else {
+    } else if (this.buildTool === 'depot') {
       this.buildSettings.depot.direction = nextDirection(
         this.buildSettings.depot.direction ?? 'se',
       );
+    } else {
+      this.buildSettings.lock.direction = nextDirection(this.buildSettings.lock.direction ?? 'ne');
     }
     this.buildController?.setSettings(this.buildSettings);
     this.hud?.setBuildOptions(this.buildTool, this.buildSettings);
@@ -1996,6 +2007,41 @@ export class GameSession {
           ((map.flags[tile.index] ?? 0) & TILE_FLAG.SIGNAL) !== 0,
       );
     }
+    if (plan.tool === 'terraform') {
+      const delta = plan.terraform?.direction === 'down' ? -1 : 1;
+      return plan.tiles.every((tile) => {
+        const expected = Math.max(0, Math.min(15, tile.height + delta));
+        return (map.heightMap[tile.index] ?? 0) === expected;
+      });
+    }
+    if (plan.tool === 'tree') {
+      return plan.tiles.every(
+        (tile) => tileKindAt(map, tile.x, tile.y) === 'trees' && map.owner[tile.index] === company,
+      );
+    }
+    if (plan.tool === 'canal') {
+      return plan.tiles.every(
+        (tile) => tileKindAt(map, tile.x, tile.y) === 'canal' && map.owner[tile.index] === company,
+      );
+    }
+    if (plan.tool === 'lock') {
+      return plan.tiles.every(
+        (tile) => tileKindAt(map, tile.x, tile.y) === 'lock' && map.owner[tile.index] === company,
+      );
+    }
+    if (plan.tool === 'aqueduct') {
+      const last = plan.tiles.length - 1;
+      return plan.tiles.every((tile, index) => {
+        const expected = index === 0 || index === last ? 'canal' : 'aqueduct';
+        return tileKindAt(map, tile.x, tile.y) === expected && map.owner[tile.index] === company;
+      });
+    }
+    if (plan.tool === 'crossing') {
+      return plan.tiles.every(
+        (tile) =>
+          tileKindAt(map, tile.x, tile.y) === 'crossing' && map.owner[tile.index] === company,
+      );
+    }
     const expected = plan.tool === 'station' ? 'station' : plan.depot?.kind;
     if (!expected) {
       return plan.tiles.every(
@@ -2029,10 +2075,42 @@ export class GameSession {
     const snapshot = game.getLatestSnapshot();
     const money = snapshot?.companies.find((item) => item.id === company)?.money;
 
+    // Terrassement : la commande inverse remonte ou abaisse les mêmes tuiles.
+    if (last.tool === 'terraform') {
+      const direction = last.terraform?.direction === 'down' ? 'up' : 'down';
+      game.issueCommand({
+        type: 'build',
+        tool: 'terraform',
+        company,
+        from: last.from,
+        to: last.to,
+        options: { direction, size: last.terraform?.size ?? 1 },
+      });
+      this.lastBuild = null;
+      if (this.isNetwork) {
+        this.hud?.notify('info', 'Annulation envoyée : terrassement inverse au prochain tour.');
+        return;
+      }
+      game.refresh();
+      this.refreshHud();
+      return;
+    }
+
     // Gare/dépôt : l'emprise est rectangulaire, on démolit chaque tuile du plan
     // (une commande par tuile) pour ne pas déborder sur le voisinage.
-    if (last.tool === 'station' || last.tool === 'depot') {
+    if (
+      last.tool === 'station' ||
+      last.tool === 'depot' ||
+      last.tool === 'tree' ||
+      last.tool === 'canal' ||
+      last.tool === 'lock' ||
+      last.tool === 'aqueduct' ||
+      last.tool === 'crossing'
+    ) {
       const commands: EngineCommand[] = [];
+      const restores: EngineCommand[] = [];
+      const restoreHeight =
+        last.tool === 'canal' || last.tool === 'lock' || last.tool === 'aqueduct';
       for (const tile of last.tiles) {
         const clear = planBuild({
           map,
@@ -2050,8 +2128,22 @@ export class GameSession {
           return;
         }
         commands.push(commandFromPlan(clear, company));
+        if (restoreHeight) {
+          const current = map.heightMap[tile.index] ?? tile.height;
+          const levels = Math.abs(current - tile.height);
+          for (let level = 0; level < levels; level += 1) {
+            restores.push({
+              type: 'build',
+              tool: 'terraform',
+              company,
+              from: { x: tile.x, y: tile.y },
+              options: { direction: current < tile.height ? 'up' : 'down', size: 1 },
+            });
+          }
+        }
       }
       for (const command of commands) game.issueCommand(command);
+      for (const command of restores) game.issueCommand(command);
       this.lastBuild = null;
       if (this.isNetwork) {
         this.hud?.notify('info', 'Annulation envoyée : démolition au prochain tour.');
