@@ -163,11 +163,17 @@ export function ambienceFromSnapshot(
   map: MapSnapshot | null,
   listener: { x: number; z: number },
   quality: QualityLevel,
+  /** Facteur nuit de l'heure **visuelle** (le calendrier moteur peut diverger). */
+  nightOverride?: number,
 ): AmbienceEnvironment {
   const sun = snapshot ? sunState(phaseFromEconomy(snapshot.economy)) : sunState(0.5);
+  const night =
+    nightOverride !== undefined && Number.isFinite(nightOverride)
+      ? clamp01(nightOverride)
+      : sun.night;
   return {
-    night: sun.night,
-    daylight: sun.daylight,
+    night,
+    daylight: nightOverride === undefined ? sun.daylight : 1 - night,
     water: waterRatio(map, listener.x, listener.z),
     quality,
   };

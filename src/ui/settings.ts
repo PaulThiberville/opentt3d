@@ -8,6 +8,7 @@
 
 import type { QualityLevel } from '../render/quality';
 import { QUALITY_LEVELS } from '../render/quality';
+import { DEFAULT_DAY_NIGHT_CYCLE_SECONDS, sanitizeCycleSeconds } from '../render/dayNightCycle';
 
 export type Language = 'fr' | 'en';
 
@@ -19,6 +20,10 @@ export interface GameSettings {
   musicVolume: number;
   /** Relais P2P affiché en lecture seule tant que le lobby n'est pas branché. */
   p2pRelay: string;
+  /** Cycle jour/nuit visuel (aucun effet sur le gameplay). */
+  dayNightCycle: boolean;
+  /** Durée d'une journée visuelle complète, en secondes. */
+  dayNightCycleSeconds: number;
 }
 
 export const SETTINGS_STORAGE_KEY = 'opentt3d.settings.v1';
@@ -32,6 +37,8 @@ export const DEFAULT_SETTINGS: GameSettings = {
   effectsVolume: 80,
   musicVolume: 40,
   p2pRelay: DEFAULT_P2P_RELAY,
+  dayNightCycle: true,
+  dayNightCycleSeconds: DEFAULT_DAY_NIGHT_CYCLE_SECONDS,
 };
 
 export interface StorageLike {
@@ -64,6 +71,11 @@ export function sanitizeSettings(raw: unknown): GameSettings {
     effectsVolume: clampVolume(record.effectsVolume, DEFAULT_SETTINGS.effectsVolume),
     musicVolume: clampVolume(record.musicVolume, DEFAULT_SETTINGS.musicVolume),
     p2pRelay: DEFAULT_P2P_RELAY,
+    dayNightCycle:
+      typeof record.dayNightCycle === 'boolean'
+        ? record.dayNightCycle
+        : DEFAULT_SETTINGS.dayNightCycle,
+    dayNightCycleSeconds: sanitizeCycleSeconds(record.dayNightCycleSeconds),
   };
 }
 

@@ -34,6 +34,8 @@ export class SessionAudio {
   private map: MapSnapshot | null = null;
   private listener: ListenerState = { x: 0, z: 0, yaw: 0 };
   private ambienceTimer = 0;
+  /** Facteur nuit visuel ; `null` = suivre le calendrier moteur. */
+  private dayNightNight: number | null = null;
   private paused = false;
   private gameplay = false;
   private disposed = false;
@@ -94,6 +96,15 @@ export class SessionAudio {
     this.engine.setVolumes(volumesFromSettings(settings));
   }
 
+  /**
+   * Aligne l'ambiance (oiseaux/grillons) sur l'heure **visuelle**. Sans appel,
+   * le calendrier moteur reste la référence.
+   */
+  setDayNight(night: number): void {
+    const clamped = Math.max(0, Math.min(1, Number.isFinite(night) ? night : 0));
+    this.dayNightNight = clamped;
+  }
+
   setQuality(quality: QualityLevel): void {
     this.quality = quality;
     this.engine.setQuality(quality);
@@ -151,6 +162,12 @@ export class SessionAudio {
   }
 
   private refreshAmbience(): void {
-    this.director.ingestSnapshot(this.snapshot, this.map, this.listener, this.quality);
+    this.director.ingestSnapshot(
+      this.snapshot,
+      this.map,
+      this.listener,
+      this.quality,
+      this.dayNightNight ?? undefined,
+    );
   }
 }

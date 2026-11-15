@@ -20,6 +20,10 @@ export class SettingsScreen extends BaseScreen {
   private options: SettingsScreenOptions;
   private settings: GameSettings;
   private qualitySelect: HTMLSelectElement;
+  private dayNightToggle: HTMLInputElement;
+  private cycleInput: HTMLInputElement;
+  private cycleOutput: HTMLOutputElement;
+  private cycleHint: HTMLParagraphElement;
   private languageSelect: HTMLSelectElement;
   private volumeInputs = new Map<keyof GameSettings, HTMLInputElement>();
   private volumeOutputs = new Map<keyof GameSettings, HTMLOutputElement>();
@@ -66,6 +70,54 @@ export class SettingsScreen extends BaseScreen {
         text: 'Appliquée immédiatement à la scène 3D (ombres, distance, végétation).',
       }),
     );
+
+    // Cycle jour/nuit ---------------------------------------------------------
+    const dayNightField = el('div', { className: 'field' });
+    const toggleRow = el('div', { className: 'settings-toggle-row' });
+    this.dayNightToggle = el('input', {
+      attrs: { id: 'settings-day-night', type: 'checkbox' },
+    });
+    this.dayNightToggle.checked = this.settings.dayNightCycle;
+    this.dayNightToggle.addEventListener('change', () => {
+      this.patch({ dayNightCycle: this.dayNightToggle.checked });
+    });
+    toggleRow.append(
+      this.dayNightToggle,
+      fieldLabel('Activer le cycle jour/nuit', 'settings-day-night'),
+    );
+
+    const cycleRow = el('div', { className: 'volume-row settings-cycle-row' });
+    this.cycleInput = el('input', {
+      className: 'range',
+      attrs: {
+        id: 'settings-day-night-seconds',
+        type: 'range',
+        min: '30',
+        max: '900',
+        step: '10',
+        value: `${this.settings.dayNightCycleSeconds}`,
+      },
+    });
+    this.cycleOutput = el('output', {
+      className: 'volume-value settings-cycle-value',
+      text: `${this.settings.dayNightCycleSeconds} s`,
+      attrs: { for: 'settings-day-night-seconds' },
+    });
+    this.cycleInput.addEventListener('input', () => {
+      this.cycleOutput.textContent = `${this.cycleInput.value} s`;
+      this.patch({ dayNightCycleSeconds: Number(this.cycleInput.value) });
+    });
+    cycleRow.append(
+      fieldLabel('Durée d’un cycle', 'settings-day-night-seconds'),
+      this.cycleInput,
+      this.cycleOutput,
+    );
+
+    this.cycleHint = el('p', {
+      className: 'field-hint',
+      text: 'Le cycle est purement visuel : il n’a aucun effet sur le gameplay. Désactivé, l’heure est figée à midi. 120 s = 2 minutes par journée.',
+    });
+    dayNightField.append(fieldLabel('Cycle jour/nuit'), toggleRow, cycleRow, this.cycleHint);
 
     // Langue -----------------------------------------------------------------
     this.languageSelect = el('select', {
@@ -153,7 +205,7 @@ export class SettingsScreen extends BaseScreen {
       }),
     );
 
-    grid.append(qualityField, languageField, volumes, relayField);
+    grid.append(qualityField, dayNightField, languageField, volumes, relayField);
 
     this.status = el('p', {
       className: 'settings-status',
@@ -192,6 +244,13 @@ export class SettingsScreen extends BaseScreen {
     }
     this.languageSelect.value = this.settings.language;
     this.qualitySelect.value = this.settings.quality;
+    this.dayNightToggle.checked = this.settings.dayNightCycle;
+    this.cycleInput.value = `${this.settings.dayNightCycleSeconds}`;
+    this.cycleOutput.textContent = `${this.settings.dayNightCycleSeconds} s`;
+    this.cycleInput.disabled = !this.settings.dayNightCycle;
+    this.cycleHint.textContent = this.settings.dayNightCycle
+      ? 'Le cycle est purement visuel : il n’a aucun effet sur le gameplay. 120 s = 2 minutes par journée.'
+      : 'Cycle désactivé : l’heure est figée à midi, la scène reste en plein jour.';
     this.status.hidden = false;
     this.status.textContent = 'Réglages enregistrés.';
     this.options.onChange(this.settings);

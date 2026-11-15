@@ -67,6 +67,16 @@ describe('réglages persistants', () => {
     expect(sanitized.effectsVolume).toBe(0);
     expect(sanitized.musicVolume).toBe(DEFAULT_SETTINGS.musicVolume);
     expect(sanitized.p2pRelay).toBe(DEFAULT_SETTINGS.p2pRelay);
+    expect(sanitized.dayNightCycle).toBe(DEFAULT_SETTINGS.dayNightCycle);
+    expect(sanitized.dayNightCycleSeconds).toBe(DEFAULT_SETTINGS.dayNightCycleSeconds);
+  });
+
+  it('normalise le cycle jour/nuit', () => {
+    expect(sanitizeSettings({ dayNightCycle: false }).dayNightCycle).toBe(false);
+    expect(sanitizeSettings({ dayNightCycle: 'non' }).dayNightCycle).toBe(true);
+    expect(sanitizeSettings({ dayNightCycleSeconds: 1 }).dayNightCycleSeconds).toBe(30);
+    expect(sanitizeSettings({ dayNightCycleSeconds: 5_000 }).dayNightCycleSeconds).toBe(900);
+    expect(sanitizeSettings({ dayNightCycleSeconds: 240 }).dayNightCycleSeconds).toBe(240);
   });
 
   it('accepte une langue déjà connue', () => {
