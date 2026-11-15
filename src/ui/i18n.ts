@@ -61,6 +61,13 @@ const FR = {
   'quality.high': 'Élevée',
   'settings.quality.label': 'Qualité de rendu',
   'settings.quality.hint': 'Appliquée immédiatement à la scène 3D (ombres, distance, végétation).',
+  'settings.daynight.label': 'Cycle jour/nuit',
+  'settings.daynight.toggle': 'Activer le cycle jour/nuit',
+  'settings.daynight.duration': 'Durée d’un cycle',
+  'settings.daynight.hint':
+    'Le cycle est purement visuel : il n’a aucun effet sur le gameplay. Désactivé, l’heure est figée à midi. 120 s = 2 minutes par journée.',
+  'settings.daynight.hintOff':
+    'Cycle désactivé : l’heure est figée à midi, la scène reste en plein jour.',
   'settings.language.label': 'Langue de l’interface',
   'settings.language.hint':
     'Le français est la langue de référence ; la traduction anglaise couvre les écrans et le HUD principaux.',
@@ -342,6 +349,13 @@ const EN: Record<TranslationKey, string> = {
   'quality.high': 'High',
   'settings.quality.label': 'Render quality',
   'settings.quality.hint': 'Applied immediately to the 3D scene (shadows, distance, vegetation).',
+  'settings.daynight.label': 'Day/night cycle',
+  'settings.daynight.toggle': 'Enable the day/night cycle',
+  'settings.daynight.duration': 'Cycle duration',
+  'settings.daynight.hint':
+    'The cycle is purely visual: it has no effect on gameplay. When disabled, time is frozen at noon. 120 s = 2 minutes per day.',
+  'settings.daynight.hintOff':
+    'Cycle disabled: time is frozen at noon and the scene stays in daylight.',
   'settings.language.label': 'Interface language',
   'settings.language.hint':
     'French is the reference language; the English translation covers the main screens and HUD.',

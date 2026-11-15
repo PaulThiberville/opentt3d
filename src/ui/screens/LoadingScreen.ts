@@ -5,6 +5,7 @@
  */
 
 import { el } from '../dom';
+import { t } from '../i18n';
 import { BaseScreen } from './BaseScreen';
 
 export interface LoadingScreenOptions {
@@ -26,11 +27,16 @@ export class LoadingScreen extends BaseScreen {
   constructor(options: LoadingScreenOptions) {
     super('loading-screen');
     this.options = options;
+    this.element.setAttribute('aria-label', t('loading.title'));
 
     const card = el('div', { className: 'panel loading-card' });
     this.spinner = el('div', { className: 'spinner' });
-    this.title = el('h1', { className: 'panel-title', text: 'Chargement' });
-    this.message = el('p', { className: 'loading-message', text: 'Préparation du monde…' });
+    this.title = el('h1', { className: 'panel-title', text: t('loading.title') });
+    this.message = el('p', {
+      className: 'loading-message',
+      text: t('loading.prepare'),
+      attrs: { role: 'status', 'aria-live': 'polite' },
+    });
     this.progressTrack = el('div', {
       className: 'progress',
       attrs: {
@@ -38,7 +44,7 @@ export class LoadingScreen extends BaseScreen {
         'aria-valuemin': '0',
         'aria-valuemax': '100',
         'aria-valuenow': '0',
-        'aria-label': 'Progression du chargement',
+        'aria-label': t('loading.progressLabel'),
       },
     });
     this.progress = el('div', { className: 'progress-fill' });
@@ -46,7 +52,7 @@ export class LoadingScreen extends BaseScreen {
 
     this.cancelButton = el('button', {
       className: 'btn btn-ghost',
-      text: 'Annuler le chargement',
+      text: t('loading.cancel'),
       attrs: { type: 'button' },
     });
     this.cancelButton.addEventListener('click', () => this.cancel());
@@ -67,8 +73,8 @@ export class LoadingScreen extends BaseScreen {
     if (this.errorMode) return;
     this.cancelRequested = true;
     this.cancelButton.disabled = true;
-    this.cancelButton.textContent = 'Annulation…';
-    this.message.textContent = 'Annulation en cours…';
+    this.cancelButton.textContent = t('loading.cancelling');
+    this.message.textContent = t('loading.cancellingMessage');
   }
 
   setError(title: string, message: string): void {
@@ -82,7 +88,7 @@ export class LoadingScreen extends BaseScreen {
 
     const back = el('button', {
       className: 'btn btn-primary',
-      text: 'Retour au menu',
+      text: t('common.backToMenu'),
       attrs: { type: 'button', 'data-autofocus': '' },
     });
     back.addEventListener('click', () => this.options.onClose());

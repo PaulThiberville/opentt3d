@@ -3,10 +3,13 @@
  *
  * Les modifications sont enregistrées immédiatement dans `localStorage` via
  * le callback de l'application ; aucun réglage n'est perdu en quittant.
+ * Le changement de langue reconstruit l'écran et rafraîchit le HUD via le
+ * socle `i18n`.
  */
 
-import { QUALITY_LEVELS, QUALITY_PRESETS } from '../../render/quality';
+import { QUALITY_LEVELS } from '../../render/quality';
 import { el, fieldLabel } from '../dom';
+import { normalizeLanguage, qualityLabel, setLanguage, t } from '../i18n';
 import { DEFAULT_P2P_RELAY, updateSettings, type GameSettings } from '../settings';
 import { BaseScreen } from './BaseScreen';
 
@@ -19,30 +22,37 @@ export interface SettingsScreenOptions {
 export class SettingsScreen extends BaseScreen {
   private options: SettingsScreenOptions;
   private settings: GameSettings;
-  private qualitySelect: HTMLSelectElement;
-  private dayNightToggle: HTMLInputElement;
-  private cycleInput: HTMLInputElement;
-  private cycleOutput: HTMLOutputElement;
-  private cycleHint: HTMLParagraphElement;
-  private languageSelect: HTMLSelectElement;
+  private qualitySelect!: HTMLSelectElement;
+  private dayNightToggle!: HTMLInputElement;
+  private cycleInput!: HTMLInputElement;
+  private cycleOutput!: HTMLOutputElement;
+  private cycleHint!: HTMLParagraphElement;
+  private languageSelect!: HTMLSelectElement;
   private volumeInputs = new Map<keyof GameSettings, HTMLInputElement>();
   private volumeOutputs = new Map<keyof GameSettings, HTMLOutputElement>();
-  private status: HTMLParagraphElement;
+  private status!: HTMLParagraphElement;
 
   constructor(options: SettingsScreenOptions) {
     super('panel-screen settings-screen');
     this.options = options;
     this.settings = { ...options.settings };
+    this.element.setAttribute('aria-label', t('settings.title'));
+    // Aligne le socle i18n sur la langue enregistrée sans réécrire le stockage.
+    setLanguage(this.settings.language, { persist: false });
+    this.build();
+  }
+
+  private build(): void {
+    this.element.setAttribute('aria-label', t('settings.title'));
+    this.volumeInputs.clear();
+    this.volumeOutputs.clear();
 
     const panel = el('div', { className: 'panel panel-wide' });
     const header = el('div', { className: 'panel-header' });
     header.append(
-      el('span', { className: 'panel-eyebrow', text: 'Réglages' }),
-      el('h1', { className: 'panel-title', text: 'Préférences' }),
-      el('p', {
-        className: 'panel-subtitle',
-        text: 'Les réglages sont enregistrés immédiatement dans ce navigateur (localStorage).',
-      }),
+      el('span', { className: 'panel-eyebrow', text: t('settings.eyebrow') }),
+      el('h1', { className: 'panel-title', text: t('settings.title') }),
+      el('p', { className: 'panel-subtitle', text: t('settings.subtitle') }),
     );
 
     const grid = el('div', { className: 'settings-grid' });
@@ -50,11 +60,15 @@ export class SettingsScreen extends BaseScreen {
     // Qualité ----------------------------------------------------------------
     this.qualitySelect = el('select', {
       className: 'input',
-      attrs: { id: 'settings-quality' },
+      attrs: {
+        id: 'settings-quality',
+        'aria-describedby': 'settings-quality-hint',
+        'data-autofocus': '',
+      },
     });
     for (const level of QUALITY_LEVELS) {
       const option = el('option', {
-        text: QUALITY_PRESETS[level].label,
+        text: qualityLabel(level),
         attrs: { value: level },
       });
       option.selected = level === this.settings.quality;
@@ -63,13 +77,8 @@ export class SettingsScreen extends BaseScreen {
     this.qualitySelect.addEventListener('change', () => {
       this.patch({ quality: this.qualitySelect.value });
     });
-    const qualityField = this.field('Qualité de rendu', this.qualitySelect);
-    qualityField.append(
-      el('p', {
-        className: 'field-hint',
-        text: 'Appliquée immédiatement à la scène 3D (ombres, distance, végétation).',
-      }),
-    );
+    const qualityField = this.field(t('settings.quality.label'), this.qualitySelect);
+    qualityField.append(this.hint('settings-quality-hint', t('settings.quality.hint')));
 
     // Cycle jour/nuit ---------------------------------------------------------
     const dayNightField = el('div', { className: 'field' });
@@ -83,7 +92,7 @@ export class SettingsScreen extends BaseScreen {
     });
     toggleRow.append(
       this.dayNightToggle,
-      fieldLabel('Activer le cycle jour/nuit', 'settings-day-night'),
+      fieldLabel(t('settings.daynight.toggle'), 'settings-day-night'),
     );
 
     const cycleRow = el('div', { className: 'volume-row settings-cycle-row' });
@@ -108,53 +117,52 @@ export class SettingsScreen extends BaseScreen {
       this.patch({ dayNightCycleSeconds: Number(this.cycleInput.value) });
     });
     cycleRow.append(
-      fieldLabel('Durée d’un cycle', 'settings-day-night-seconds'),
+      fieldLabel(t('settings.daynight.duration'), 'settings-day-night-seconds'),
       this.cycleInput,
       this.cycleOutput,
     );
 
     this.cycleHint = el('p', {
       className: 'field-hint',
-      text: 'Le cycle est purement visuel : il n’a aucun effet sur le gameplay. Désactivé, l’heure est figée à midi. 120 s = 2 minutes par journée.',
+      text: t('settings.daynight.hint'),
     });
-    dayNightField.append(fieldLabel('Cycle jour/nuit'), toggleRow, cycleRow, this.cycleHint);
+    dayNightField.append(
+      fieldLabel(t('settings.daynight.label')),
+      toggleRow,
+      cycleRow,
+      this.cycleHint,
+    );
 
     // Langue -----------------------------------------------------------------
     this.languageSelect = el('select', {
       className: 'input',
-      attrs: { id: 'settings-language' },
+      attrs: { id: 'settings-language', 'aria-describedby': 'settings-language-hint' },
     });
-    const fr = el('option', { text: 'Français', attrs: { value: 'fr' } });
+    const fr = el('option', {
+      text: t('settings.language.fr'),
+      attrs: { value: 'fr', lang: 'fr' },
+    });
     fr.selected = this.settings.language === 'fr';
     const en = el('option', {
-      text: 'Anglais — bientôt',
-      attrs: { value: 'en', disabled: 'disabled' },
+      text: t('settings.language.en'),
+      attrs: { value: 'en', lang: 'en' },
     });
+    en.selected = this.settings.language === 'en';
     this.languageSelect.append(fr, en);
-    this.languageSelect.addEventListener('change', () => {
-      this.patch({ language: this.languageSelect.value });
-    });
-    const languageField = this.field('Langue de l’interface', this.languageSelect);
-    languageField.append(
-      el('p', {
-        className: 'field-hint',
-        text: 'Seul le français est disponible pour cette vague.',
-      }),
-    );
+    this.languageSelect.addEventListener('change', () => this.changeLanguage());
+    const languageField = this.field(t('settings.language.label'), this.languageSelect);
+    languageField.append(this.hint('settings-language-hint', t('settings.language.hint')));
 
     // Volumes ----------------------------------------------------------------
     const volumes = el('div', { className: 'settings-volumes' });
     volumes.append(
-      el('h2', { className: 'settings-section-title', text: 'Volumes (placeholder)' }),
-      el('p', {
-        className: 'field-hint',
-        text: 'Les curseurs sont persistés mais aucun moteur audio n’est encore branché.',
-      }),
+      el('h2', { className: 'settings-section-title', text: t('settings.volumes.title') }),
+      el('p', { className: 'field-hint', text: t('settings.volumes.hint') }),
     );
     const volumeDefs: { key: 'masterVolume' | 'effectsVolume' | 'musicVolume'; label: string }[] = [
-      { key: 'masterVolume', label: 'Volume général' },
-      { key: 'effectsVolume', label: 'Effets' },
-      { key: 'musicVolume', label: 'Musique' },
+      { key: 'masterVolume', label: t('settings.volume.master') },
+      { key: 'effectsVolume', label: t('settings.volume.effects') },
+      { key: 'musicVolume', label: t('settings.volume.music') },
     ];
     for (const def of volumeDefs) {
       const row = el('div', { className: 'volume-row' });
@@ -168,6 +176,7 @@ export class SettingsScreen extends BaseScreen {
           max: '100',
           step: '1',
           value: `${value}`,
+          'aria-valuetext': `${value} %`,
         },
       });
       const output = el('output', {
@@ -177,6 +186,7 @@ export class SettingsScreen extends BaseScreen {
       });
       input.addEventListener('input', () => {
         output.textContent = `${input.value} %`;
+        input.setAttribute('aria-valuetext', `${input.value} %`);
         this.patch({ [def.key]: Number(input.value) });
       });
       this.volumeInputs.set(def.key, input);
@@ -194,22 +204,18 @@ export class SettingsScreen extends BaseScreen {
         type: 'text',
         readonly: 'readonly',
         disabled: 'disabled',
+        'aria-describedby': 'settings-relay-hint',
       },
     });
     relay.value = this.settings.p2pRelay || DEFAULT_P2P_RELAY;
-    relayField.append(fieldLabel('Relais P2P', 'settings-relay'), relay);
-    relayField.append(
-      el('p', {
-        className: 'field-hint',
-        text: 'Lecture seule pour l’instant : le choix du relais sera exposé avec l’interface de salon.',
-      }),
-    );
+    relayField.append(fieldLabel(t('settings.relay.label'), 'settings-relay'), relay);
+    relayField.append(this.hint('settings-relay-hint', t('settings.relay.hint')));
 
     grid.append(qualityField, dayNightField, languageField, volumes, relayField);
 
     this.status = el('p', {
       className: 'settings-status',
-      text: 'Réglages enregistrés localement.',
+      text: t('settings.status.local'),
       attrs: { role: 'status', 'aria-live': 'polite' },
     });
     this.status.hidden = true;
@@ -217,14 +223,18 @@ export class SettingsScreen extends BaseScreen {
     const actions = el('div', { className: 'panel-actions' });
     const back = el('button', {
       className: 'btn btn-primary',
-      text: 'Terminer',
-      attrs: { type: 'button', 'data-autofocus': '' },
+      text: t('settings.done'),
+      attrs: { type: 'button' },
     });
-    back.addEventListener('click', () => options.onBack());
+    back.addEventListener('click', () => this.options.onBack());
     actions.append(back);
 
     panel.append(header, grid, this.status, actions);
-    this.element.append(panel);
+    this.element.replaceChildren(panel);
+  }
+
+  private hint(id: string, text: string): HTMLParagraphElement {
+    return el('p', { className: 'field-hint', text, attrs: { id } });
   }
 
   private field(labelText: string, control: HTMLElement): HTMLDivElement {
@@ -233,12 +243,29 @@ export class SettingsScreen extends BaseScreen {
     return wrapper;
   }
 
+  private changeLanguage(): void {
+    const language = normalizeLanguage(this.languageSelect.value);
+    if (language === this.settings.language) return;
+    setLanguage(language);
+    this.settings = updateSettings(this.settings, { language });
+    this.options.onChange(this.settings);
+    this.build();
+    this.languageSelect.focus();
+    this.showStatus(t('settings.status.saved'));
+  }
+
+  private showStatus(text: string): void {
+    this.status.hidden = false;
+    this.status.textContent = text;
+  }
+
   private patch(patch: Partial<Record<keyof GameSettings, unknown>>): void {
     this.settings = updateSettings(this.settings, patch);
     for (const [key, input] of this.volumeInputs) {
       const value = this.settings[key];
       if (typeof value === 'number') {
         input.value = `${value}`;
+        input.setAttribute('aria-valuetext', `${value} %`);
         this.volumeOutputs.get(key)?.replaceChildren(`${value} %`);
       }
     }
@@ -249,10 +276,9 @@ export class SettingsScreen extends BaseScreen {
     this.cycleOutput.textContent = `${this.settings.dayNightCycleSeconds} s`;
     this.cycleInput.disabled = !this.settings.dayNightCycle;
     this.cycleHint.textContent = this.settings.dayNightCycle
-      ? 'Le cycle est purement visuel : il n’a aucun effet sur le gameplay. 120 s = 2 minutes par journée.'
-      : 'Cycle désactivé : l’heure est figée à midi, la scène reste en plein jour.';
-    this.status.hidden = false;
-    this.status.textContent = 'Réglages enregistrés.';
+      ? t('settings.daynight.hint')
+      : t('settings.daynight.hintOff');
+    this.showStatus(t('settings.status.saved'));
     this.options.onChange(this.settings);
   }
 

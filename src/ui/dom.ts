@@ -82,6 +82,104 @@ export function focusFirst(root: HTMLElement): void {
 }
 
 /**
+ * Calcule la cible d'un focus trap circulaire.
+ *
+ * `null` signifie « laisser le navigateur avancer normalement » : le focus est
+ * déjà à l'intérieur et ne franchit aucune borne. Un index négatif représente
+ * un focus hors du conteneur.
+ */
+export function resolveFocusTrap(
+  count: number,
+  activeIndex: number,
+  shiftKey: boolean,
+): number | null {
+  if (count <= 0) return null;
+  if (activeIndex < 0) return shiftKey ? count - 1 : 0;
+  if (shiftKey) return activeIndex === 0 ? count - 1 : null;
+  return activeIndex === count - 1 ? 0 : null;
+}
+
+export interface MediaQueryLike {
+  matches: boolean;
+}
+
+/** Respecte `prefers-reduced-motion` sans dépendre d'un vrai `window` en test. */
+export function prefersReducedMotion(
+  matchMedia: ((query: string) => MediaQueryLike) | undefined = typeof window === 'undefined'
+    ? undefined
+    : (query: string) => window.matchMedia(query),
+): boolean {
+  return matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+}
+
+const GAME_KEYS = new Set([
+  'ArrowLeft',
+  'ArrowRight',
+  'ArrowUp',
+  'ArrowDown',
+  'Home',
+  '+',
+  '-',
+  '=',
+]);
+
+const GAME_CODES = new Set([
+  'KeyW',
+  'KeyA',
+  'KeyS',
+  'KeyD',
+  'KeyQ',
+  'KeyE',
+  'Equal',
+  'Minus',
+  'NumpadAdd',
+  'NumpadSubtract',
+  'Space',
+]);
+
+export interface GameKeyGuardInput {
+  key: string;
+  code: string;
+  /** Le focus est dans la couche d'écrans modaux. */
+  inScreen: boolean;
+  /** Un écran modal est visible (même si le focus traîne ailleurs). */
+  screenOpen: boolean;
+}
+
+/**
+ * Les raccourcis de caméra et de pause ne doivent pas voler les flèches, Home
+ * ou Espace à un contrôle de formulaire ou à un écran modal.
+ */
+export function shouldGuardGameKey(input: GameKeyGuardInput): boolean {
+  if (!input.inScreen && !input.screenOpen) return false;
+  return GAME_KEYS.has(input.key) || GAME_CODES.has(input.code);
+}
+
+let gameKeyGuardInstalled = false;
+
+/**
+ * Filtre les raccourcis de jeu au niveau de `document` (phase bulle) : les
+ * écouteurs de `window` (caméra, session) ne les reçoivent plus pendant qu'un
+ * écran modal est ouvert ou qu'un de ses contrôles a le focus.
+ */
+export function installGameKeyGuard(): () => void {
+  if (gameKeyGuardInstalled || typeof document === 'undefined') return () => {};
+  gameKeyGuardInstalled = true;
+  const handler = (event: KeyboardEvent): void => {
+    const target = event.target;
+    const inScreen = target instanceof Element && target.closest('.screens') !== null;
+    const screenOpen = document.querySelector('.screens .screen.is-visible') !== null;
+    if (!shouldGuardGameKey({ key: event.key, code: event.code, inScreen, screenOpen })) return;
+    event.stopPropagation();
+  };
+  document.addEventListener('keydown', handler);
+  return () => {
+    document.removeEventListener('keydown', handler);
+    gameKeyGuardInstalled = false;
+  };
+}
+
+/**
  * Navigation circulaire au clavier dans une liste verticale de boutons
  * (flèches haut/bas, Home/End). Retourne la fonction de nettoyage.
  */
