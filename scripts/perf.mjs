@@ -34,7 +34,7 @@
  *   --qualities=low,medium,high
  *   --engine=mock,wasm      moteurs (wasm ignoré si artefacts absents)
  *   --wasm-sizes / --wasm-qualities  sous-matrice WASM (défaut : medium)
- *   --scenarios=map,city,vehicles,build,move,hidden,resize
+ *   --scenarios=map,city,vehicles,build,move,firstinput,hidden,resize
  *   --duration=8            secondes mesurées par scénario
  *   --soak=60               secondes de stabilité (0 = désactivé)
  *   --soak-size=256 --soak-quality=medium
@@ -212,7 +212,7 @@ function printHelp() {
   console.log(`Harnais de performance OpenTT3D
 
   node scripts/perf.mjs [--sizes=128,256] [--qualities=low,medium,high]
-       [--engine=mock,wasm] [--scenarios=map,city,vehicles,build,move,hidden,resize]
+       [--engine=mock,wasm] [--scenarios=map,city,vehicles,build,move,firstinput,hidden,resize]
        [--duration=8] [--soak=60] [--dpr=1] [--swiftshader] [--report-only]
        [--no-build] [--server=preview|dev|http://...] [--port=5199]
 
