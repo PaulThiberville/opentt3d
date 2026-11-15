@@ -146,13 +146,15 @@ export class WorldView {
       this.industries.build(snapshot.industries, map, this.quality);
       this.vegetation.build(map, this.quality);
       this.signals.setMap(map);
-      this.depots.setMap(map);
       this.mapApplied = true;
       if (first) {
         this.controller.setBounds({ minX: 0, maxX: map.width, minZ: 0, maxZ: map.height });
         this.controller.reset();
       }
     }
+    // Les dépôts sont complets à chaque snapshot ; la carte ne sert qu'à la
+    // hauteur du sol (la dernière carte connue est conservée).
+    this.depots.setDepots(snapshot.depots, this.currentMap);
     const phase = phaseFromEconomy(snapshot.economy);
     this.night = sunState(phase).night;
     this.timeOfDay?.setTimeOfDay(phase);
