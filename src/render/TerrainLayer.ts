@@ -101,6 +101,9 @@ const NIGHT_GLOW: Partial<Record<TileKind, readonly [number, number, number]>> =
   water: [0.015, 0.04, 0.07],
   river: [0.015, 0.04, 0.07],
   canal: [0.015, 0.04, 0.07],
+  lock: [0.02, 0.045, 0.075],
+  aqueduct: [0.02, 0.03, 0.035],
+  crossing: [0.09, 0.05, 0.025],
 };
 
 /**
