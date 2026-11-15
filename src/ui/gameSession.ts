@@ -28,6 +28,18 @@ import {
   type BuildTool,
 } from '../game/buildRules';
 import { tileKindAt } from '../game/mapGrid';
+import {
+  buyVehicleCommand,
+  depotKindAt,
+  depotOrder,
+  orderVehicleCommand,
+  ordersFromSnapshot,
+  stationAtTile,
+  stationOrder,
+  validateVehicleOrders,
+  vehicleActionCommand,
+  type VehicleOrder,
+} from '../game/vehicleRules';
 import type { StartInfo } from '../net/lobby-types';
 import { NET_TICK_MS, createNetSession, type NetSession, type NetUpdate } from '../net/session';
 import { Renderer } from '../render/Renderer';
@@ -52,6 +64,7 @@ import {
   type LockstepGameDriver,
 } from './networkRunner';
 import { describeSelection } from './selection';
+import { describeDepotPanel, describeVehiclePanel } from './vehicleView';
 import type { GameSettings } from './settings';
 import type { GameOverSummary, NetworkStatusView, SessionOverview } from './types';
 
@@ -149,6 +162,10 @@ export class GameSession {
 
   private quality: QualityLevel;
   private lastTarget: WorldTarget | null = null;
+  /** Dépôt ouvert par un clic (panneau achat/gestion). */
+  private openDepot: { x: number; y: number } | null = null;
+  /** Véhicule dont la tournée attend un clic sur une gare/dépôt. */
+  private orderPickingFor: number | null = null;
   private hudTimer = 0;
   private minimapTimer = 0;
   private disposed = false;
@@ -309,6 +326,10 @@ export class GameSession {
     this.hud.notify(
       'info',
       'Routes, rails, gares, dépôts et signaux : barre du bas, puis cliquez sur la carte.',
+    );
+    this.hud.notify(
+      'info',
+      'Un dépôt ouvert permet d’acheter un véhicule ; ajoutez ensuite ses gares puis démarrez-le.',
     );
     if (snapshot) this.monitorGameOver(snapshot);
   }
@@ -505,6 +526,16 @@ export class GameSession {
       onBuildToolChange: (tool) => this.setBuildTool(tool),
       onBuildSettingsChange: (settings) => this.applyBuildSettings(settings),
       onBuildRotate: () => this.rotateBuild(),
+      onBuyVehicle: (modelId) => this.buyVehicle(modelId),
+      onSelectVehicle: (vehicleId) => this.selectVehicle(vehicleId),
+      onStartVehicle: (vehicleId) => this.startVehicle(vehicleId),
+      onStopVehicle: (vehicleId) => this.stopVehicle(vehicleId),
+      onSellVehicle: (vehicleId) => this.sellVehicle(vehicleId),
+      onCloseDepot: () => this.closeDepot(),
+      onAddOrder: (vehicleId) => this.toggleOrderPicking(vehicleId),
+      onRemoveOrder: (vehicleId, index) => this.removeOrder(vehicleId, index),
+      onMoveOrder: (vehicleId, index, delta) => this.moveOrder(vehicleId, index, delta),
+      onCloseVehicle: () => this.clearSelection(),
     });
   }
 
@@ -564,6 +595,14 @@ export class GameSession {
     }
     if (event.key === 'Escape') {
       event.preventDefault();
+      if (this.orderPickingFor !== null) {
+        this.cancelOrderPicking();
+        return;
+      }
+      if (this.openDepot) {
+        this.closeDepot();
+        return;
+      }
       if (this.buildTool) {
         this.applyBuildTool(null);
         return;
@@ -717,13 +756,37 @@ export class GameSession {
     const hud = this.hud;
     if (!game || !world || !hud) return;
     const snapshot = game.getLatestSnapshot();
+    const map = world.getMap();
     const selection = game.getSelection();
+    const companyId = this.localCompanyId();
+    let depot = this.openDepot
+      ? describeDepotPanel(snapshot, map, companyId, this.openDepot)
+      : null;
+    if (this.openDepot && !depot) this.openDepot = null;
+    let vehicle = null;
+    if (selection?.kind === 'vehicle') {
+      vehicle = describeVehiclePanel(
+        snapshot,
+        map,
+        selection.id,
+        this.orderPickingFor === selection.id,
+      );
+      // Véhicule vendu ou disparu du snapshot : la sélection est obsolète.
+      if (!vehicle) {
+        this.lastTarget = null;
+        world.setSelection(null);
+        game.select(null);
+      }
+    }
+    if (vehicle) depot = null;
     hud.update({
       snapshot,
       fps: game.getFps(),
       paused: game.isPaused(),
       speed: game.getSpeed(),
-      selection: describeSelection(snapshot, selection, this.lastTarget, world.getMap()),
+      selection: describeSelection(snapshot, selection, this.lastTarget, map),
+      depot,
+      vehicle,
       quality: this.quality,
       following: world.isFollowing(),
       drawCalls: world.getDrawCalls(),
@@ -733,7 +796,30 @@ export class GameSession {
   }
 
   private applySelection(target: WorldTarget | null): void {
+    if (this.orderPickingFor !== null) {
+      this.tryAddOrder(target);
+      return;
+    }
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    const map = this.world?.getMap() ?? null;
+    this.openDepot = null;
+    this.orderPickingFor = null;
     this.lastTarget = target;
+
+    if (target && target.kind === 'tile' && map) {
+      if (depotKindAt(map, target.x, target.y)) {
+        this.openDepot = { x: target.x, y: target.y };
+      } else {
+        const station = stationAtTile(snapshot, target.x, target.y);
+        if (station) {
+          this.world?.setSelection(target);
+          this.game?.select({ kind: 'station', id: station.id });
+          this.refreshHud();
+          return;
+        }
+      }
+    }
+
     this.world?.setSelection(target);
     this.game?.select(this.toSelection(target));
     this.refreshHud();
@@ -747,11 +833,205 @@ export class GameSession {
     return { kind: 'tile', id: target.y * width + target.x };
   }
 
+  /** Sélectionne un véhicule sans passer par le picking. */
+  private selectVehicle(vehicleId: number): void {
+    this.openDepot = null;
+    this.orderPickingFor = null;
+    const target: WorldTarget = { kind: 'vehicle', id: vehicleId };
+    this.lastTarget = target;
+    this.world?.setSelection(target);
+    this.game?.select({ kind: 'vehicle', id: vehicleId });
+    this.refreshHud();
+  }
+
   clearSelection(): void {
     this.lastTarget = null;
+    this.openDepot = null;
+    this.orderPickingFor = null;
     this.world?.setSelection(null);
     this.game?.select(null);
     this.refreshHud();
+  }
+
+  /** Ferme le panneau dépôt sans toucher à la sélection de tuile. */
+  private closeDepot(): void {
+    this.openDepot = null;
+    this.refreshHud();
+  }
+
+  /**
+   * Achat d'un modèle dans le dépôt ouvert. En solo le snapshot est forcé
+   * pour récupérer immédiatement le `vehicleId` créé par le moteur ; en réseau
+   * la commande part dans le tour lockstep et le panneau se rafraîchira seul.
+   */
+  private buyVehicle(modelId: string): void {
+    const game = this.game;
+    const depot = this.openDepot;
+    if (!game || !depot) return;
+    const company = this.localCompanyId();
+    if (company === null) {
+      this.hud?.notify('warning', 'Aucune entreprise locale : achat impossible.');
+      return;
+    }
+    const before = new Set(game.getLatestSnapshot()?.vehicles.map((item) => item.id) ?? []);
+    game.issueCommand(buyVehicleCommand(company, depot, modelId));
+    if (this.isNetwork) {
+      this.hud?.notify('info', 'Achat envoyé : il sera appliqué au prochain tour.');
+      return;
+    }
+    game.refresh();
+    const snapshot = game.getLatestSnapshot();
+    const bought = snapshot?.vehicles
+      .filter((item) => item.company === company && !before.has(item.id))
+      .sort((a, b) => b.id - a.id)[0];
+    if (bought) {
+      this.selectVehicle(bought.id);
+      this.hud?.notify(
+        'info',
+        `Véhicule #${bought.id} acheté. Ajoutez ses ordres puis démarrez-le.`,
+      );
+      return;
+    }
+    this.refreshHud();
+  }
+
+  private startVehicle(vehicleId: number): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    const vehicle = this.game?.getLatestSnapshot()?.vehicles.find((item) => item.id === vehicleId);
+    if (vehicle && vehicle.orderTargets.length === 0) {
+      this.hud?.notify('warning', 'Ajoutez au moins une gare à la tournée avant de démarrer.');
+      return;
+    }
+    this.issueVehicleCommand(vehicleActionCommand(company, 'start', vehicleId));
+  }
+
+  private stopVehicle(vehicleId: number): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(vehicleActionCommand(company, 'stop', vehicleId));
+  }
+
+  private sellVehicle(vehicleId: number): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(vehicleActionCommand(company, 'sell', vehicleId));
+    if (
+      this.game?.getSelection()?.kind === 'vehicle' &&
+      this.game.getSelection()?.id === vehicleId
+    ) {
+      this.clearSelection();
+    }
+  }
+
+  /** Émet une commande véhicule, force le snapshot en solo puis rafraîchit le HUD. */
+  private issueVehicleCommand(command: EngineCommand): void {
+    const game = this.game;
+    if (!game) return;
+    game.issueCommand(command);
+    if (this.isNetwork) {
+      this.hud?.notify('info', 'Commande véhicule envoyée au prochain tour.');
+      return;
+    }
+    game.refresh();
+    this.refreshHud();
+  }
+
+  /** Arme ou désarme l'ajout d'un ordre par clic sur la carte. */
+  private toggleOrderPicking(vehicleId: number): void {
+    if (this.orderPickingFor === vehicleId) {
+      this.cancelOrderPicking();
+      return;
+    }
+    if (this.buildTool) this.applyBuildTool(null);
+    this.openDepot = null;
+    this.selectVehicle(vehicleId);
+    this.orderPickingFor = vehicleId;
+    this.refreshHud();
+    this.hud?.notify(
+      'info',
+      'Cliquez sur une gare ou un dépôt de la carte pour l’ajouter à la tournée.',
+    );
+  }
+
+  private cancelOrderPicking(): void {
+    if (this.orderPickingFor === null) return;
+    this.orderPickingFor = null;
+    this.hud?.notify('info', 'Ajout d’ordre annulé.');
+    this.refreshHud();
+  }
+
+  /** Clic carte pendant l'ajout d'ordre : gare ou dépôt uniquement. */
+  private tryAddOrder(target: WorldTarget | null): void {
+    const vehicleId = this.orderPickingFor;
+    if (vehicleId === null) return;
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    const map = this.world?.getMap() ?? null;
+    if (!snapshot || !map) return;
+    const vehicle = snapshot.vehicles.find((item) => item.id === vehicleId);
+    if (!vehicle) {
+      this.cancelOrderPicking();
+      return;
+    }
+    if (!target || target.kind !== 'tile') {
+      this.hud?.notify('warning', 'Ordre invalide : cliquez sur une gare ou un dépôt.');
+      return;
+    }
+    let order: VehicleOrder | null = null;
+    if (depotKindAt(map, target.x, target.y)) {
+      order = depotOrder(target.x, target.y, map.width);
+    } else {
+      const station = stationAtTile(snapshot, target.x, target.y);
+      if (station) order = stationOrder(station);
+    }
+    if (!order) {
+      this.hud?.notify('warning', 'Ordre invalide : seules les gares et les dépôts sont acceptés.');
+      return;
+    }
+    const orders = [...ordersFromSnapshot(vehicle, snapshot, map), order];
+    const validation = validateVehicleOrders(orders, snapshot, map);
+    if (!validation.ok) {
+      this.hud?.notify('warning', validation.reason ?? 'Ordre refusé.');
+      return;
+    }
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.orderPickingFor = null;
+    this.issueVehicleCommand(orderVehicleCommand(company, vehicleId, orders));
+    this.hud?.notify('info', 'Ordre ajouté à la tournée.');
+  }
+
+  private removeOrder(vehicleId: number, index: number): void {
+    this.updateOrders(vehicleId, (orders) => orders.filter((_, item) => item !== index));
+  }
+
+  private moveOrder(vehicleId: number, index: number, delta: -1 | 1): void {
+    this.updateOrders(vehicleId, (orders) => {
+      const target = index + delta;
+      if (target < 0 || target >= orders.length) return orders;
+      const next = [...orders];
+      const moved = next[index];
+      const other = next[target];
+      if (!moved || !other) return orders;
+      next[index] = other;
+      next[target] = moved;
+      return next;
+    });
+  }
+
+  private updateOrders(
+    vehicleId: number,
+    transform: (orders: VehicleOrder[]) => VehicleOrder[],
+  ): void {
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    const map = this.world?.getMap() ?? null;
+    if (!snapshot || !map) return;
+    const vehicle = snapshot.vehicles.find((item) => item.id === vehicleId);
+    if (!vehicle) return;
+    const orders = transform(ordersFromSnapshot(vehicle, snapshot, map));
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(orderVehicleCommand(company, vehicleId, orders));
   }
 
   togglePause(): void {

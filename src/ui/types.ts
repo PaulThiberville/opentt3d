@@ -24,6 +24,55 @@ export interface SelectionSummary {
   colour: number | null;
 }
 
+export interface DepotModelView {
+  id: string;
+  name: string;
+  cargo: string;
+  capacity: number;
+  speed: number;
+  cost: number;
+  maintenance: number;
+  description: string;
+  affordable: boolean;
+}
+
+export interface DepotVehicleView {
+  id: number;
+  name: string;
+  detail: string;
+  canStart: boolean;
+  canStop: boolean;
+}
+
+export interface DepotPanelView {
+  x: number;
+  y: number;
+  kindLabel: string;
+  title: string;
+  detail: string;
+  money: string;
+  models: DepotModelView[];
+  vehicles: DepotVehicleView[];
+  hint: string;
+}
+
+export interface VehicleOrderView {
+  index: number;
+  label: string;
+  kind: 'station' | 'industry' | 'depot';
+}
+
+export interface VehiclePanelView extends SelectionSummary {
+  status: string;
+  orders: VehicleOrderView[];
+  canStart: boolean;
+  canStop: boolean;
+  canSell: boolean;
+  /** Le prochain clic sur la carte ajoute une gare/dépôt à la tournée. */
+  orderPicking: boolean;
+  hint: string;
+}
+
 export interface CameraView {
   targetX: number;
   targetZ: number;
@@ -45,6 +94,10 @@ export interface HudState {
   paused: boolean;
   speed: GameSpeed;
   selection: SelectionSummary | null;
+  /** Panneau dépôt ouvert (prioritaire sur le panneau de sélection). */
+  depot?: DepotPanelView | null;
+  /** Panneau véhicule (sélection d'un véhicule). */
+  vehicle?: VehiclePanelView | null;
   quality: QualityLevel;
   following: boolean;
   drawCalls: number;

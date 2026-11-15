@@ -31,6 +31,37 @@ export const MAX_CHANNEL_LENGTH = 24;
 export const MAX_SAVE_CHUNK_CHARS = 32 * 1024;
 export const MAX_SAVE_CHUNKS = 1024;
 
+/** Maximum size of one complete save: 1 024 chunks × 32 KiB ≈ 32 Mi characters. */
+export const MAX_SAVE_CHARS = MAX_SAVE_CHUNK_CHARS * MAX_SAVE_CHUNKS;
+
+/**
+ * Version of the late-join handshake, independent from both the wire protocol
+ * and the engine build. `NET_PROTOCOL_VERSION` stays 1 so existing messages and
+ * peers keep working; a joining peer advertises `pv` explicitly.
+ */
+export const JOIN_PROTOCOL_VERSION = 1;
+
+/** Channel names used by the late-join handshake. */
+export const JOIN_CHANNELS = {
+  request: 'join-request',
+  accept: 'join-accept',
+  chunk: 'join-chunk',
+  ready: 'join-ready',
+  reject: 'join-reject',
+} as const;
+
+export type JoinRejectReason =
+  'version' | 'full' | 'started' | 'closed' | 'invalid-save' | 'timeout';
+
+export const JOIN_REJECT_REASONS: readonly JoinRejectReason[] = [
+  'version',
+  'full',
+  'started',
+  'closed',
+  'invalid-save',
+  'timeout',
+];
+
 /** Player index attached to a command by the host. */
 export type PlayerId = number;
 
@@ -134,6 +165,77 @@ export interface LeaveMessage extends MessageBase {
   player: PlayerId;
 }
 
+// ---------------------------------------------------------------------------
+// Late join (issue #38)
+//
+// A peer that missed the initial `start` asks to join a running game. The host
+// serialises the state at a tick boundary N, ships it with the same chunking
+// rules as `resync`, waits for the peer to load it and confirm the hash at N,
+// and only then includes the peer in turns N+1 and later. The handshake is one
+// peer at a time; the host pauses the simulation for the duration (see
+// `session.ts`).
+
+/** Client → host: "let me join the running game". */
+export interface JoinRequestMessage extends MessageBase {
+  k: 'join-request';
+  /** Join handshake version (`JOIN_PROTOCOL_VERSION`). */
+  pv: number;
+  /** Requested player index; the host remains authoritative. */
+  player?: PlayerId;
+  /** Display name, informational only. */
+  name?: string;
+  /** Engine build identifier, when known (mismatch is a hard refusal). */
+  engine?: string;
+}
+
+/** Host → client: transfer plan. The save starts at `tick`. */
+export interface JoinAcceptMessage extends MessageBase {
+  k: 'join-accept';
+  /** Save epoch, so stale chunks can be discarded. */
+  epoch: number;
+  /** Tick boundary N covered by the save. */
+  tick: number;
+  /** Number of `join-chunk` messages to expect. */
+  total: number;
+  /** Player index assigned by the host (never trusted from the request). */
+  player: PlayerId;
+  /** Identifies all the chunks of this transfer. */
+  id: string;
+  /** Host state hash at `tick`, compared after the client loads the save. */
+  hash: string;
+  engine?: string;
+}
+
+/** Host → client: one chunk of the save taken at `tick` (same shape as resync). */
+export interface JoinChunkMessage extends MessageBase {
+  k: 'join-chunk';
+  epoch: number;
+  tick: number;
+  save: SaveChunk;
+}
+
+/** Client → host: the save is loaded (or failed), with the resulting hash. */
+export interface JoinReadyMessage extends MessageBase {
+  k: 'join-ready';
+  epoch?: number;
+  tick: number;
+  /** Empty when `ok` is false. */
+  hash: string;
+  /** Defaults to true; false reports an unusable save (corrupt/truncated). */
+  ok?: boolean;
+  error?: string;
+}
+
+/** Host → client: the join was refused, with a machine-readable reason. */
+export interface JoinRejectMessage extends MessageBase {
+  k: 'join-reject';
+  reason: JoinRejectReason;
+  /** French, UI-facing detail. */
+  message?: string;
+  /** Tick of the refused transfer, when relevant. */
+  tick?: number;
+}
+
 export type NetMessage =
   | HelloMessage
   | CmdMessage
@@ -142,7 +244,12 @@ export type NetMessage =
   | AckMessage
   | ResyncMessage
   | ChatMessage
-  | LeaveMessage;
+  | LeaveMessage
+  | JoinRequestMessage
+  | JoinAcceptMessage
+  | JoinChunkMessage
+  | JoinReadyMessage
+  | JoinRejectMessage;
 
 export type NetMessageKind = NetMessage['k'];
 
@@ -364,6 +471,79 @@ export function isLeaveMessage(value: unknown): value is LeaveMessage {
   return hasBase(value) && value.k === 'leave' && isPlayerId(value.player);
 }
 
+export function isJoinRejectReason(value: unknown): value is JoinRejectReason {
+  return typeof value === 'string' && (JOIN_REJECT_REASONS as readonly string[]).includes(value);
+}
+
+export function isJoinRequestMessage(value: unknown): value is JoinRequestMessage {
+  if (!hasBase(value) || value.k !== 'join-request') return false;
+  if (value.pv !== JOIN_PROTOCOL_VERSION) return false;
+  if (value.player !== undefined && !isPlayerId(value.player)) return false;
+  if (value.name !== undefined && (typeof value.name !== 'string' || value.name.length > 24)) {
+    return false;
+  }
+  if (
+    value.engine !== undefined &&
+    (typeof value.engine !== 'string' || value.engine.length > 64)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function isJoinAcceptMessage(value: unknown): value is JoinAcceptMessage {
+  if (!hasBase(value) || value.k !== 'join-accept') return false;
+  return (
+    isNat(value.epoch) &&
+    isNat(value.tick) &&
+    isNat(value.total) &&
+    value.total > 0 &&
+    value.total <= MAX_SAVE_CHUNKS &&
+    isPlayerId(value.player) &&
+    typeof value.id === 'string' &&
+    value.id.length > 0 &&
+    value.id.length <= 64 &&
+    typeof value.hash === 'string' &&
+    value.hash.length <= 1024 &&
+    (value.engine === undefined || (typeof value.engine === 'string' && value.engine.length <= 64))
+  );
+}
+
+export function isJoinChunkMessage(value: unknown): value is JoinChunkMessage {
+  return (
+    hasBase(value) &&
+    value.k === 'join-chunk' &&
+    isNat(value.epoch) &&
+    isNat(value.tick) &&
+    isSaveChunk(value.save)
+  );
+}
+
+export function isJoinReadyMessage(value: unknown): value is JoinReadyMessage {
+  if (!hasBase(value) || value.k !== 'join-ready') return false;
+  if (value.epoch !== undefined && !isNat(value.epoch)) return false;
+  if (!isNat(value.tick)) return false;
+  if (typeof value.hash !== 'string' || value.hash.length > 1024) return false;
+  if (value.ok !== undefined && typeof value.ok !== 'boolean') return false;
+  if (value.error !== undefined && (typeof value.error !== 'string' || value.error.length > 240)) {
+    return false;
+  }
+  return true;
+}
+
+export function isJoinRejectMessage(value: unknown): value is JoinRejectMessage {
+  if (!hasBase(value) || value.k !== 'join-reject') return false;
+  if (!isJoinRejectReason(value.reason)) return false;
+  if (
+    value.message !== undefined &&
+    (typeof value.message !== 'string' || value.message.length > 240)
+  ) {
+    return false;
+  }
+  if (value.tick !== undefined && !isNat(value.tick)) return false;
+  return true;
+}
+
 /** Validates a message received on a given channel (channels mirror kinds). */
 export function validateChannelMessage(channel: string, value: unknown): NetMessage | null {
   switch (channel) {
@@ -383,6 +563,16 @@ export function validateChannelMessage(channel: string, value: unknown): NetMess
       return isChatMessage(value) ? value : null;
     case 'leave':
       return isLeaveMessage(value) ? value : null;
+    case JOIN_CHANNELS.request:
+      return isJoinRequestMessage(value) ? value : null;
+    case JOIN_CHANNELS.accept:
+      return isJoinAcceptMessage(value) ? value : null;
+    case JOIN_CHANNELS.chunk:
+      return isJoinChunkMessage(value) ? value : null;
+    case JOIN_CHANNELS.ready:
+      return isJoinReadyMessage(value) ? value : null;
+    case JOIN_CHANNELS.reject:
+      return isJoinRejectMessage(value) ? value : null;
     default:
       return null;
   }
