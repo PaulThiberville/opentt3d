@@ -1,0 +1,39 @@
+name: Cache cleanup (1h TTL)
+
+# Politique projet : aucun cache GitHub Actions ne doit vivre plus d'une heure.
+# Les caches npm, Docker ou build moteur sont éphémères pour préserver le quota
+# Actions du propriétaire. Ce workflow supprime les caches de plus de 60 min.
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cache-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Supprimer les caches > 1 h
+    runs-on: ubuntu-latest
+    steps:
+      - name: Purger les caches expirés
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cutoff=$(( $(date +%s) - 3600 ))
+          echo "Suppression des caches créés avant $(date -u -d "@$cutoff" +%FT%TZ)"
+          gh cache list --repo "$REPO" --limit 100 --json id,createdAt \
+            --jq ".[] | select((.createdAt | fromdateiso8601) < $cutoff) | .id" \
+            | while read -r id; do
+                if [ -n "$id" ]; then
+                  gh cache delete "$id" --repo "$REPO" || true
+                fi
+              done
+          echo "Purge terminée."
