@@ -33,7 +33,11 @@ import { QUALITY_LEVELS, qualitySettings } from '../src/render/quality';
 const BUDGETS = {
   /** Un chunk de terrain = 2 triangles par tuile, aucun sommet superflu. */
   terrainTrianglesPerTile: 2,
-  terrainVerticesPerTile: 6,
+  /**
+   * Géométrie indexée (#122) : (32+1)² sommets partagés par chunk, soit ~1,06
+   * sommet par tuile au lieu des 6 du maillage non indexé.
+   */
+  terrainVerticesPerChunk: (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1),
   /** Bâtiment : modèles détaillés (moyenne observée ~103 triangles) + marge. */
   cityTrianglesPerBuilding: 150,
   /** Lots fusionnés par archétype × variante (deux villes tolérées). */
@@ -177,7 +181,7 @@ function renderVehicle(
 // ---------------------------------------------------------------------------
 describe('budgets TerrainLayer', () => {
   for (const size of [128, 256, 512]) {
-    it(`${size}×${size} : 2 triangles et 6 sommets par tuile`, () => {
+    it(`${size}×${size} : 2 triangles par tuile, sommets indexés partagés`, () => {
       const layer = new TerrainLayer();
       layer.setMap(makeMap(size, size));
       const chunksPerAxis = Math.ceil(size / CHUNK_SIZE);
@@ -193,13 +197,13 @@ describe('budgets TerrainLayer', () => {
           if (!mesh.isMesh || !mesh.name.startsWith('terrain-')) return;
           vertices += mesh.geometry.getAttribute('position').count;
         });
-        expect(vertices).toBe(size * size * BUDGETS.terrainVerticesPerTile);
-        // Budget par chunk : 32×32 tuiles × 6 sommets, ni plus ni moins.
+        expect(vertices).toBe(chunksPerAxis * chunksPerAxis * BUDGETS.terrainVerticesPerChunk);
+        // Budget par chunk : (32+1)² sommets partagés, ni plus ni moins.
         for (const child of layer.group.children) {
           const mesh = child as THREE.Mesh;
           if (!mesh.isMesh || !mesh.name.startsWith('terrain-')) continue;
           expect(mesh.geometry.getAttribute('position').count).toBeLessThanOrEqual(
-            CHUNK_SIZE * CHUNK_SIZE * BUDGETS.terrainVerticesPerTile,
+            BUDGETS.terrainVerticesPerChunk,
           );
         }
       } finally {
@@ -274,8 +278,12 @@ describe('budgets CityLayer', () => {
       expect(layer.drawCallCount).toBeGreaterThan(0);
       expect(layer.drawCallCount).toBeLessThanOrEqual(BUDGETS.cityDrawCalls);
       const stats = groupStats(layer.group);
-      expect(stats.drawCalls).toBe(layer.drawCallCount);
-      expect(stats.instances).toBe(144);
+      // Les plinthes locales (#106) ajoutent au plus un InstancedMesh, jamais
+      // un lot par bâtiment.
+      expect(stats.drawCalls).toBeGreaterThanOrEqual(layer.drawCallCount);
+      expect(stats.drawCalls).toBeLessThanOrEqual(layer.drawCallCount + 1);
+      expect(stats.instances).toBeGreaterThanOrEqual(144);
+      expect(stats.instances).toBeLessThanOrEqual(144 * 2);
       expect(stats.triangles).toBeLessThanOrEqual(144 * BUDGETS.cityTrianglesPerBuilding);
       expect(stats.triangles).toBeGreaterThan(0);
     } finally {
@@ -318,7 +326,10 @@ describe('budgets CityLayer', () => {
       expect(layer.buildingCount).toBe(128);
       expect(layer.drawCallCount).toBeGreaterThan(0);
       expect(layer.drawCallCount).toBeLessThanOrEqual(BUDGETS.cityDrawCalls * 2);
-      expect(groupStats(layer.group).instances).toBe(128);
+      const instances = groupStats(layer.group).instances;
+      expect(instances).toBeGreaterThanOrEqual(128);
+      // Au plus une plinthe locale par bâtiment.
+      expect(instances).toBeLessThanOrEqual(256);
     } finally {
       layer.dispose();
     }
