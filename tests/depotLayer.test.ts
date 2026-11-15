@@ -42,7 +42,9 @@ describe('DepotLayer', () => {
     expect(layer.count).toBe(2);
     expect(layer.ids).toEqual([3, 9]);
     expect(layer.group.visible).toBe(true);
-    expect(layer.group.children.length).toBe(1);
+    // Deux paires corps + livrée (route et rail) toujours présentes.
+    expect(layer.group.children.length).toBe(4);
+    expect(layer.drawCallCount).toBe(4);
     layer.dispose();
     expect(layer.count).toBe(0);
   });
