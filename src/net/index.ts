@@ -1,0 +1,152 @@
+/**
+ * Public surface of the OpenTT3D network layer.
+ *
+ * The transport is UI-agnostic and testable in memory; the lobby owns the room
+ * state and the public directory; the lockstep session is handed the transport
+ * and the frozen start information once the room is ready.
+ */
+
+export type {
+  CreateTransportOptions,
+  LocalTransportOptions,
+  MemoryBus,
+  MemoryTransportOptions,
+  RateLimitOptions,
+  Transport,
+  TransportKind,
+} from './transport.js';
+export { createMemoryBus, createTransport } from './transport.js';
+
+export type {
+  ChatEvent,
+  NetSession,
+  NetSessionOptions,
+  NetStats,
+  NetUpdate,
+  PeersMap,
+  Runner,
+} from './session.js';
+export { ACK_INTERVAL, HASH_INTERVAL, NET_TICK_MS, createNetSession } from './session.js';
+
+export type {
+  AckMessage,
+  ChatMessage,
+  CmdMessage,
+  Command,
+  HashMessage,
+  HelloMessage,
+  LeaveCommand,
+  LeaveMessage,
+  NetMessage,
+  NetMessageKind,
+  PlayerId,
+  ResyncMessage,
+  SaveChunk,
+  TurnCommand,
+  TurnMessage,
+  WireCommand,
+} from './types.js';
+export {
+  MAX_CHANNEL_LENGTH,
+  MAX_MESSAGE_BYTES,
+  MAX_SAVE_CHUNKS,
+  MAX_SAVE_CHUNK_CHARS,
+  NET_PROTOCOL_VERSION,
+  isAckMessage,
+  isChannelName,
+  isChatMessage,
+  isCmdMessage,
+  isCommand,
+  isEngineCommand,
+  isHashMessage,
+  isHelloMessage,
+  isLeaveCommand,
+  isLeaveMessage,
+  isResyncMessage,
+  isTurnCommand,
+  isTurnMessage,
+  validateChannelMessage,
+} from './types.js';
+
+export type { CreateLobbyOptions, InviteLink, Lobby, LobbyDiagnostics } from './lobby.js';
+export { buildInviteLink, createLobby, parseInviteLink } from './lobby.js';
+
+export type {
+  AIDifficulty,
+  Climate,
+  LobbyChatEvent,
+  LobbyChatWireMessage,
+  LobbyClosedMessage,
+  LobbyErrorMessage,
+  LobbyJoinMessage,
+  LobbyKickMessage,
+  LobbyMessage,
+  LobbySettings,
+  LobbySlotMessage,
+  LobbyStartMessage,
+  LobbyState,
+  LobbyStateMessage,
+  MapSize,
+  Slot,
+  StartInfo,
+  StartPayload,
+  StartPeers,
+  StartPlayer,
+} from './lobby-types.js';
+export {
+  AI_DIFFICULTIES,
+  CLIMATES,
+  DEFAULT_LOBBY_SETTINGS,
+  LOBBY_CHANNELS,
+  LOBBY_COLOURS,
+  LOBBY_PROTOCOL_VERSION,
+  MAP_SIZES,
+  MAX_CHAT_CHARS,
+  MAX_COMPANY_NAME,
+  MAX_LOBBY_NAME,
+  MAX_LOBBY_PLAYERS,
+  MAX_SLOT_NAME,
+  MIN_LOBBY_PLAYERS,
+  cleanText,
+  freeColour,
+  isLobbyChatMessage,
+  isLobbyClosedMessage,
+  isLobbyErrorMessage,
+  isLobbyJoinMessage,
+  isLobbyKickMessage,
+  isLobbySettings,
+  isLobbySlotMessage,
+  isLobbyStartMessage,
+  isLobbyState,
+  isLobbyStateMessage,
+  isRoomId,
+  isSlot,
+  sanitizeChat,
+  sanitizeName,
+  validateLobbyMessage,
+} from './lobby-types.js';
+
+export type {
+  Directory,
+  DirectoryDiagnostics,
+  DirectoryOptions,
+  LobbyInfo,
+  LobbyStatus,
+  MemoryDirectoryStore,
+  QuickMatchOptions,
+  QuickMatchResult,
+} from './directory.js';
+export {
+  DEFAULT_DIRECTORY_RELAYS,
+  DIRECTORY_HEARTBEAT_MS,
+  DIRECTORY_TTL_MS,
+  LOBBY_DIRECTORY_KIND,
+  LOBBY_DIRECTORY_TAG,
+  LOBBY_DIRECTORY_VERSION,
+  buildLobbyTags,
+  createDirectory,
+  createMemoryDirectoryStore,
+  isLobbyInfo,
+  newRoomId,
+  quickMatch,
+} from './directory.js';
