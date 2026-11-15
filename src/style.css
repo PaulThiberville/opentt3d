@@ -748,10 +748,95 @@ select.input {
 
 /* -------------------------------------------------------- sauvegardes */
 
+.save-screen {
+  padding: 16px;
+}
+
 .save-screen .save-panel {
   width: min(900px, 100%);
-  max-height: calc(100dvh - 24px);
-  overflow-y: auto;
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Grand écran : compacter les blocs fixes pour afficher six slots d'un coup
+   quand la hauteur le permet. */
+@media (min-height: 900px) {
+  .save-screen .save-panel {
+    padding-top: 28px;
+    padding-bottom: 28px;
+  }
+
+  .save-screen .panel-header {
+    margin-bottom: 16px;
+  }
+
+  .save-screen .panel-actions {
+    margin-top: 16px;
+    padding-top: 14px;
+  }
+
+  .save-body {
+    gap: 9px;
+  }
+
+  .save-current {
+    padding: 8px 11px;
+  }
+
+  .save-current-header {
+    margin-bottom: 6px;
+  }
+
+  .save-import {
+    padding-top: 6px;
+  }
+}
+
+/* Portable 768 px de haut : compacter les blocs fixes pour laisser au moins
+   deux slots visibles au-dessus de la barre d'import. */
+@media (max-height: 800px) {
+  .save-screen .save-panel {
+    padding: 20px clamp(16px, 2.4vw, 26px);
+  }
+
+  .save-screen .panel-header {
+    margin-bottom: 12px;
+  }
+
+  .save-screen .panel-actions {
+    margin-top: 12px;
+    padding-top: 12px;
+  }
+
+  .save-body {
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .save-current {
+    padding: 8px 11px;
+  }
+
+  .save-current-header {
+    margin-bottom: 6px;
+  }
+
+  .save-import {
+    padding-top: 8px;
+  }
+}
+
+/* En-tête, formulaire et pied restent fixes ; seule la liste défile. */
+.save-screen .save-panel > .panel-header,
+.save-screen .save-panel > .save-storage,
+.save-screen .save-panel > .save-status,
+.save-screen .save-panel > .panel-actions,
+.save-current,
+.save-list-header,
+.save-import {
+  flex: 0 0 auto;
 }
 
 .save-storage {
@@ -787,8 +872,10 @@ select.input {
 
 .save-body {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 11px;
+  min-height: 0;
   margin-top: 12px;
 }
 
@@ -845,14 +932,51 @@ select.input {
   font-size: 11px;
 }
 
+.save-list-shell {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Dégradé de fin de liste : signale le défilement sans couper une ligne nette
+   contre la barre d'import. */
+.save-list-shell.is-scrollable::after {
+  content: '';
+  position: absolute;
+  right: 8px;
+  bottom: 0;
+  left: 0;
+  height: 26px;
+  background: linear-gradient(to bottom, transparent, var(--panel-bg) 88%);
+  pointer-events: none;
+}
+
 .save-list {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 8px;
-  max-height: min(38vh, 400px);
-  padding-right: 4px;
+  min-height: 88px;
+  padding: 2px 4px 8px 2px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.save-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.save-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.save-list::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .save-empty {
@@ -959,7 +1083,9 @@ select.input {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  padding-top: 4px;
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hud-border);
 }
 
 .save-import .field-hint {

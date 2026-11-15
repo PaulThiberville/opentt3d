@@ -64,6 +64,7 @@ export class SaveScreen extends BaseScreen {
   private storageNote: HTMLParagraphElement;
   private statusEl: HTMLParagraphElement;
   private listEl: HTMLDivElement;
+  private listShell: HTMLDivElement;
   private nameInput: HTMLInputElement | null = null;
   private saveButton: HTMLButtonElement | null = null;
   private importButton: HTMLButtonElement;
@@ -120,6 +121,9 @@ export class SaveScreen extends BaseScreen {
 
     this.listEl = el('div', { className: 'save-list', attrs: { role: 'list' } });
     this.listEl.append(el('p', { className: 'save-empty', text: 'Chargement des sauvegardes…' }));
+    this.listEl.addEventListener('scroll', this.handleListScroll, { passive: true });
+    this.listShell = el('div', { className: 'save-list-shell' });
+    this.listShell.append(this.listEl);
 
     this.fileInput = el('input', {
       className: 'save-file-input',
@@ -144,7 +148,7 @@ export class SaveScreen extends BaseScreen {
       this.fileInput,
     );
 
-    body.append(listHeader, this.listEl, importRow);
+    body.append(listHeader, this.listShell, importRow);
     this.element.append(panel);
     panel.append(header, this.storageNote, this.statusEl, body);
 
@@ -254,6 +258,7 @@ export class SaveScreen extends BaseScreen {
   private renderList(): void {
     if (this.disposed) return;
     this.listEl.replaceChildren();
+    this.scheduleScrollAffordance();
     if (this.slots.length === 0) {
       const empty = el('div', { className: 'save-empty' });
       empty.append(
@@ -487,15 +492,47 @@ export class SaveScreen extends BaseScreen {
     this.statusEl.textContent = text;
     this.statusEl.dataset.tone = tone;
     this.statusEl.hidden = false;
+    this.scheduleScrollAffordance();
   }
+
+  /** Signale par un dégradé qu'il reste des slots sous la zone visible. */
+  private updateScrollAffordance(): void {
+    if (this.disposed) return;
+    const list = this.listEl;
+    const scrollable = list.scrollHeight > list.clientHeight + 1;
+    const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 2;
+    this.listShell.classList.toggle('is-scrollable', scrollable && !atBottom);
+  }
+
+  private scheduleScrollAffordance(): void {
+    if (this.disposed) return;
+    requestAnimationFrame(() => this.updateScrollAffordance());
+  }
+
+  private handleListScroll = (): void => {
+    this.updateScrollAffordance();
+  };
+
+  private handleResize = (): void => {
+    this.updateScrollAffordance();
+  };
 
   override show(): void {
     super.show();
+    window.addEventListener('resize', this.handleResize);
+    this.scheduleScrollAffordance();
     this.nameInput?.focus();
+  }
+
+  override hide(): void {
+    window.removeEventListener('resize', this.handleResize);
+    super.hide();
   }
 
   override dispose(): void {
     this.disposed = true;
+    window.removeEventListener('resize', this.handleResize);
+    this.listEl.removeEventListener('scroll', this.handleListScroll);
     // Le `SaveStore` appartient au bootstrap : la session et l'autosave le
     // réutilisent après la fermeture de l'écran, on ne ferme donc pas la base.
     this.handle = null;
