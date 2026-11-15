@@ -1,19 +1,22 @@
 #!/usr/bin/env node
 /**
  * Test des commandes de construction et de véhicules du moteur OpenTT3D
- * (issue #11).
+ * (issues #11 et #90).
  *
  * Scénario, sur une carte 128×128 sans IA :
  *  1. trouve deux zones plates et dégagées (route et rail) dans le snapshot ;
  *  2. construit un tronçon de route, une gare routière en passage, un dépôt,
- *     achète un bus, lui donne un ordre et le démarre ;
+ *     achète un bus (par coordonnées puis par `depotId`), lui donne un ordre
+ *     et le démarre ;
  *  3. construit une voie ferrée, une gare, un signal de bloc, un dépôt
  *     ferroviaire, achète une locomotive et la démarre ;
- *  4. vérifie via les snapshots que les tuiles, gares, véhicules et l'argent
- *     ont changé ;
- *  5. envoie des commandes invalides et vérifie qu'elles échouent proprement
- *     sans modifier l'état (hash identique) ;
- *  6. rejoue tout le journal de commandes sur une seconde instance et compare
+ *  4. construit puis démolit un dépôt dédié pour vérifier que `depots` et
+ *     `counts.depots` suivent le cycle de vie (ids stables, disparition) ;
+ *  5. vérifie via les snapshots que les tuiles, gares, dépôts, véhicules et
+ *     l'argent ont changé ;
+ *  6. envoie des commandes invalides (dont un `depotId` inconnu) et vérifie
+ *     qu'elles échouent proprement sans modifier l'état (hash identique) ;
+ *  7. rejoue tout le journal de commandes sur une seconde instance et compare
  *     les hashs, les identifiants et la carte.
  *
  * Usage : node engine/scripts/commands.mjs [--verbose]
@@ -50,8 +53,10 @@ const LAYER_IDS = { kind: 1, heightMap: 2, owner: 3, slope: 4, flags: 5, trackBi
  * 200 ticks après le journal de commandes). Il doit rester stable : toute
  * modification du pont, du baseset ou d'OpenTTD le met à jour consciemment
  * (voir wiki, Moteur-WASM > Déterminisme).
+ *
+ * Dernière mise à jour : #90 (achat par `depotId`, cycle de vie d'un dépôt).
  */
-const REFERENCE_HASH = '0x4dbe391a6aab7912';
+const REFERENCE_HASH = '0xd92119299eee8941';
 
 function log(...args) {
   console.log(...args);
@@ -403,6 +408,35 @@ async function runScenario(label) {
   );
   const moneyBefore = company.money;
 
+  /* --- Dépôts : état initial vide (pas d'IA) ---------------------------- */
+  assert(Array.isArray(initial.depots), 'snapshot : tableau « depots » absent');
+  assert(initial.depots.length === 0, `snapshot initial : ${initial.depots.length} dépôt(s)`);
+  assert(initial.counts.depots === 0, `counts.depots initial : ${initial.counts.depots}`);
+
+  const expectDepotEntry = (state, depotId, kind, tile, what) => {
+    assert(
+      state.counts.depots === state.depots.length,
+      `${what} : counts.depots=${state.counts.depots} ≠ ${state.depots.length} entrées`,
+    );
+    const entry = state.depots.find((depot) => depot.id === depotId);
+    assert(entry, `${what} : dépôt ${depotId} absent du snapshot`);
+    assert(entry.kind === kind, `${what} : type ${entry.kind} au lieu de ${kind}`);
+    assert(
+      Number.isInteger(entry.x) && entry.x === tile.x && entry.y === tile.y,
+      `${what} : coordonnées (${entry.x}, ${entry.y}) ≠ (${tile.x}, ${tile.y})`,
+    );
+    assert(entry.company === companyId, `${what} : entreprise ${entry.company} ≠ ${companyId}`);
+    assert(
+      Number.isInteger(entry.direction) && entry.direction >= 0 && entry.direction <= 3,
+      `${what} : direction ${entry.direction}`,
+    );
+    assert(
+      entry.width === 1 && entry.height === 1,
+      `${what} : emprise ${entry.width}×${entry.height} au lieu de 1×1`,
+    );
+    return entry;
+  };
+
   /* --- Zones de construction ------------------------------------------- */
   const roadSite = findFlatArea(initialMap, 8, 4);
   assert(roadSite, 'aucune zone plate 8×4 pour la route');
@@ -454,6 +488,13 @@ async function runScenario(label) {
   );
   expectOk(depot, 'dépôt routier');
   assert(Number.isInteger(depot.depotId), 'dépôt routier : depotId manquant');
+  const roadDepotEntry = expectDepotEntry(
+    json.read(),
+    depot.depotId,
+    'road',
+    depotTile,
+    'dépôt routier',
+  );
 
   const busBuy = record(
     'achat bus',
@@ -464,6 +505,28 @@ async function runScenario(label) {
   assert(
     typeof busBuy.model === 'string' && busBuy.model.length > 0,
     'achat du bus : modèle manquant',
+  );
+
+  /* Achat par identifiant de dépôt (le chemin utilisé par l'UI, #90). */
+  const busByIdBuy = record(
+    'achat bus par depotId',
+    run({
+      type: 'vehicle',
+      action: 'buy',
+      company: companyId,
+      depotId: depot.depotId,
+      model: 'bus',
+    }),
+  );
+  expectOk(busByIdBuy, 'achat du bus par depotId');
+  assert(Number.isInteger(busByIdBuy.vehicleId), 'achat par depotId : vehicleId manquant');
+  assert(
+    busByIdBuy.vehicleId !== busBuy.vehicleId,
+    'achat par depotId : identifiant de véhicule réutilisé',
+  );
+  assert(
+    busByIdBuy.depotId === depot.depotId,
+    `achat par depotId : dépôt ${busByIdBuy.depotId} au lieu de ${depot.depotId}`,
   );
 
   const busOrder = record(
@@ -538,6 +601,17 @@ async function runScenario(label) {
   );
   expectOk(railDepot, 'dépôt ferroviaire');
   assert(Number.isInteger(railDepot.depotId), 'dépôt ferroviaire : depotId manquant');
+  const railDepotEntry = expectDepotEntry(
+    json.read(),
+    railDepot.depotId,
+    'rail',
+    railDepotTile,
+    'dépôt ferroviaire',
+  );
+  assert(
+    roadDepotEntry.id !== railDepotEntry.id,
+    `dépôts routier et ferroviaire : id ${roadDepotEntry.id} réutilisé`,
+  );
 
   const trainBuy = record(
     'achat train',
@@ -647,6 +721,59 @@ async function runScenario(label) {
     'bus jetable toujours présent après vente',
   );
 
+  /* --- Cycle de vie d'un dépôt dédié ----------------------------------- */
+  /* Dépôt isolé dans la zone plate déjà repérée : construit, exposé dans le
+   * snapshot, puis démoli. Il ne gêne ni le bus ni le train du scénario. */
+  const tempDepotTile = { x: roadSite.x + 6, y: roadSite.y + 2 };
+  const tempDepot = record(
+    'dépôt temporaire',
+    run({
+      type: 'build',
+      tool: 'depot',
+      company: companyId,
+      from: tempDepotTile,
+      options: { kind: 'road' },
+    }),
+  );
+  expectOk(tempDepot, 'dépôt temporaire');
+  const afterTempBuild = json.read();
+  const tempDepotEntry = expectDepotEntry(
+    afterTempBuild,
+    tempDepot.depotId,
+    'road',
+    tempDepotTile,
+    'dépôt temporaire',
+  );
+  assert(
+    tempDepotEntry.id !== depot.depotId && tempDepotEntry.id !== railDepot.depotId,
+    `dépôt temporaire : id ${tempDepotEntry.id} réutilisé`,
+  );
+  assert(
+    afterTempBuild.counts.depots === 3,
+    `dépôts après construction : ${afterTempBuild.counts.depots} au lieu de 3`,
+  );
+
+  expectOk(
+    record(
+      'démolition du dépôt temporaire',
+      run({ type: 'build', tool: 'clear', company: companyId, from: tempDepotTile }),
+    ),
+    'démolition du dépôt temporaire',
+  );
+  const afterTempClear = json.read();
+  assert(
+    !afterTempClear.depots.some((entry) => entry.id === tempDepot.depotId),
+    `dépôt ${tempDepot.depotId} toujours présent après démolition`,
+  );
+  assert(
+    afterTempClear.counts.depots === 2,
+    `dépôts après démolition : ${afterTempClear.counts.depots} au lieu de 2`,
+  );
+  assert(
+    afterTempClear.counts.depots === afterTempClear.depots.length,
+    'counts.depots incohérent après démolition',
+  );
+
   /* --- Comptabilité immédiate ------------------------------------------ */
   const afterBuild = json.read();
   const moneyAfterBuild = localCompany(afterBuild).money;
@@ -660,6 +787,11 @@ async function runScenario(label) {
   const hashBeforeInvalid = hashHex(api.engine);
   const water = findWaterWithLandNeighbour(initialMap);
   assert(water, 'aucune tuile d’eau avec un voisin de terre');
+  const unknownDepotId = 4000;
+  assert(
+    !afterTempClear.depots.some((entry) => entry.id === unknownDepotId),
+    `dépôt ${unknownDepotId} déjà utilisé : choisir un autre identifiant inconnu`,
+  );
 
   const invalidCases = [
     ['JSON tronqué', '{', 2],
@@ -682,6 +814,26 @@ async function runScenario(label) {
       6,
     ],
     ['achat hors dépôt', { type: 'vehicle', action: 'buy', depot: roadFrom, model: 'bus' }, 6],
+    [
+      'achat avec dépôt inconnu',
+      { type: 'vehicle', action: 'buy', depotId: unknownDepotId, model: 'bus' },
+      6,
+    ],
+    [
+      'achat avec dépôt incompatible',
+      { type: 'vehicle', action: 'buy', depotId: railDepot.depotId, model: 'bus' },
+      6,
+    ],
+    [
+      'ordre vers dépôt inconnu',
+      {
+        type: 'vehicle',
+        action: 'order',
+        vehicle: busBuy.vehicleId,
+        orders: [{ target: unknownDepotId, kind: 'depot' }],
+      },
+      6,
+    ],
     [
       'refit non supporté',
       { type: 'vehicle', action: 'refit', vehicle: busBuy.vehicleId, model: 'mail' },
@@ -751,14 +903,51 @@ async function runScenario(label) {
 
   const vehicles = finalState.vehicles.filter((entry) => entry.company === companyId);
   const bus = vehicles.find((entry) => entry.id === busBuy.vehicleId);
+  const busById = vehicles.find((entry) => entry.id === busByIdBuy.vehicleId);
   const train = vehicles.find((entry) => entry.id === trainBuy.vehicleId);
   assert(bus, 'bus absent du snapshot');
+  assert(busById, 'bus acheté par depotId absent du snapshot');
   assert(train, 'train absent du snapshot');
   assert(bus.kind === 'road', `bus : type ${bus.kind}`);
+  assert(busById.kind === 'road', `bus par depotId : type ${busById.kind}`);
   assert(train.kind === 'train', `train : type ${train.kind}`);
   assert(bus.status !== 0, 'bus : toujours arrêté après démarrage');
   assert(bus.orderTargets.includes(roadStation.stationId), 'bus : ordre vers la gare absent');
   assert(train.orderTargets.includes(railStation.stationId), 'train : ordre vers la gare absent');
+
+  /* Dépôts : ids et coordonnées stables après 200 ticks. */
+  assert(
+    finalState.counts.depots === 2,
+    `dépôts après simulation : ${finalState.counts.depots} au lieu de 2`,
+  );
+  assert(
+    finalState.counts.depots === finalState.depots.length,
+    'counts.depots incohérent après simulation',
+  );
+  const finalRoadDepot = expectDepotEntry(
+    finalState,
+    depot.depotId,
+    'road',
+    depotTile,
+    'dépôt routier après simulation',
+  );
+  const finalRailDepot = expectDepotEntry(
+    finalState,
+    railDepot.depotId,
+    'rail',
+    railDepotTile,
+    'dépôt ferroviaire après simulation',
+  );
+  const depotSignature = (entry) =>
+    JSON.stringify([entry.id, entry.kind, entry.x, entry.y, entry.direction, entry.company]);
+  assert(
+    depotSignature(finalRoadDepot) === depotSignature(roadDepotEntry),
+    `id/coordonnées du dépôt routier instables : ${depotSignature(roadDepotEntry)} → ${depotSignature(finalRoadDepot)}`,
+  );
+  assert(
+    depotSignature(finalRailDepot) === depotSignature(railDepotEntry),
+    `id/coordonnées du dépôt ferroviaire instables : ${depotSignature(railDepotEntry)} → ${depotSignature(finalRailDepot)}`,
+  );
 
   const moneyAfter = localCompany(finalState).money;
   assert(moneyAfter < moneyBefore, `trésorerie inchangée (${moneyBefore} → ${moneyAfter})`);
@@ -784,14 +973,17 @@ async function runScenario(label) {
     railSite,
     ids: {
       bus: busBuy.vehicleId,
+      busById: busByIdBuy.vehicleId,
       train: trainBuy.vehicleId,
       roadStation: roadStation.stationId,
       railStation: railStation.stationId,
       roadDepot: depot.depotId,
       railDepot: railDepot.depotId,
+      tempDepot: tempDepot.depotId,
     },
     counts: {
       stations: stations.length,
+      depots: finalState.depots.length,
       vehicles: vehicles.length,
       roadTiles,
       railTiles,
@@ -825,15 +1017,17 @@ log(
     `${first.counts.stationTiles} de gare`,
 );
 log(
-  `[run-1] ${first.counts.stations} gares, ${first.counts.vehicles} véhicules ` +
-    `(${first.models.bus} / ${first.models.train})`,
+  `[run-1] ${first.counts.stations} gares, ${first.counts.depots} dépôts, ` +
+    `${first.counts.vehicles} véhicules (${first.models.bus} / ${first.models.train})`,
 );
 log(
   `[run-1] trésorerie ${first.moneyBefore} → ${first.moneyAfterBuild} (coût ${first.totalCost}) ` +
     `→ ${first.moneyAfter}`,
 );
 log(
-  `[run-1] gares ${first.ids.roadStation}/${first.ids.railStation}, véhicules ${first.ids.bus}/${first.ids.train}`,
+  `[run-1] gares ${first.ids.roadStation}/${first.ids.railStation}, ` +
+    `dépôts ${first.ids.roadDepot}/${first.ids.railDepot}, ` +
+    `véhicules ${first.ids.bus}/${first.ids.busById}/${first.ids.train}`,
 );
 log(`[run-1] hash ${first.hash} (carte ${first.mapDigest})`);
 

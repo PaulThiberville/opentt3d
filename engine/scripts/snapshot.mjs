@@ -357,7 +357,7 @@ function validateJson(state, label, size) {
     `${label} : map.bytes ${state.map.bytes}`,
   );
 
-  const arrays = ['companies', 'towns', 'industries', 'stations', 'vehicles'];
+  const arrays = ['companies', 'towns', 'industries', 'stations', 'depots', 'vehicles'];
   const companyIds = new Set(state.companies.map((company) => company.id));
 
   for (const key of arrays) {
@@ -423,6 +423,25 @@ function validateJson(state, label, size) {
     );
     checkPoint(station.x, station.y, `gare ${station.id}`);
     assert(station.width > 0 && station.height > 0, `${label} : emprise gare`);
+  }
+
+  const depotIds = new Set();
+  for (const depot of state.depots) {
+    assert(Number.isInteger(depot.id) && depot.id >= 0, `${label} : id dépôt`);
+    assert(!depotIds.has(depot.id), `${label} : id dépôt ${depot.id} dupliqué`);
+    depotIds.add(depot.id);
+    assert(companyIds.has(depot.company), `${label} : dépôt ${depot.id} orphelin`);
+    assert(['road', 'rail'].includes(depot.kind), `${label} : type de dépôt ${depot.kind}`);
+    checkPoint(depot.x, depot.y, `dépôt ${depot.id}`);
+    assert(
+      Number.isInteger(depot.x) && Number.isInteger(depot.y),
+      `${label} : coordonnées non entières du dépôt ${depot.id}`,
+    );
+    assert(
+      Number.isInteger(depot.direction) && depot.direction >= 0 && depot.direction <= 3,
+      `${label} : direction du dépôt ${depot.id} (${depot.direction})`,
+    );
+    assert(depot.width === 1 && depot.height === 1, `${label} : emprise du dépôt ${depot.id}`);
   }
 
   for (const vehicle of state.vehicles) {
