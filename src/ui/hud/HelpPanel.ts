@@ -6,14 +6,16 @@ import { el } from '../dom';
 
 const CONTROLS: [string, string][] = [
   ['Clic droit / Alt + glisser', 'Orbite'],
-  ['Clic gauche / molette', 'Déplacer, zoomer'],
+  ['Clic gauche / molette', 'Déplacer (hors outil), zoomer'],
   ['Flèches / WASD', 'Déplacer la caméra'],
   ['Q / E', 'Pivoter'],
   ['+ / −', 'Zoomer'],
   ['Début (Home)', 'Recadrer la carte'],
   ['Clic', 'Sélectionner'],
   ['Double-clic', 'Centrer et suivre'],
-  ['Échap', 'Pause / quitter le suivi'],
+  ['Routes / Rails + glisser', 'Construire un tronçon'],
+  ['Clic droit (construction)', 'Annuler le tracé'],
+  ['Échap', 'Quitter l’outil / pause'],
   ['Espace', 'Pause'],
 ];
 
@@ -36,7 +38,7 @@ export class HelpPanel {
     }
     const hint = el('p', {
       className: 'hud-help-hint',
-      text: 'Minimap : clic pour recentrer. Les outils de construction arrivent avec le moteur WASM.',
+      text: 'Minimap : clic pour recentrer. Routes et rails : barre du bas, puis cliquez ou glissez sur la carte.',
     });
     this.element.append(title, list, hint);
     this.element.hidden = true;

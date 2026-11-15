@@ -627,6 +627,10 @@ function exposeDebug(current: GameSession): void {
     get netStatus() {
       return current.networkSession?.stats() ?? null;
     },
+    get buildTool() {
+      return current.getBuildTool();
+    },
+    setBuildTool: (tool: 'road' | 'rail') => current.setBuildTool(tool),
     session: current,
     screens,
     endGame: (reason: string) => current.endGame(reason),

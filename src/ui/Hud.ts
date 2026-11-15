@@ -8,16 +8,18 @@
 
 import type { GameSpeed } from '../game/Game';
 import type { QualityLevel } from '../render/quality';
+import type { BuildHintView } from './buildHint';
 import { el } from './dom';
 import { formatShortGameDate, type GameDateLike } from './format';
 import { NewsQueue, type NewsKind } from './news';
 import type { CameraView, HudState, SelectionSummary } from './types';
+import { BuildHint } from './hud/BuildHint';
 import { HelpPanel } from './hud/HelpPanel';
 import { Minimap } from './hud/Minimap';
 import { NewsFeed } from './hud/NewsFeed';
 import { SelectionPanel } from './hud/SelectionPanel';
 import { Toasts } from './hud/Toasts';
-import { Toolbar } from './hud/Toolbar';
+import { Toolbar, type BuildToolId } from './hud/Toolbar';
 import { TopBar } from './hud/TopBar';
 
 export interface HudCallbacks {
@@ -28,6 +30,7 @@ export interface HudCallbacks {
   onOpenSettings: () => void;
   onClearSelection: () => void;
   onRecenterCamera: (x: number, y: number) => void;
+  onBuildToolChange: (tool: BuildToolId) => void;
 }
 
 export interface HudNewsInput {
@@ -49,6 +52,7 @@ export class Hud {
   private minimap: Minimap;
   private newsFeed: NewsFeed;
   private toolbar: Toolbar;
+  private buildHint: BuildHint;
   private help: HelpPanel;
   private toasts: Toasts;
   private networkStatus: HTMLDivElement;
@@ -87,10 +91,11 @@ export class Hud {
     });
 
     this.toolbar = new Toolbar({
-      onUnavailable: (label) =>
-        this.notify('info', `${label} : disponible avec le moteur WASM (à venir).`),
+      onToggleTool: (tool) => this.callbacks.onBuildToolChange(tool),
+      onUnavailable: (label, reason) => this.notify('info', `${label} : ${reason}`),
     });
 
+    this.buildHint = new BuildHint();
     this.help = new HelpPanel();
     this.toasts = new Toasts();
     this.networkStatus = el('div', {
@@ -122,6 +127,7 @@ export class Hud {
       this.minimap.element,
       this.newsFeed.element,
       this.toolbar.element,
+      this.buildHint.element,
       this.help.element,
       this.toasts.element,
       this.networkStatus,
@@ -173,6 +179,16 @@ export class Hud {
   /** Message éphémère non archivé dans le flux. */
   notify(kind: NewsKind, text: string): void {
     this.toasts.push(kind, text);
+  }
+
+  /** Reflète l'outil de construction armé dans la barre du bas. */
+  setBuildTool(tool: BuildToolId | null): void {
+    this.toolbar.setActive(tool);
+  }
+
+  /** Affiche le coût estimé et le motif d'invalidité au-dessus de la barre. */
+  setBuildHint(view: BuildHintView | null): void {
+    this.buildHint.update(view);
   }
 
   toggleNews(): void {
@@ -245,6 +261,7 @@ export class Hud {
 
   dispose(): void {
     this.toasts.dispose();
+    this.buildHint.dispose();
     this.minimap.dispose();
     this.news.clear();
     this.root.remove();

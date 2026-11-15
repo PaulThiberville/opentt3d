@@ -11,19 +11,23 @@
  * développement quand les artefacts sont absents.
  */
 
-import type { EngineDriver, WorldSnapshot } from '../engine/protocol';
+import type { EngineCommand, EngineDriver, WorldSnapshot } from '../engine/protocol';
 import { MockEngine } from '../engine/MockEngine';
 import { WasmEngine } from '../engine/WasmEngine';
 import { resolveEngineModuleUrl, type EngineMode } from '../engine/loadEngine';
 import { Game, type GameSpeed, type Selection } from '../game/Game';
+import { commandFromPlan, type BuildPlan, type BuildTool } from '../game/buildRules';
 import type { StartInfo } from '../net/lobby-types';
 import { NET_TICK_MS, createNetSession, type NetSession, type NetUpdate } from '../net/session';
 import { Renderer } from '../render/Renderer';
 import { WorldView, type WorldTarget } from '../render/WorldView';
 import { nextQuality, type QualityLevel } from '../render/quality';
 import { Hud } from './Hud';
+import { BuildController } from './buildController';
+import { describeBuildPlan } from './buildHint';
 import type { NewGameOptions } from './gameOptions';
 import { formatGameDate, formatMoney } from './format';
+import type { BuildToolId } from './hud/Toolbar';
 import {
   describeNetworkStatus,
   mapStartInfoToGameOptions,
@@ -104,6 +108,8 @@ export class GameSession {
   private renderer: Renderer | null = null;
   private world: WorldView | null = null;
   private hud: Hud | null = null;
+  private buildController: BuildController | null = null;
+  private buildTool: BuildToolId | null = null;
   private engineBadge: HTMLDivElement | null = null;
   private engineWarnings: string[] = [];
 
@@ -233,6 +239,7 @@ export class GameSession {
       ? new Game({
           driver: this.lockstep ?? engine,
           ticksPerSecond: 1000 / NET_TICK_MS,
+          commandSink: (command) => this.issueNetworkCommand(command),
         })
       : new Game({ driver: engine });
     this.game = game;
@@ -241,6 +248,7 @@ export class GameSession {
     await nextFrame();
     this.ensureActive(token);
     this.renderer = new Renderer({ canvas: this.canvas, quality: this.quality });
+    this.buildController = this.createBuildController();
     this.world = this.createWorld(this.renderer);
     this.hud = this.createHud();
     this.attachEvents(game);
@@ -274,6 +282,10 @@ export class GameSession {
     this.hud.notify(
       'info',
       'Clic : sélection · double-clic : suivre · Échap : pause · Espace : pause.',
+    );
+    this.hud.notify(
+      'info',
+      'Routes et rails : barre du bas, cliquez ou glissez pour tracer un tronçon.',
     );
     if (snapshot) this.monitorGameOver(snapshot);
   }
@@ -418,6 +430,34 @@ export class GameSession {
       onSelect: (target) => this.applySelection(target),
       onHover: () => undefined,
       onNotice: (text) => this.hud?.notify('info', text),
+      onBuildHover: (tile) => this.buildController?.handleHover(tile),
+      onBuildStart: (tile) => this.buildController?.handleBegin(tile),
+      onBuildMove: (tile) => this.buildController?.handleMove(tile),
+      onBuildEnd: (tile) => this.buildController?.handleEnd(tile),
+      onBuildCancel: () => this.buildController?.handleCancel(),
+    });
+  }
+
+  private createBuildController(): BuildController {
+    return new BuildController({
+      getMap: () => this.world?.getMap() ?? null,
+      getCompany: () => {
+        const snapshot = this.game?.getLatestSnapshot();
+        const company =
+          snapshot?.companies.find((item) => item.id === this.localCompanyId()) ??
+          snapshot?.companies.find((item) => item.isLocal) ??
+          snapshot?.companies[0] ??
+          null;
+        return company
+          ? { id: company.id, money: company.money, bankrupt: company.bankrupt }
+          : null;
+      },
+      onPreview: (plan) => {
+        this.world?.setBuildPlan(plan);
+        this.hud?.setBuildHint(describeBuildPlan(plan, this.buildTool));
+      },
+      onCommit: (plan) => this.commitBuild(plan),
+      onNotice: (kind, text) => this.hud?.notify(kind, text),
     });
   }
 
@@ -437,6 +477,7 @@ export class GameSession {
         this.world?.getCameraController().focusOn(x, y);
         this.updateCameraFrame();
       },
+      onBuildToolChange: (tool) => this.setBuildTool(tool),
     });
   }
 
@@ -485,6 +526,10 @@ export class GameSession {
     }
     if (event.key === 'Escape') {
       event.preventDefault();
+      if (this.buildTool) {
+        this.applyBuildTool(null);
+        return;
+      }
       if (this.hud?.closePanels()) return;
       if (this.world?.isFollowing()) {
         this.world.stopFollowing();
@@ -712,6 +757,78 @@ export class GameSession {
 
   setInputEnabled(enabled: boolean): void {
     this.inputEnabled = enabled;
+    if (!enabled && this.buildTool) this.applyBuildTool(null);
+  }
+
+  getBuildTool(): BuildTool | null {
+    return this.buildTool;
+  }
+  /** Arme ou désarme un outil de construction (le clic sur l'outil actif bascule). */
+  setBuildTool(tool: BuildToolId): void {
+    if (this.disposed) return;
+    this.applyBuildTool(this.buildTool === tool ? null : tool);
+  }
+
+  private applyBuildTool(tool: BuildToolId | null): void {
+    this.buildTool = tool;
+    this.buildController?.setTool(tool);
+    this.world?.setBuildMode(tool !== null);
+    this.hud?.setBuildTool(tool);
+    this.hud?.setBuildHint(describeBuildPlan(null, tool));
+    if (tool) {
+      this.clearSelection();
+      this.world?.stopFollowing();
+      this.hud?.notify(
+        'info',
+        `${tool === 'road' ? 'Routes' : 'Rails'} : cliquez ou glissez pour tracer · Échap pour quitter.`,
+      );
+    }
+    this.refreshHud();
+  }
+
+  /** Entreprise qui signe la commande : locale en solo, siège du joueur en réseau. */
+  private localCompanyId(): number | null {
+    const snapshot = this.game?.getLatestSnapshot();
+    const player = this.network?.localPlayer;
+    if (this.isNetwork && player !== undefined) {
+      const company = snapshot?.companies.find((item) => item.id === player);
+      if (company) return company.id;
+    }
+    const company = snapshot?.companies.find((item) => item.isLocal) ?? snapshot?.companies[0];
+    return company?.id ?? null;
+  }
+
+  /**
+   * En réseau, la commande part dans le tour de l'hôte : elle ne touche jamais
+   * le moteur local directement, sinon les pairs divergeraient.
+   */
+  private issueNetworkCommand(command: EngineCommand): void {
+    const session = this.netSession;
+    if (session) session.issue(command);
+    else this.engine?.send(command);
+  }
+
+  /** Émet la commande de construction puis rafraîchit la carte en solo. */
+  private commitBuild(plan: BuildPlan): void {
+    const game = this.game;
+    if (!game) return;
+    const company = this.localCompanyId();
+    if (company === null) {
+      this.hud?.notify('warning', 'Aucune entreprise locale : construction impossible.');
+      return;
+    }
+    game.issueCommand(commandFromPlan(plan, company));
+    if (this.isNetwork) {
+      this.hud?.notify(
+        'info',
+        'Commande de construction envoyée : elle sera appliquée au prochain tour.',
+      );
+      return;
+    }
+    // Le mock applique la commande immédiatement : un snapshot forcé affiche
+    // la route et les news d'erreur/succès sans attendre le prochain tick.
+    game.refresh();
+    this.refreshHud();
   }
 
   setQuality(level: QualityLevel): void {
@@ -810,6 +927,8 @@ export class GameSession {
     else this.engine?.dispose();
     this.hud = null;
     this.world = null;
+    this.buildController = null;
+    this.buildTool = null;
     this.renderer = null;
     this.game = null;
     this.engine = null;
