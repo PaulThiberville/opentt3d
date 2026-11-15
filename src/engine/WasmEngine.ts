@@ -106,6 +106,8 @@ export class WasmEngine implements EngineDriver {
   private warnings: string[] = [];
   private initialized = false;
   private onWarning: ((message: string) => void) | null = null;
+  /** Résultats de commandes à injecter dans le prochain snapshot. */
+  private pendingNews: WorldSnapshot['news'] = [];
 
   constructor(options: WasmEngineOptions = {}) {
     this.factory = options.factory;
@@ -216,8 +218,8 @@ export class WasmEngine implements EngineDriver {
     const canConfigure = typeof newGameEx === 'function';
     if (canConfigure) {
       const configJson = buildGameConfig(options);
-      const stringToUTF8 = module.stringToUTF8;
-      const lengthBytesUTF8 = module.lengthBytesUTF8;
+      const stringToUTF8 = module.stringToUTF8?.bind(module);
+      const lengthBytesUTF8 = module.lengthBytesUTF8?.bind(module);
       if (typeof stringToUTF8 === 'function' && typeof lengthBytesUTF8 === 'function') {
         const size = lengthBytesUTF8(configJson) + 1;
         const pointer = module._malloc(size);
@@ -320,6 +322,10 @@ export class WasmEngine implements EngineDriver {
 
     world.map = decoded.map;
     this.tick = world.meta.tick;
+    if (this.pendingNews.length > 0) {
+      world.news = [...world.news, ...this.pendingNews].slice(-50);
+      this.pendingNews = [];
+    }
     return world;
   }
 
@@ -334,21 +340,65 @@ export class WasmEngine implements EngineDriver {
         this.speed = command.speed;
         return;
       case 'console':
-        this.warn('Commande console ignorée : le pont WASM ne l’expose pas encore (#11).');
+        this.warn('Commande console ignorée : le pont WASM ne l’expose pas encore.');
         return;
       case 'build':
-        this.warn(
-          `Construction « ${command.tool} » ignorée : les commandes de construction arrivent avec #11.`,
-        );
-        return;
       case 'vehicle':
-        this.warn(
-          `Action véhicule « ${command.action} » ignorée : les commandes véhicules arrivent avec #11.`,
-        );
+        this.executeBridgeCommand(command);
         return;
       default:
         this.warn('Commande moteur inconnue ignorée.');
     }
+  }
+
+  /** Exécute une commande build/vehicle via `ottd_command` (#11). */
+  private executeBridgeCommand(command: EngineCommand): void {
+    const module = this.requireModule();
+    const run = module._ottd_command;
+    const readResult = module._ottd_command_result;
+    if (typeof run !== 'function' || typeof readResult !== 'function') {
+      this.warn('Commandes indisponibles : ce build du pont ne les expose pas encore (#11).');
+      return;
+    }
+
+    let result: Record<string, unknown> = {};
+    try {
+      const pointer = this.allocateUtf8(module, JSON.stringify(command));
+      try {
+        run(pointer, 0, 0);
+      } finally {
+        module._free(pointer);
+      }
+      const text = module.UTF8ToString(readResult());
+      const parsed: unknown = text === '' ? {} : JSON.parse(text);
+      if (typeof parsed === 'object' && parsed !== null) {
+        result = parsed as Record<string, unknown>;
+      }
+    } catch (error) {
+      this.warn(`Commande moteur illisible : ${describeError(error)}`);
+      return;
+    }
+
+    const ok = result.ok === true;
+    const message =
+      typeof result.message === 'string' && result.message.trim() !== ''
+        ? result.message
+        : ok
+          ? 'Commande exécutée.'
+          : 'Commande refusée par le moteur.';
+    this.pendingNews.push({ tick: this.tick, kind: ok ? 'info' : 'error', text: message });
+    if (!ok) this.warn(message);
+  }
+
+  /** Alloue une chaîne UTF-8 dans le heap WASM (libération par l'appelant). */
+  private allocateUtf8(module: EmscriptenModule, text: string): number {
+    if (typeof module.stringToUTF8 !== 'function' || typeof module.lengthBytesUTF8 !== 'function') {
+      throw new Error('stringToUTF8/lengthBytesUTF8 indisponibles dans ce module.');
+    }
+    const size = module.lengthBytesUTF8(text) + 1;
+    const pointer = module._malloc(size);
+    module.stringToUTF8(text, pointer, size);
+    return pointer;
   }
 
   hash(): string {

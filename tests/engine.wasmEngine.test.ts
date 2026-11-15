@@ -142,8 +142,8 @@ describe('WasmEngine : chargement et cycle de vie', () => {
     const { engine, fake, warnings } = await createEngine();
     const calls: unknown[][] = [];
     Object.assign(fake, {
-      _ottd_new_game_ex: (seed: number, width: number, height: number, config: string) => {
-        calls.push([seed, width, height, config]);
+      _ottd_new_game_ex: (seed: number, width: number, height: number, configPointer: number) => {
+        calls.push([seed, width, height, fake.UTF8ToString(configPointer)]);
         return fake._ottd_new_game(seed, width, height);
       },
     });
@@ -168,6 +168,47 @@ describe('WasmEngine : chargement et cycle de vie', () => {
       map_size: 64,
     });
     expect(warnings).toEqual([]);
+    expect(engine.status().warnings).toEqual([]);
+  });
+
+  it('exécute une commande build et publie le résultat dans les news', async () => {
+    const { engine, fake } = await createGame();
+    let sent = '';
+    Object.assign(fake, {
+      _ottd_command: (jsonPointer: number) => {
+        sent = fake.UTF8ToString(jsonPointer);
+        return 0;
+      },
+      _ottd_command_result: () =>
+        fake.heapString(
+          JSON.stringify({
+            ok: true,
+            message: 'Route construite sur 2 tuiles.',
+            cost: 240,
+            tiles: 2,
+          }),
+        ),
+    });
+
+    engine.send({
+      type: 'build',
+      tool: 'road',
+      company: 0,
+      from: { x: 1, y: 1 },
+      to: { x: 2, y: 1 },
+      options: { axis: 'x' },
+    });
+
+    expect(JSON.parse(sent)).toMatchObject({
+      type: 'build',
+      tool: 'road',
+      from: { x: 1, y: 1 },
+      to: { x: 2, y: 1 },
+      options: { axis: 'x' },
+    });
+    const snapshot = engine.snapshot();
+    expect(snapshot.news.at(-1)?.text).toBe('Route construite sur 2 tuiles.');
+    expect(snapshot.news.at(-1)?.kind).toBe('info');
     expect(engine.status().warnings).toEqual([]);
   });
 
