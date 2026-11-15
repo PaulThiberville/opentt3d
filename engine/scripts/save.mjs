@@ -37,7 +37,7 @@ const ROAD_LENGTH = 5;
 const RAIL_LENGTH = 5;
 
 const SAVE_MAGIC = 0x5333544f; // "OT3S"
-const SAVE_VERSION = 1;
+const SAVE_VERSION = 2;
 const SAVE_HEADER_SIZE = 32;
 const TILE_KIND = { void: 0, grass: 2, water: 4, coast: 5, rail: 6, road: 7, station: 10 };
 const TILE_FLAG_WATER = 1 << 0;
