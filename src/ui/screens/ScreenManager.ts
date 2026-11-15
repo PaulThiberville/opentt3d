@@ -39,6 +39,7 @@ export class ScreenManager {
     element.classList.add('screen');
     element.classList.toggle('screen--overlay', options.overlay === true);
     this.host.append(element);
+    this.setBackgroundInert(true);
     // Force un reflow pour que la transition d'apparition s'exécute.
     void element.offsetWidth;
     element.classList.add('is-visible');
@@ -61,6 +62,7 @@ export class ScreenManager {
     this.previousFocus = null;
     this.detach(view);
     this.onScreenChange?.(null);
+    this.setBackgroundInert(false);
     this.schedule(() => {
       if (this.current === null && previous?.isConnected) previous.focus();
     });
@@ -72,6 +74,12 @@ export class ScreenManager {
 
   get key(): string | null {
     return this.currentKey;
+  }
+
+  /** Le HUD derrière un écran modal ne doit ni se focuser ni être lu. */
+  private setBackgroundInert(inert: boolean): void {
+    const hud = this.host.parentElement?.querySelector<HTMLElement>('.hud') ?? null;
+    if (hud) hud.inert = inert;
   }
 
   private captureFocus(): HTMLElement | null {
@@ -106,6 +114,7 @@ export class ScreenManager {
     this.current?.dispose?.();
     this.current = null;
     this.currentKey = null;
+    this.setBackgroundInert(false);
     this.removeKeyGuard();
     this.host.remove();
   }
