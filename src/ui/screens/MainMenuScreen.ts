@@ -8,10 +8,13 @@ import { BaseScreen } from './BaseScreen';
 
 export interface MainMenuOptions {
   onSolo: () => void;
+  onMultiplayer: () => void;
   onSettings: () => void;
   onAbout: () => void;
-  /** Renseigné si WebGL est indisponible : la partie solo est bloquée. */
+  /** Renseigné si WebGL est indisponible : les parties sont bloquées. */
   unavailableReason?: string | null;
+  /** Complément affiché sous « Multijoueur » (mode local, avertissement). */
+  multiplayerNote?: string;
 }
 
 interface MenuItemOptions {
@@ -100,12 +103,17 @@ export class MainMenuScreen extends BaseScreen {
       }),
       menuItem({
         label: 'Multijoueur',
-        note: 'Bientôt — le lobby P2P est en préparation',
-        disabled: true,
-        onClick: () =>
-          this.showNotice(
-            'Le multijoueur arrive bientôt : transport P2P et lobby sont livrés côté réseau, l’interface de salon sera branchée dans une prochaine vague.',
-          ),
+        note:
+          options.multiplayerNote ??
+          (soloDisabled ? 'WebGL indisponible' : 'Salon P2P · création, invitation et chat'),
+        disabled: soloDisabled,
+        onClick: () => {
+          if (soloDisabled) {
+            this.showNotice(options.unavailableReason ?? 'Le rendu 3D est indisponible.');
+            return;
+          }
+          options.onMultiplayer();
+        },
       }),
       menuItem({
         label: 'Charger une partie',
