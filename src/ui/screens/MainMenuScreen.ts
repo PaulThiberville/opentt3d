@@ -9,6 +9,7 @@ import { BaseScreen } from './BaseScreen';
 export interface MainMenuOptions {
   onSolo: () => void;
   onMultiplayer: () => void;
+  onLoad: () => void;
   onSettings: () => void;
   onAbout: () => void;
   /** Renseigné si WebGL est indisponible : les parties sont bloquées. */
@@ -117,12 +118,15 @@ export class MainMenuScreen extends BaseScreen {
       }),
       menuItem({
         label: 'Charger une partie',
-        note: 'Bientôt — sauvegardes locales et partage de fichier',
-        disabled: true,
-        onClick: () =>
-          this.showNotice(
-            'Le chargement de sauvegarde sera disponible avec le moteur WASM ; le format de sauvegarde existe déjà côté protocole.',
-          ),
+        note: soloDisabled ? 'WebGL indisponible' : 'Sauvegardes locales · import de fichier .ot3s',
+        disabled: soloDisabled,
+        onClick: () => {
+          if (soloDisabled) {
+            this.showNotice(options.unavailableReason ?? 'Le rendu 3D est indisponible.');
+            return;
+          }
+          options.onLoad();
+        },
       }),
       menuItem({
         label: 'Réglages',
