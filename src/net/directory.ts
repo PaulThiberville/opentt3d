@@ -647,7 +647,11 @@ export function createDirectory(options: DirectoryOptions): Directory {
       return () => {};
     }
     subscribers.add(fn);
-    fn(snapshot());
+    try {
+      fn(snapshot());
+    } catch (error) {
+      console.error('[net:directory] subscriber error', error);
+    }
     return () => {
       subscribers.delete(fn);
     };
