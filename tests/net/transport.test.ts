@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createMemoryBus, createTransport, type Transport } from '../../src/net/transport.js';
+import {
+  createMemoryBus,
+  createTransport,
+  describeTransportError,
+  type Transport,
+} from '../../src/net/transport.js';
 import { MAX_MESSAGE_BYTES } from '../../src/net/types.js';
 import { wait, waitFor } from './helpers.js';
 
@@ -17,6 +22,16 @@ function make(
 
 afterEach(() => {
   while (opened.length > 0) opened.pop()?.leave();
+});
+
+describe('messages d’erreur réseau (#39)', () => {
+  it('ajoute une piste NAT ou relais selon la cause', () => {
+    expect(describeTransportError('peer', 'ICE connection failed')).toMatch(/NAT|pare-feu/i);
+    expect(describeTransportError('room', 'relay websocket closed')).toMatch(
+      /relais Nostr|relays=/i,
+    );
+    expect(describeTransportError('send', 'channel closed', 'turn')).toMatch(/canal « turn »/);
+  });
 });
 
 describe('transport mémoire', () => {

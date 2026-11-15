@@ -67,11 +67,22 @@ export interface CreateTransportOptions {
   kind: TransportKind;
   roomId: string;
   appId?: string;
+  /** Nostr signalling relays; empty/undefined keeps Trystero defaults. */
   relays?: string[];
   password?: string;
+  /** Optional TURN servers, already supported by the bundled Trystero build. */
+  turn?: TurnServerConfig[];
   memory?: MemoryTransportOptions;
   local?: LocalTransportOptions;
   rateLimit?: RateLimitOptions;
+}
+
+/** Subset of the Trystero `TurnServerConfig` shape (no extra dependency). */
+export interface TurnServerConfig {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+  credentialType?: string;
 }
 
 const DEFAULT_APP_ID = 'opentt3d';
@@ -682,6 +693,35 @@ function createLocalTransport(
 // ---------------------------------------------------------------------------
 // Trystero transport — WebRTC + Nostr public relays
 
+/**
+ * Turns a low-level Trystero/WebRTC error into an actionable French message.
+ * Kept pure so tests can assert the wording without a browser.
+ */
+export function describeTransportError(
+  stage: 'peer' | 'room' | 'send',
+  detail: string,
+  channel?: string,
+): string {
+  const clean = detail.trim() || 'erreur inconnue';
+  const lower = clean.toLowerCase();
+  let hint = 'Vérifiez le pare-feu/NAT ou choisissez d’autres relais Nostr.';
+  if (lower.includes('relay') || lower.includes('nostr') || lower.includes('websocket')) {
+    hint = 'Les relais Nostr sont injoignables : vérifiez le réseau ou configurez ?relays=wss://…';
+  } else if (lower.includes('turn') || lower.includes('ice')) {
+    hint = 'La négociation NAT a échoué : un serveur TURN est requis sur ce réseau.';
+  } else if (lower.includes('password') || lower.includes('auth')) {
+    hint = 'Le mot de passe du salon est refusé.';
+  }
+  switch (stage) {
+    case 'room':
+      return `Connexion au salon impossible (${clean}). ${hint}`;
+    case 'send':
+      return `Envoi impossible sur le canal « ${channel ?? 'inconnu'} » (${clean}). ${hint}`;
+    default:
+      return `Connexion à un pair impossible (${clean}). ${hint}`;
+  }
+}
+
 function createTrysteroTransport(
   selfId: string,
   roomId: string,
@@ -694,6 +734,9 @@ function createTrysteroTransport(
   if (options.password) config.password = options.password;
   if (options.relays && options.relays.length > 0) {
     config.relayConfig = { urls: options.relays };
+  }
+  if (options.turn && options.turn.length > 0) {
+    config.turnConfig = options.turn;
   }
 
   const room: Room = joinRoom(config, roomId);
@@ -782,7 +825,7 @@ function createTrysteroTransport(
   });
   const offError = room.onError((error) => {
     const message = typeof error?.message === 'string' ? error.message : 'erreur inconnue';
-    reg.emitError(`Connexion à un pair impossible (${message}).`);
+    reg.emitError(describeTransportError('peer', message));
   });
 
   // Announce ourselves to peers that connected before our handlers existed.
@@ -792,7 +835,7 @@ function createTrysteroTransport(
     })
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      reg.emitError(`Connexion au salon impossible (${message}).`);
+      reg.emitError(describeTransportError('room', message));
     });
 
   const transport: Transport = {
@@ -827,7 +870,7 @@ function createTrysteroTransport(
       ).catch((error: unknown) => {
         if (closed) return;
         const message = error instanceof Error ? error.message : String(error);
-        reg.emitError(`Envoi impossible sur le canal « ${channelName} » (${message}).`);
+        reg.emitError(describeTransportError('send', message, channelName));
       });
     },
     on(channelName, fn) {

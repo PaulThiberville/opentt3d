@@ -81,7 +81,17 @@ describe('paramètres et invitations', () => {
     const params = readNetworkParams('?net=local&room=m3k7-9qfx&host=peer-0001');
     expect(params.kind).toBe('local');
     expect(params.invite).toEqual({ roomId: 'm3k7-9qfx', hostId: 'peer-0001' });
+    expect(params.relays).toEqual([]);
     expect(params.warning).toBeNull();
+  });
+
+  it('lit des relais Nostr explicites et signale une liste invalide (#39)', () => {
+    const params = readNetworkParams('?relays=wss://relay.example,wss://b.example');
+    expect(params.relays).toEqual(['wss://relay.example', 'wss://b.example']);
+    expect(params.warning).toBeNull();
+    const invalid = readNetworkParams('?relays=pas-un-relais');
+    expect(invalid.relays).toEqual([]);
+    expect(invalid.warning).toMatch(/Relais ignorés/);
   });
 
   it('accepte un code seul et refuse un code invalide', () => {

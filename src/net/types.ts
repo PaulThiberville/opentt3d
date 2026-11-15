@@ -107,6 +107,12 @@ export interface HelloMessage extends MessageBase {
   d?: number;
   /** True on an answer, to stop request/answer ping-pong. */
   reply?: boolean;
+  /**
+   * Hosting term (#39). The initial host uses 0; every host migration increments
+   * it. A peer only adopts a `hello` whose term is at least its own, which heals
+   * a split brain when the old host reconnects after a timeout.
+   */
+  term?: number;
 }
 
 /** Client → host: a batch of local commands with their sequence numbers. */
@@ -163,6 +169,26 @@ export interface ChatMessage extends MessageBase {
 export interface LeaveMessage extends MessageBase {
   k: 'leave';
   player: PlayerId;
+}
+
+/** Application-level connection state of one seated player (#39). */
+export type PeerConnectionState = 'connected' | 'disconnected' | 'left';
+
+/** Why a seat is no longer (or is again) considered live. */
+export type PeerStateReason = 'timeout' | 'transport' | 'expelled' | 'reconnected' | 'left';
+
+/**
+ * Host → peers: the host changed its view of one seat after a heartbeat timeout
+ * (or its recovery). Informational only: the authoritative leave still travels
+ * in a finalized turn, so the lockstep never depends on this best-effort message.
+ */
+export interface PeerStateMessage extends MessageBase {
+  k: 'peer-state';
+  player: PlayerId;
+  state: PeerConnectionState;
+  reason: PeerStateReason;
+  /** Host tick when the transition was observed. */
+  tick?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +276,7 @@ export type NetMessage =
   | ResyncMessage
   | ChatMessage
   | LeaveMessage
+  | PeerStateMessage
   | JoinRequestMessage
   | JoinAcceptMessage
   | JoinChunkMessage
@@ -398,7 +425,8 @@ export function isHelloMessage(value: unknown): value is HelloMessage {
     typeof value.host === 'boolean' &&
     isNat(value.epoch) &&
     (value.d === undefined || (isNat(value.d) && value.d <= 64)) &&
-    (value.reply === undefined || typeof value.reply === 'boolean')
+    (value.reply === undefined || typeof value.reply === 'boolean') &&
+    (value.term === undefined || (isNat(value.term) && value.term <= 1_000_000))
   );
 }
 
@@ -474,6 +502,33 @@ export function isChatMessage(value: unknown): value is ChatMessage {
 
 export function isLeaveMessage(value: unknown): value is LeaveMessage {
   return hasBase(value) && value.k === 'leave' && isPlayerId(value.player);
+}
+
+const PEER_STATES: readonly PeerConnectionState[] = ['connected', 'disconnected', 'left'];
+const PEER_STATE_REASONS: readonly PeerStateReason[] = [
+  'timeout',
+  'transport',
+  'expelled',
+  'reconnected',
+  'left',
+];
+
+export function isPeerConnectionState(value: unknown): value is PeerConnectionState {
+  return typeof value === 'string' && (PEER_STATES as readonly string[]).includes(value);
+}
+
+export function isPeerStateReason(value: unknown): value is PeerStateReason {
+  return typeof value === 'string' && (PEER_STATE_REASONS as readonly string[]).includes(value);
+}
+
+export function isPeerStateMessage(value: unknown): value is PeerStateMessage {
+  if (!hasBase(value) || value.k !== 'peer-state') return false;
+  return (
+    isPlayerId(value.player) &&
+    isPeerConnectionState(value.state) &&
+    isPeerStateReason(value.reason) &&
+    (value.tick === undefined || isNat(value.tick))
+  );
 }
 
 export function isJoinRejectReason(value: unknown): value is JoinRejectReason {
@@ -571,6 +626,8 @@ export function validateChannelMessage(channel: string, value: unknown): NetMess
       return isChatMessage(value) ? value : null;
     case 'leave':
       return isLeaveMessage(value) ? value : null;
+    case 'peer-state':
+      return isPeerStateMessage(value) ? value : null;
     case JOIN_CHANNELS.request:
       return isJoinRequestMessage(value) ? value : null;
     case JOIN_CHANNELS.accept:
