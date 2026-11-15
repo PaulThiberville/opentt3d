@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import type { MapSnapshot } from '../src/engine/protocol';
 import { TILE_KIND_INDEX } from '../src/engine/protocol';
 import { VegetationLayer, computeTreeSignature } from '../src/render/VegetationLayer';
+import { TILE_COLOURS, hexToLinearRgb } from '../src/render/tileVisuals';
 
 function makeMap(width = 128, height = 128): MapSnapshot {
   const size = width * height;
@@ -198,5 +199,51 @@ describe('VegetationLayer : mémoire des rebuilds', () => {
       expect(layer.drawCallCount).toBe(layer.chunkCount * 2);
     }
     layer.dispose();
+  });
+});
+
+describe('VegetationLayer : tonalité des houppiers', () => {
+  it('garde des canopées sombres, vertes et accordées à l’herbe', () => {
+    const map = makeMap(128, 128);
+    plantGrove(map, 32, 32);
+    const layer = new VegetationLayer();
+    layer.build(map, 'medium');
+    const grass = hexToLinearRgb(TILE_COLOURS.grass);
+    let sampled = 0;
+    for (const mesh of canopyMeshes(layer)) {
+      const colors = mesh.instanceColor;
+      if (!colors) continue;
+      for (let index = 0; index < colors.count; index += 1) {
+        const r = colors.getX(index);
+        const g = colors.getY(index);
+        const b = colors.getZ(index);
+        expect(g).toBeGreaterThan(r * 1.25);
+        expect(g).toBeGreaterThan(b * 1.4);
+        expect(g).toBeGreaterThanOrEqual(0.08);
+        expect(g).toBeLessThanOrEqual(0.22);
+        expect(g - r).toBeGreaterThanOrEqual(0.025);
+        // Plus sombre que l'herbe : pas de houppier menthe plus clair que le sol.
+        expect(g).toBeLessThan(grass.g);
+        sampled += 1;
+      }
+    }
+    expect(sampled).toBeGreaterThan(0);
+    layer.dispose();
+  });
+
+  it('reste déterministe sur deux constructions identiques', () => {
+    const map = makeMap(128, 128);
+    plantGrove(map, 40, 40);
+    const first = new VegetationLayer();
+    const second = new VegetationLayer();
+    first.build(map, 'medium');
+    second.build(map, 'medium');
+    const colors = (layer: VegetationLayer): number[] =>
+      canopyMeshes(layer).flatMap((mesh) =>
+        mesh.instanceColor ? Array.from(mesh.instanceColor.array) : [],
+      );
+    expect(colors(second)).toEqual(colors(first));
+    first.dispose();
+    second.dispose();
   });
 });

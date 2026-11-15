@@ -213,8 +213,13 @@ export class VegetationLayer {
       this.matrix.compose(this.position, this.quaternion, this.scale);
       trunks.setMatrixAt(i, this.matrix);
       canopies.setMatrixAt(i, this.matrix);
-      const green = 0.36 + tree.tint * 0.22;
-      this.colour.setRGB(0.18 + tree.tint * 0.1, green, 0.16 + tree.tint * 0.08);
+      // Houppiers volontairement sombres et peu saturés, dans la même famille
+      // que l'herbe : les valeurs linéaires évitent le vert menthe délavé.
+      this.colour.setRGB(
+        0.052 + tree.tint * 0.045,
+        0.095 + tree.tint * 0.07,
+        0.038 + tree.tint * 0.032,
+      );
       canopies.setColorAt(i, this.colour);
       centreX += tree.x;
       centreZ += tree.z;

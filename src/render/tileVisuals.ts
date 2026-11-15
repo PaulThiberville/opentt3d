@@ -17,24 +17,25 @@ export interface Rgb {
 /**
  * Palette de base par type de tuile (hex sRGB).
  *
- * Les verts sont volontairement saturés : les couleurs sont converties en
- * espace linéaire avant d'alimenter les sommets (voir `hexToLinearRgb`), sans
- * quoi l'encodage sRGB final délavait l'herbe vers un beige passé. `rough`
- * reste un vert d'altitude plutôt qu'un beige : la roche est ajoutée par le
- * shader selon la pente, pas par la palette.
+ * Les verts sont tempérés et légèrement désaturés : assez profonds pour rester
+ * crédibles sous le soleil chaud (intensité 2,35 + ACES), sans virer au vert
+ * néon. Les couleurs sont converties en espace linéaire avant d'alimenter les
+ * sommets (voir `hexToLinearRgb`). `rough` reste un vert d'altitude plutôt
+ * qu'un beige : la roche est ajoutée par le shader selon la pente, pas par la
+ * palette.
  */
 export const TILE_COLOURS: Record<TileKind, number> = {
   void: 0x0d1218,
-  clear: 0x609344,
-  grass: 0x4f7d38,
-  rough: 0x5b7838,
+  clear: 0x748b59,
+  grass: 0x677a50,
+  rough: 0x606f50,
   water: 0x1d4a68,
   coast: 0xcdb488,
   rail: 0x5c5348,
   road: 0x4d4d4f,
-  house: 0x587a3e,
-  trees: 0x2d5827,
-  station: 0x5b7044,
+  house: 0x5e7550,
+  trees: 0x38532f,
+  station: 0x60704c,
   industry: 0x746457,
   bridge: 0x6b5540,
   tunnel: 0x33333a,
@@ -192,12 +193,12 @@ export function tileColour(
   // plutôt qu'un simple éclaircissement, pour éviter les plaques délavées.
   if (kind === 'grass' || kind === 'clear' || kind === 'trees' || kind === 'rough') {
     const drift = hashUnit2d(seed, heightLevel + 21, steepness + 31);
-    const tint = kind === 'trees' ? 0x244d22 : kind === 'rough' ? 0x748348 : 0x5d9438;
+    const tint = kind === 'trees' ? 0x2a4525 : kind === 'rough' ? 0x6b7a56 : 0x6c8a4e;
     colour = mixColour(colour, tint, 0.06 + drift * 0.12);
     // Altitude : très légère montée vers les pelouses alpines, la roche et la
     // falaise étant désormais ajoutées par la peau procédurale selon la pente.
     const altitude = Math.max(0, Math.min(1, (heightLevel - 10) / 5));
-    if (altitude > 0) colour = mixColour(colour, 0x6c7c4a, altitude * 0.1);
+    if (altitude > 0) colour = mixColour(colour, 0x6f7d5c, altitude * 0.1);
     if (steepness >= 3) colour = mixColour(colour, 0x6a5c44, 0.18);
   }
   return colour;
@@ -212,7 +213,7 @@ export const TERRAIN_SKIN_COLOURS = {
   wetSand: 0x9c855e,
   bedShallow: 0x7c7c58,
   bedDeep: 0x173841,
-  dryGrass: 0x8b9a4a,
+  dryGrass: 0x8a955c,
   skyReflection: 0xa8cada,
 } as const;
 

@@ -20,15 +20,21 @@ function channels(hex: number): { r: number; g: number; b: number; luma: number 
 }
 
 describe('palette de terrain', () => {
-  it('donne une herbe franchement verte, sans dérive beige', () => {
+  it('donne une herbe verte profonde, légèrement désaturée', () => {
     for (const kind of ['grass', 'clear', 'trees', 'rough'] as const) {
       const colour = tileColour(kind, 7, 0, 64);
-      const { r, g, b } = channels(colour);
+      const { r, g, b, luma } = channels(colour);
       expect(g).toBeGreaterThan(r);
       expect(g).toBeGreaterThan(b);
-      // Vert dominant : pas de gris/beige où le rouge talonne le vert.
-      expect(g - r).toBeGreaterThan(20);
-      expect(g - b).toBeGreaterThan(35);
+      // Vert dominant, mais pas de vert néon : les écarts restent mesurés.
+      expect(g - r).toBeGreaterThan(14);
+      expect(g - b).toBeGreaterThan(28);
+      const saturation = (Math.max(r, g, b) - Math.min(r, g, b)) / Math.max(r, g, b);
+      expect(saturation).toBeLessThanOrEqual(0.5);
+      // Valeur de vert tempéré : ni pastel, ni fluo.
+      expect(g).toBeGreaterThan(65);
+      expect(g).toBeLessThan(150);
+      expect(luma).toBeLessThan(135);
     }
   });
 
