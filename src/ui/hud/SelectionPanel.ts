@@ -6,6 +6,7 @@
  */
 
 import { el } from '../dom';
+import { bindAttr, onLanguageChange, t } from '../i18n';
 import type { SelectionSummary } from '../types';
 
 export interface SelectionPanelOptions {
@@ -20,26 +21,48 @@ export class SelectionPanel {
   private detail: HTMLDivElement;
   private stats: HTMLDListElement;
   private signature = '';
+  private followingMode = false;
+  private stopListening: () => void;
 
   constructor(options: SelectionPanelOptions) {
     this.element = el('aside', {
       className: 'hud-selection',
-      attrs: { 'aria-live': 'polite', 'aria-label': 'Sélection' },
+      attrs: { 'aria-live': 'polite', 'aria-label': t('selection.label') },
     });
     this.dot = el('span', { className: 'hud-selection-dot' });
     const text = el('div', { className: 'hud-selection-text' });
-    this.title = el('div', { className: 'hud-selection-title', text: 'Aucune sélection' });
+    this.title = el('div', { className: 'hud-selection-title', text: t('selection.none') });
     this.detail = el('div', { className: 'hud-selection-detail', text: '' });
     this.stats = el('dl', { className: 'hud-selection-stats' });
     text.append(this.title, this.detail, this.stats);
     const close = el('button', {
       className: 'hud-selection-close',
       text: '×',
-      attrs: { type: 'button', title: 'Fermer la sélection', 'aria-label': 'Fermer la sélection' },
+      attrs: { type: 'button', title: t('selection.close'), 'aria-label': t('selection.close') },
     });
+    bindAttr(close, 'title', 'selection.close');
+    bindAttr(close, 'aria-label', 'selection.close');
     close.addEventListener('click', () => options.onClear());
     this.element.append(this.dot, text, close);
     this.element.hidden = true;
+    this.stopListening = onLanguageChange(() => {
+      this.element.setAttribute('aria-label', t('selection.label'));
+      if (this.followingMode) this.renderFollowing();
+    });
+  }
+
+  private renderFollowing(): void {
+    this.title.textContent = t('selection.followingTitle');
+    this.detail.textContent = t('selection.followingDetail');
+    this.dot.style.background = 'var(--hud-accent)';
+    if (this.signature !== 'following') {
+      this.signature = 'following';
+      this.stats.replaceChildren();
+    }
+  }
+
+  dispose(): void {
+    this.stopListening();
   }
 
   update(summary: SelectionSummary | null, following: boolean): void {
@@ -49,6 +72,7 @@ export class SelectionPanel {
     }
     this.element.hidden = false;
     if (summary) {
+      this.followingMode = false;
       this.title.textContent = summary.title;
       this.detail.textContent = summary.detail;
       this.dot.style.background =
@@ -57,13 +81,8 @@ export class SelectionPanel {
           : `#${summary.colour.toString(16).padStart(6, '0')}`;
       this.renderStats(summary);
     } else {
-      this.title.textContent = 'Suivi caméra';
-      this.detail.textContent = 'Échap pour revenir à la vue carte.';
-      this.dot.style.background = 'var(--hud-accent)';
-      if (this.signature !== 'following') {
-        this.signature = 'following';
-        this.stats.replaceChildren();
-      }
+      this.followingMode = true;
+      this.renderFollowing();
     }
   }
 

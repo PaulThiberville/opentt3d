@@ -6,6 +6,7 @@
  */
 
 import { el } from '../dom';
+import { t } from '../i18n';
 import { BaseScreen } from './BaseScreen';
 
 export interface DisconnectedScreenOptions {
@@ -20,24 +21,28 @@ export class DisconnectedScreen extends BaseScreen {
   constructor(options: DisconnectedScreenOptions) {
     super('panel-screen disconnected-screen');
     this.options = options;
+    this.element.setAttribute('aria-label', options.title ?? t('disconnected.title'));
 
     const panel = el('div', { className: 'panel' });
     const header = el('div', { className: 'panel-header' });
     header.append(
-      el('span', { className: 'panel-eyebrow', text: 'Réseau' }),
-      el('h1', { className: 'panel-title is-error', text: options.title ?? 'Connexion perdue' }),
+      el('span', { className: 'panel-eyebrow', text: t('disconnected.eyebrow') }),
+      el('h1', {
+        className: 'panel-title is-error',
+        text: options.title ?? t('disconnected.title'),
+      }),
       el('p', { className: 'panel-subtitle', text: options.reason }),
     );
 
     const note = el('p', {
       className: 'screen-note',
-      text: 'Le transfert de sauvegarde et la reconnexion en cours de partie arriveront avec #38 et #39. Le salon est fermé.',
+      text: t('disconnected.note'),
     });
 
     const actions = el('div', { className: 'panel-actions' });
     const menu = el('button', {
       className: 'btn btn-primary',
-      text: 'Retour au menu',
+      text: t('common.backToMenu'),
       attrs: { type: 'button', 'data-autofocus': '' },
     });
     menu.addEventListener('click', () => options.onMenu());

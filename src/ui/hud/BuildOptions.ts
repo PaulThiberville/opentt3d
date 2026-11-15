@@ -7,7 +7,6 @@
  */
 
 import {
-  DIRECTION_LABELS,
   STATION_MAX_LENGTH,
   STATION_MAX_PLATFORMS,
   cloneBuildSettings,
@@ -16,6 +15,7 @@ import {
   type BuildTool,
 } from '../../game/buildRules';
 import { el } from '../dom';
+import { onLanguageChange, t, type TranslationKey } from '../i18n';
 
 export interface BuildOptionsCallbacks {
   onChange: (settings: BuildSettings) => void;
@@ -29,6 +29,13 @@ const DIRECTION_GLYPHS: Record<BuildDirection, string> = {
   nw: '↖',
 };
 
+const DIRECTION_KEYS: Record<BuildDirection, TranslationKey> = {
+  ne: 'build.direction.ne',
+  se: 'build.direction.se',
+  sw: 'build.direction.sw',
+  nw: 'build.direction.nw',
+};
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
@@ -39,15 +46,20 @@ export class BuildOptions {
   private callbacks: BuildOptionsCallbacks;
   private tool: BuildTool | null = null;
   private settings: BuildSettings;
+  private stopListening: () => void;
 
   constructor(callbacks: BuildOptionsCallbacks, initial: BuildSettings) {
     this.callbacks = callbacks;
     this.settings = cloneBuildSettings(initial);
     this.element = el('div', {
       className: 'hud-build-options',
-      attrs: { role: 'group', 'aria-label': 'Options de construction' },
+      attrs: { role: 'group', 'aria-label': t('build.optionsLabel') },
     });
     this.element.hidden = true;
+    this.stopListening = onLanguageChange(() => {
+      this.element.setAttribute('aria-label', t('build.optionsLabel'));
+      this.render();
+    });
   }
 
   update(tool: BuildTool | null, settings: BuildSettings): void {
@@ -71,7 +83,12 @@ export class BuildOptions {
     }
     this.element.hidden = false;
 
-    const title = tool === 'station' ? 'Gare' : tool === 'depot' ? 'Dépôt' : 'Signal de bloc';
+    const title =
+      tool === 'station'
+        ? t('build.title.station')
+        : tool === 'depot'
+          ? t('build.title.depot')
+          : t('build.title.signal');
     this.element.append(el('span', { className: 'hud-build-options-title', text: title }));
 
     if (tool === 'station') this.renderStation();
@@ -84,8 +101,8 @@ export class BuildOptions {
     this.element.append(
       this.segmented(
         [
-          { id: 'rail', label: 'Rail' },
-          { id: 'road', label: 'Routier' },
+          { id: 'rail', label: t('build.rail') },
+          { id: 'road', label: t('build.road') },
         ],
         station.kind,
         (kind) => {
@@ -95,18 +112,25 @@ export class BuildOptions {
           });
         },
         'station-kind',
+        'build.stationKind',
       ),
     );
 
     if (station.kind === 'rail') {
       this.element.append(
-        this.stepper('Quais', station.platforms, 1, STATION_MAX_PLATFORMS, 'platforms', (value) =>
-          this.commit({
-            ...this.settings,
-            station: { ...station, platforms: value },
-          }),
+        this.stepper(
+          t('build.platforms'),
+          station.platforms,
+          1,
+          STATION_MAX_PLATFORMS,
+          'platforms',
+          (value) =>
+            this.commit({
+              ...this.settings,
+              station: { ...station, platforms: value },
+            }),
         ),
-        this.stepper('Longueur', station.length, 1, STATION_MAX_LENGTH, 'length', (value) =>
+        this.stepper(t('build.length'), station.length, 1, STATION_MAX_LENGTH, 'length', (value) =>
           this.commit({
             ...this.settings,
             station: { ...station, length: value },
@@ -116,7 +140,7 @@ export class BuildOptions {
     } else {
       const toggle = el('button', {
         className: 'hud-build-option-toggle',
-        text: 'En passage',
+        text: t('build.driveThrough'),
         attrs: {
           type: 'button',
           'aria-pressed': station.driveThrough ? 'true' : 'false',
@@ -139,14 +163,15 @@ export class BuildOptions {
     this.element.append(
       this.segmented(
         [
-          { id: 'rail', label: 'Rail' },
-          { id: 'road', label: 'Route' },
+          { id: 'rail', label: t('build.rail') },
+          { id: 'road', label: t('build.route') },
         ],
         depot.kind,
         (kind) => {
           this.commit({ ...this.settings, depot: { ...depot, kind: kind as 'rail' | 'road' } });
         },
         'depot-kind',
+        'build.depotKind',
       ),
       this.directionButton(depot.direction ?? 'se'),
     );
@@ -156,7 +181,7 @@ export class BuildOptions {
     this.element.append(
       el('span', {
         className: 'hud-build-options-note',
-        text: 'Bloc simple · voie existante requise',
+        text: t('build.blockNote'),
       }),
     );
   }
@@ -166,10 +191,11 @@ export class BuildOptions {
     active: string,
     onSelect: (id: string) => void,
     prefix: string,
+    labelKey: TranslationKey,
   ): HTMLElement {
     const group = el('span', {
       className: 'hud-build-segments',
-      attrs: { role: 'group' },
+      attrs: { role: 'group', 'aria-label': t(labelKey) },
     });
     for (const option of options) {
       const button = el('button', {
@@ -208,13 +234,13 @@ export class BuildOptions {
     const minus = el('button', {
       className: 'hud-build-stepper-button',
       text: '−',
-      attrs: { type: 'button', 'aria-label': `${label} : diminuer` },
+      attrs: { type: 'button', 'aria-label': t('build.decrease', { label }) },
       dataset: { action: `${action}-minus` },
     });
     const plus = el('button', {
       className: 'hud-build-stepper-button',
       text: '+',
-      attrs: { type: 'button', 'aria-label': `${label} : augmenter` },
+      attrs: { type: 'button', 'aria-label': t('build.increase', { label }) },
       dataset: { action: `${action}-plus` },
     });
     if (value <= min) minus.disabled = true;
@@ -230,11 +256,15 @@ export class BuildOptions {
     return group;
   }
 
+  dispose(): void {
+    this.stopListening();
+  }
+
   private directionButton(direction: BuildDirection): HTMLElement {
     const group = el('span', { className: 'hud-build-direction' });
     const rotate = el('button', {
       className: 'hud-build-option-button',
-      text: 'Pivoter (R)',
+      text: t('build.rotate'),
       attrs: { type: 'button' },
       dataset: { action: 'rotate' },
     });
@@ -243,7 +273,7 @@ export class BuildOptions {
       rotate,
       el('span', {
         className: 'hud-build-direction-value',
-        text: `${DIRECTION_GLYPHS[direction]} ${DIRECTION_LABELS[direction]}`,
+        text: `${DIRECTION_GLYPHS[direction]} ${t(DIRECTION_KEYS[direction])}`,
       }),
     );
     return group;
