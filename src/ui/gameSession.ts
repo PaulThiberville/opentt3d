@@ -1,14 +1,20 @@
 /**
- * Session de jeu : moteur mock, boucle `Game`, renderer, monde 3D et HUD.
+ * Session de jeu : moteur (mock ou WASM), boucle `Game`, renderer, monde 3D et HUD.
  *
  * `GameSession` est le seul module qui assemble le moteur et la présentation
  * pour une partie. Il ne connaît pas les écrans : le bootstrap lui fournit des
  * callbacks (pause, fin de partie, changement de qualité) et peut tout
  * libérer avec `dispose()` avant de revenir au menu.
+ *
+ * Le moteur est choisi par `?engine=mock|wasm` (défaut : mock). Le mode WASM
+ * charge OpenTTD réel depuis `public/engine/` ; le mode mock reste le chemin de
+ * développement quand les artefacts sont absents.
  */
 
-import type { WorldSnapshot } from '../engine/protocol';
+import type { EngineDriver, WorldSnapshot } from '../engine/protocol';
 import { MockEngine } from '../engine/MockEngine';
+import { WasmEngine } from '../engine/WasmEngine';
+import { resolveEngineModuleUrl, type EngineMode } from '../engine/loadEngine';
 import { Game, type GameSpeed, type Selection } from '../game/Game';
 import { Renderer } from '../render/Renderer';
 import { WorldView, type WorldTarget } from '../render/WorldView';
@@ -45,6 +51,10 @@ export interface GameSessionOptions {
   config: NewGameOptions;
   settings: GameSettings;
   callbacks: GameSessionCallbacks;
+  /** Moteur à utiliser (défaut : mock). */
+  engine?: EngineMode;
+  /** Force l'URL du module WASM (défaut : `public/engine/`). */
+  engineModuleUrl?: string;
 }
 
 const HUD_REFRESH_SECONDS = 0.2;
@@ -62,17 +72,21 @@ function nextFrame(): Promise<void> {
 
 export class GameSession {
   readonly config: NewGameOptions;
+  readonly engineMode: EngineMode;
 
   private canvas: HTMLCanvasElement;
   private uiRoot: HTMLElement;
   private settings: GameSettings;
   private callbacks: GameSessionCallbacks;
+  private engineModuleUrl: string;
 
-  private engine: MockEngine | null = null;
+  private engine: EngineDriver | null = null;
   private game: Game | null = null;
   private renderer: Renderer | null = null;
   private world: WorldView | null = null;
   private hud: Hud | null = null;
+  private engineBadge: HTMLDivElement | null = null;
+  private engineWarnings: string[] = [];
 
   private quality: QualityLevel;
   private lastTarget: WorldTarget | null = null;
@@ -89,9 +103,11 @@ export class GameSession {
     this.settings = options.settings;
     this.callbacks = options.callbacks;
     this.quality = options.config.quality;
+    this.engineMode = options.engine ?? 'mock';
+    this.engineModuleUrl = options.engineModuleUrl ?? resolveEngineModuleUrl();
   }
 
-  get engineInstance(): MockEngine | null {
+  get engineInstance(): EngineDriver | null {
     return this.engine;
   }
 
@@ -117,13 +133,27 @@ export class GameSession {
 
   async load(token: LoadToken): Promise<void> {
     const config = this.config;
-    this.report(0.04, 'Initialisation du moteur mock…');
-    const engine = new MockEngine();
+    const wasm = this.engineMode === 'wasm';
+    this.report(
+      0.03,
+      wasm ? 'Chargement du moteur OpenTTD (WebAssembly)…' : 'Initialisation du moteur mock…',
+    );
+    const engine: EngineDriver = wasm ? new WasmEngine() : new MockEngine();
     this.engine = engine;
-    await engine.init({ moduleUrl: 'mock://engine' });
+    await engine.init({
+      moduleUrl: wasm ? this.engineModuleUrl : 'mock://engine',
+      onProgress: (progress, message) => {
+        this.report(0.04 + Math.max(0, Math.min(1, progress)) * 0.34, message);
+      },
+      onWarning: (message) => this.recordEngineWarning(message),
+    });
+    this.collectEngineWarnings();
     this.ensureActive(token);
 
-    this.report(0.16, 'Génération de la carte et des réseaux…');
+    this.report(
+      0.42,
+      wasm ? 'Génération de la carte OpenTTD…' : 'Génération de la carte et des réseaux…',
+    );
     await nextFrame();
     this.ensureActive(token);
     await engine.newGame({
@@ -135,9 +165,10 @@ export class GameSession {
       startYear: config.startYear,
       climate: config.climate,
     });
+    this.collectEngineWarnings();
     this.ensureActive(token);
 
-    this.report(0.42, 'Création de la boucle de jeu…');
+    this.report(0.52, 'Création de la boucle de jeu…');
     await nextFrame();
     this.ensureActive(token);
     const game = new Game({ driver: engine });
@@ -151,11 +182,13 @@ export class GameSession {
     this.hud = this.createHud();
     this.attachEvents(game);
     this.attachListeners();
+    this.createEngineBadge();
 
     // `game.start()` capture le premier snapshot et émet les news initiales,
     // désormais écoutées par le HUD.
     game.start();
     this.refreshHud();
+    this.announceEngine();
 
     this.report(0.82, 'Construction du terrain…');
     const buildStart = performance.now();
@@ -179,6 +212,71 @@ export class GameSession {
       'Clic : sélection · double-clic : suivre · Échap : pause · Espace : pause.',
     );
     if (snapshot) this.monitorGameOver(snapshot);
+  }
+
+  /** Résume le moteur actif et relaie les avertissements du pont. */
+  private announceEngine(): void {
+    const hud = this.hud;
+    if (!hud) return;
+    if (this.engineMode === 'wasm') {
+      hud.notify('info', 'Moteur WASM : simulation OpenTTD réelle.');
+    } else {
+      hud.notify('info', 'Moteur simulé (Mock) : partie de démonstration.');
+    }
+    for (const warning of this.engineWarnings) hud.notify('warning', warning);
+  }
+
+  private recordEngineWarning(message: string): void {
+    if (this.engineWarnings.includes(message)) return;
+    this.engineWarnings.push(message);
+    this.hud?.notify('warning', message);
+    this.refreshEngineBadge();
+  }
+
+  /** Récupère les avertissements cumulés par le pilote (options, mémoire…). */
+  private collectEngineWarnings(): void {
+    const status = this.engine?.status();
+    for (const warning of status?.warnings ?? []) this.recordEngineWarning(warning);
+  }
+
+  /**
+   * Pastille discrète « Moteur WASM » / « Mock » en bas à gauche. Elle ne
+   * recouvre aucun contrôle du HUD et expose les avertissements en infobulle.
+   */
+  private createEngineBadge(): void {
+    if (this.engineBadge) return;
+    const badge = document.createElement('div');
+    badge.className = 'badge';
+    badge.dataset.engine = this.engineMode;
+    badge.style.position = 'fixed';
+    badge.style.left = '12px';
+    badge.style.bottom = '12px';
+    badge.style.zIndex = '40';
+    badge.style.pointerEvents = 'auto';
+    badge.style.userSelect = 'none';
+    this.uiRoot.append(badge);
+    this.engineBadge = badge;
+    this.refreshEngineBadge();
+  }
+
+  private refreshEngineBadge(): void {
+    const badge = this.engineBadge;
+    if (!badge) return;
+    const label = this.engineMode === 'wasm' ? 'Moteur WASM' : 'Mock';
+    badge.textContent = label;
+    const details: string[] = [
+      this.engineMode === 'wasm'
+        ? `OpenTTD WASM · ${this.engineModuleUrl}`
+        : 'Moteur simulé déterministe',
+    ];
+    if (this.engineWarnings.length > 0) details.push('', ...this.engineWarnings);
+    badge.title = details.join('\n');
+    badge.setAttribute(
+      'aria-label',
+      this.engineWarnings.length > 0
+        ? `${label} — ${this.engineWarnings.length} avertissement(s)`
+        : label,
+    );
   }
 
   private report(progress: number, message: string): void {
@@ -489,5 +587,7 @@ export class GameSession {
     this.renderer = null;
     this.game = null;
     this.engine = null;
+    this.engineBadge?.remove();
+    this.engineBadge = null;
   }
 }

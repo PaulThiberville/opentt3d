@@ -1,0 +1,251 @@
+import { describe, expect, it } from 'vitest';
+import { COMPANY_NONE, PROTOCOL_VERSION } from '../src/engine/protocol';
+import { WorldJsonError, parseWorldJson } from '../src/engine/worldJson';
+
+/** JSON minimal tel que le produit `ottd_snapshot_json` pour une partie neuve. */
+function engineJson(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    meta: { protocol: PROTOCOL_VERSION, tick: 1282, hash: '0xd60509d5b2eb3fe1', sequence: 1 },
+    economy: {
+      year: 1950,
+      month: 0,
+      day: 1,
+      dayFraction: 12,
+      speed: 1,
+      paused: false,
+    },
+    map: { width: 128, height: 128, encoding: 'binary', bytes: 98440, layers: 6 },
+    counts: { companies: 1, towns: 1, industries: 1, stations: 0, vehicles: 0 },
+    companies: [],
+    towns: [],
+    industries: [],
+    stations: [],
+    vehicles: [],
+    news: [],
+    events: [],
+    ...overrides,
+  };
+}
+
+describe('mapping JSON → WorldSnapshot', () => {
+  it('mappe méta et économie sans carte', () => {
+    const world = parseWorldJson(engineJson());
+    expect(world.meta.protocol).toBe(PROTOCOL_VERSION);
+    expect(world.meta.tick).toBe(1282);
+    expect(world.meta.hash).toBe('0xd60509d5b2eb3fe1');
+    expect(world.meta.sequence).toBe(1);
+    expect(world.map).toBeNull();
+    expect(world.economy).toEqual({
+      year: 1950,
+      month: 0,
+      day: 1,
+      dayFraction: 12,
+      speed: 1,
+      paused: false,
+    });
+  });
+
+  it('accepte la chaîne JSON brute', () => {
+    const world = parseWorldJson(JSON.stringify(engineJson()));
+    expect(world.meta.tick).toBe(1282);
+  });
+
+  it('remplit des valeurs par défaut documentées pour les champs absents', () => {
+    const world = parseWorldJson({
+      meta: { protocol: PROTOCOL_VERSION },
+      economy: null,
+      companies: [{ id: 0 }],
+      towns: [{ id: 3 }],
+      industries: [{}],
+      stations: [{}],
+      vehicles: [{ id: 1, kind: 'train', company: 255 }],
+    });
+
+    expect(world.meta.hash).toBe('0x0000000000000000');
+    expect(world.meta.sequence).toBe(0);
+    expect(world.economy).toEqual({
+      year: 1950,
+      month: 0,
+      day: 1,
+      dayFraction: 0,
+      speed: 1,
+      paused: false,
+    });
+    expect(world.companies[0]).toMatchObject({
+      id: 0,
+      name: 'Entreprise 1',
+      president: '',
+      colour: 0,
+      money: 0,
+      bankrupt: false,
+    });
+    expect(world.towns[0]).toMatchObject({ name: 'Ville', population: 0, rating: 0 });
+    expect(world.industries[0]).toMatchObject({ kind: 'unknown', stocks: [] });
+    expect(world.stations[0]).toMatchObject({
+      kind: 'train',
+      company: COMPANY_NONE,
+      width: 1,
+      height: 1,
+      waiting: [],
+    });
+    expect(world.vehicles[0]).toMatchObject({
+      kind: 'train',
+      company: COMPANY_NONE,
+      cargo: null,
+      status: 0,
+      orderTargets: [],
+    });
+    expect(world.news).toEqual([]);
+    expect(world.events).toEqual([]);
+  });
+
+  it('mappe les entités du pont', () => {
+    const world = parseWorldJson(
+      engineJson({
+        companies: [
+          {
+            id: 0,
+            name: 'Compagnie de Paul',
+            president: 'Paul',
+            colour: 8,
+            money: 250_000,
+            loan: 50_000,
+            value: 300_000,
+            income: 1_200,
+            expenses: 400,
+            vehicles: 2,
+            stations: 1,
+            isAI: false,
+            isLocal: true,
+            bankrupt: false,
+          },
+        ],
+        towns: [
+          {
+            id: 4,
+            name: 'Trondheim',
+            x: 21,
+            y: 33,
+            population: 512,
+            growthRate: 4,
+            buildings: 40,
+            rating: 750,
+          },
+        ],
+        industries: [
+          {
+            id: 2,
+            name: 'Mine de charbon',
+            kind: 'Mine de charbon',
+            x: 10.5,
+            y: 20.5,
+            production: 120,
+            transported: 30,
+            stocks: [{ cargo: 'Charbon', amount: 44, rate: 3 }],
+          },
+        ],
+        stations: [
+          {
+            id: 1,
+            company: 0,
+            name: 'Trondheim Central',
+            kind: 'airport',
+            x: 22,
+            y: 34,
+            width: 4,
+            height: 3,
+            waiting: [{ cargo: 'Passagers', amount: 12 }],
+          },
+        ],
+        vehicles: [
+          {
+            id: 12,
+            kind: 'aircraft',
+            company: 0,
+            x: 15.25,
+            y: 9.75,
+            z: 4,
+            direction: 192,
+            speed: 30.5,
+            status: 1,
+            cargo: { type: 'Passagers', amount: 40, capacity: 80 },
+            orderTargets: [1, 2],
+            profitLastYear: 12_345.5,
+            ageDays: 90,
+          },
+        ],
+      }),
+    );
+
+    expect(world.companies[0]).toMatchObject({
+      name: 'Compagnie de Paul',
+      colour: 8,
+      isLocal: true,
+    });
+    expect(world.towns[0]).toMatchObject({ name: 'Trondheim', x: 21, y: 33, rating: 750 });
+    expect(world.industries[0]).toMatchObject({
+      x: 10.5,
+      y: 20.5,
+      stocks: [{ cargo: 'Charbon', amount: 44 }],
+    });
+    expect(world.stations[0]).toMatchObject({
+      kind: 'airport',
+      width: 4,
+      height: 3,
+      waiting: [{ cargo: 'Passagers', amount: 12 }],
+    });
+    expect(world.vehicles[0]).toMatchObject({
+      id: 12,
+      kind: 'aircraft',
+      x: 15.25,
+      y: 9.75,
+      direction: 192,
+      cargo: { type: 'Passagers', amount: 40, capacity: 80 },
+      orderTargets: [1, 2],
+    });
+  });
+
+  it('ignore les véhicules sans type de rendu et les événements inconnus', () => {
+    const world = parseWorldJson(
+      engineJson({
+        vehicles: [
+          { id: 1, kind: 'unknown' },
+          { id: 2, kind: 'ship', company: 0 },
+        ],
+        news: [
+          { tick: 10, kind: 'warning', text: 'Route fermée' },
+          { tick: 11, kind: 'inconnu', text: 'Sans gravité' },
+          { tick: 12, kind: 'info' },
+          'pas un objet',
+        ],
+        events: [
+          { type: 'vehicle_arrived', vehicle: 2, station: 1, tick: 10 },
+          { type: 'company_bankrupt', company: 0, tick: 11 },
+          { type: 'extraterrestre', tick: 12 },
+        ],
+      }),
+    );
+
+    expect(world.vehicles.map((vehicle) => vehicle.id)).toEqual([2]);
+    expect(world.news).toEqual([
+      { tick: 10, kind: 'warning', text: 'Route fermée' },
+      { tick: 11, kind: 'info', text: 'Sans gravité' },
+    ]);
+    expect(world.events).toEqual([
+      { type: 'vehicle_arrived', vehicle: 2, station: 1, tick: 10 },
+      { type: 'company_bankrupt', company: 0, tick: 11 },
+    ]);
+  });
+
+  it('refuse un protocole incompatible', () => {
+    const json = engineJson();
+    (json.meta as Record<string, unknown>).protocol = PROTOCOL_VERSION + 1;
+    expect(() => parseWorldJson(json)).toThrow(WorldJsonError);
+    expect(() => parseWorldJson(json)).toThrow(/Protocole moteur incompatible/);
+  });
+
+  it('refuse un JSON invalide ou une racine non-objet', () => {
+    expect(() => parseWorldJson('{')).toThrow(/JSON invalide/);
+    expect(() => parseWorldJson(42)).toThrow(/objet JSON attendu/);
+  });
+});
