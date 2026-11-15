@@ -29,7 +29,7 @@ const GAME_OPTIONS: NewGameOptions = {
   seed: 20261115,
   width: 128,
   height: 128,
-  aiCompanies: 0,
+  aiCompanies: 1,
   difficulty: 1,
   startYear: 1950,
   climate: 'temperate',
@@ -161,6 +161,11 @@ suite('lockstep réseau avec WasmEngine réel', () => {
     expect(client.runner.tick()).toBe(startTick);
     const hostSnapshot = host.engine.snapshot();
     const clientSnapshot = client.engine.snapshot();
+    // Une entreprise locale + une IA, identiques sur les deux pairs.
+    expect(hostSnapshot.companies.filter((item) => item.isAI)).toHaveLength(1);
+    expect(clientSnapshot.companies.map((item) => item.id)).toEqual(
+      hostSnapshot.companies.map((item) => item.id),
+    );
     const company = hostSnapshot.companies.find((item) => item.isLocal)?.id ?? 0;
     const map = hostSnapshot.map;
     if (!map) throw new Error('carte absente');
