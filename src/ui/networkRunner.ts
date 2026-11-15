@@ -69,10 +69,6 @@ function parseEnvelope(text: string): SaveEnvelope {
   return envelope;
 }
 
-function parseSave(text: string): Uint8Array {
-  return decodeBase64(parseEnvelope(text).data);
-}
-
 /**
  * `Runner` adossé à un `EngineDriver`. Le moteur doit être en pause désactivée
  * et en vitesse 1 : les commandes pause/vitesse ne sont pas séquencées en
@@ -153,13 +149,13 @@ export function createEngineRunner(engine: EngineDriver): EngineRunner {
       cached = envelope;
       return;
     }
-    const bytes = parseSave(data);
+    const envelope = parseEnvelope(data);
+    const bytes = decodeBase64(envelope.data);
     // `MockEngine.load` applique son état de façon synchrone avant de rendre
     // la promesse.
     void engine.load(bytes).catch((error: unknown) => {
       console.warn('[net:runner] chargement de sauvegarde impossible', error);
     });
-    const envelope = parseEnvelope(data);
     cached = envelope;
   }
 
