@@ -17,7 +17,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { EmscriptenModuleFactory, EmscriptenModuleOptions } from '../src/engine/loadEngine';
 import { WasmEngine } from '../src/engine/WasmEngine';
-import { PROTOCOL_VERSION } from '../src/engine/protocol';
+import { PROTOCOL_VERSION, TILE_FLAG, TILE_KIND_INDEX } from '../src/engine/protocol';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_DIR = path.join(ROOT, 'public', 'engine');
@@ -91,6 +91,52 @@ suite('intégration moteur WASM réel', () => {
       const second = engine.snapshot();
       expect(second.meta.tick).toBe(tickBefore + 100);
       expect(second.map?.kind).toHaveLength(128 * 128);
+    } finally {
+      engine.dispose();
+    }
+  }, 120_000);
+
+  it('construit une route réelle via ottd_command', async () => {
+    const engine = new WasmEngine({ factory: await createNodeFactory() });
+    try {
+      await engine.init({ moduleUrl: pathToFileURL(MODULE_PATH).href });
+      await engine.newGame({ seed: 42, width: 128, height: 128 });
+      const first = engine.snapshot();
+      const map = first.map;
+      if (!map) throw new Error('carte absente');
+
+      let start: { x: number; y: number } | null = null;
+      for (let y = 0; y < map.height - 1 && !start; y += 1) {
+        for (let x = 0; x < map.width - 3; x += 1) {
+          const indexes = [0, 1, 2].map((dx) => y * map.width + x + dx);
+          const ok = indexes.every((index) => {
+            return (
+              map.kind[index] === TILE_KIND_INDEX.grass &&
+              ((map.flags[index] ?? 0) & TILE_FLAG.WATER) === 0 &&
+              map.heightMap[index] === map.heightMap[indexes[0] ?? 0]
+            );
+          });
+          if (ok) {
+            start = { x, y };
+            break;
+          }
+        }
+      }
+      if (!start) throw new Error('aucune zone de 3 tuiles d’herbe plate trouvée');
+      const company = first.companies.find((item) => item.isLocal)?.id ?? 0;
+      engine.send({
+        type: 'build',
+        tool: 'road',
+        company,
+        from: start,
+        to: { x: start.x + 2, y: start.y },
+        options: { axis: 'x' },
+      });
+
+      const after = engine.snapshot();
+      const kinds = [0, 1, 2].map((dx) => after.map?.kind[start.y * map.width + start.x + dx]);
+      expect(kinds).toEqual([TILE_KIND_INDEX.road, TILE_KIND_INDEX.road, TILE_KIND_INDEX.road]);
+      expect(after.news.some((item) => /Route/i.test(item.text))).toBe(true);
     } finally {
       engine.dispose();
     }
