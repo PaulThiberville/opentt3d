@@ -7,7 +7,7 @@
  */
 
 import type { GameSpeed } from '../game/Game';
-import type { TownActionKind } from '../engine/protocol';
+import type { OrderOptions, TownActionKind } from '../engine/protocol';
 import type { BuildSettings } from '../game/buildRules';
 import { createBuildSettings } from '../game/buildRules';
 import type { QualityLevel } from '../render/quality';
@@ -56,6 +56,12 @@ export interface HudCallbacks {
   onAddOrder: (vehicleId: number) => void;
   onRemoveOrder: (vehicleId: number, index: number) => void;
   onMoveOrder: (vehicleId: number, index: number, delta: -1 | 1) => void;
+  /** Refit, options d'ordre, partage et duplication (#160/#161). */
+  onRefitVehicle: (vehicleId: number, cargo: string) => void;
+  onUpdateOrder: (vehicleId: number, index: number, options: OrderOptions) => void;
+  onAddConditionalOrder: (vehicleId: number) => void;
+  onShareOrders: (vehicleId: number, targetId: number) => void;
+  onCloneVehicle: (vehicleId: number) => void;
   onCloseVehicle: () => void;
   /** Panneau ville/industrie/gare : recentrage et navigation entre lieux. */
   onPlaceFocus: (x: number, y: number) => void;
@@ -183,6 +189,12 @@ export class Hud {
       onAddOrder: (vehicleId) => this.callbacks.onAddOrder(vehicleId),
       onRemoveOrder: (vehicleId, index) => this.callbacks.onRemoveOrder(vehicleId, index),
       onMoveOrder: (vehicleId, index, delta) => this.callbacks.onMoveOrder(vehicleId, index, delta),
+      onRefit: (vehicleId, cargo) => this.callbacks.onRefitVehicle(vehicleId, cargo),
+      onUpdateOrder: (vehicleId, index, options) =>
+        this.callbacks.onUpdateOrder(vehicleId, index, options),
+      onAddConditional: (vehicleId) => this.callbacks.onAddConditionalOrder(vehicleId),
+      onShareOrders: (vehicleId, targetId) => this.callbacks.onShareOrders(vehicleId, targetId),
+      onCloneVehicle: (vehicleId) => this.callbacks.onCloneVehicle(vehicleId),
     });
 
     this.placePanel = new PlacePanel({

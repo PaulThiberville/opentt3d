@@ -429,6 +429,69 @@ describe('mapping JSON → WorldSnapshot', () => {
     expect(world.subsidies?.[0]?.fromKind).toBe('industry');
   });
 
+  it('mappe orderDetails, options et ordre courant (#161)', () => {
+    const world = parseWorldJson(
+      engineJson({
+        vehicles: [
+          {
+            id: 4,
+            kind: 'road',
+            company: 0,
+            model: 'truck_flatbed',
+            cargo: { type: 'coal', amount: 12, capacity: 34 },
+            orderTargets: [12, 5],
+            orderKinds: ['station', 'depot'],
+            currentOrder: 2,
+            orderDetails: [
+              {
+                index: 0,
+                target: 12,
+                kind: 'station',
+                options: {
+                  action: 'full_load',
+                  timetable: { waitTicks: 120, travelTicks: 40, autostart: true },
+                },
+              },
+              {
+                index: 1,
+                target: -1,
+                kind: 'conditional',
+                options: {
+                  condition: { type: 'percentage', comparator: 'more_or_equal', value: 80 },
+                  jump: 2,
+                },
+              },
+              {
+                index: 2,
+                target: 5,
+                kind: 'depot',
+                options: { action: 'transfer' },
+              },
+              { index: 3, target: 1, kind: 'inconnu' },
+            ],
+          },
+        ],
+      }),
+    );
+    const vehicle = world.vehicles[0];
+    expect(vehicle?.model).toBe('truck_flatbed');
+    expect(vehicle?.currentOrder).toBe(2);
+    expect(vehicle?.orderDetails).toHaveLength(3);
+    expect(vehicle?.orderDetails?.[0]?.options).toEqual({
+      action: 'full_load',
+      timetable: { waitTicks: 120, travelTicks: 40, autostart: true },
+    });
+    expect(vehicle?.orderDetails?.[1]).toMatchObject({
+      kind: 'conditional',
+      target: -1,
+      options: {
+        jump: 2,
+        condition: { type: 'percentage', comparator: 'more_or_equal', value: 80 },
+      },
+    });
+    expect(vehicle?.orderDetails?.[2]?.options?.action).toBe('transfer');
+  });
+
   it('refuse un protocole incompatible', () => {
     const json = engineJson();
     (json.meta as Record<string, unknown>).protocol = PROTOCOL_VERSION + 1;

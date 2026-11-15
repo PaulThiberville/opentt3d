@@ -118,6 +118,32 @@ describe('sauvegarde et chargement locaux', () => {
     expect(restored.hash()).toBe(source.hash());
   });
 
+  it('charge une sauvegarde antérieure aux ordres enrichis', async () => {
+    const source = await createEngine(4040, 128);
+    source.step(240);
+    const raw = JSON.parse(new TextDecoder().decode(await source.save())) as {
+      world: {
+        vehicles: Record<string, unknown>[];
+      };
+    };
+    // Champs ajoutés par #160/#161 : absents des sauvegardes v1.5.
+    for (const vehicle of raw.world.vehicles) {
+      delete vehicle.segmentOrders;
+      delete vehicle.currentOrder;
+      delete vehicle.routeOrders;
+      delete vehicle.model;
+    }
+    const restored = new MockEngine();
+    await restored.load(new TextEncoder().encode(JSON.stringify(raw)));
+    const snapshot = restored.snapshot();
+    expect(snapshot.vehicles.length).toBeGreaterThan(0);
+    for (const vehicle of snapshot.vehicles) {
+      expect(vehicle.currentOrder ?? 0).toBeGreaterThanOrEqual(0);
+    }
+    restored.step(48);
+    expect(restored.status().tick).toBeGreaterThan(0);
+  });
+
   it('refuse un conteneur incompatible sans modifier le moteur', async () => {
     const source = await createEngine(5);
     source.step(30);

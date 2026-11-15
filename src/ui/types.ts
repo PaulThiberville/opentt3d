@@ -5,7 +5,13 @@
  * les écrans et les modules purs.
  */
 
-import type { TownActionKind, WorldSnapshot } from '../engine/protocol';
+import type {
+  OrderAction,
+  OrderOptions,
+  OrderTargetKind,
+  TownActionKind,
+  WorldSnapshot,
+} from '../engine/protocol';
 import type { GameSpeed, Selection } from '../game/Game';
 import type { QualityLevel } from '../render/quality';
 import type { VehicleVariant } from '../render/vehicleModels';
@@ -125,12 +131,56 @@ export interface DepotPanelView {
 export interface VehicleOrderView {
   index: number;
   label: string;
-  kind: 'station' | 'industry' | 'depot';
+  kind: OrderTargetKind;
+  /** Mode d'arrêt normalisé (#161). */
+  action: OrderAction;
+  actionLabel: string;
+  /** Résumé de la condition, ou null. */
+  conditionLabel: string | null;
+  /** « saut vers l'ordre N », ou null. */
+  jumpLabel: string | null;
+  /** Résumé d'horaire (attente/trajet/autostart), ou null. */
+  timetableLabel: string | null;
+  /** Ordre en cours d'exécution (#161). */
+  current: boolean;
+  /** Options complètes, pour préremplir l'éditeur. */
+  options: OrderOptions;
+}
+
+/** Cargaison proposée au refit d'un véhicule (#160). */
+export interface VehicleRefitView {
+  cargo: string;
+  label: string;
+  capacity: number;
+  cost: number;
+  /** Refit possible maintenant (dépôt, cargaison différente, fonds). */
+  available: boolean;
+  reason: string | null;
+}
+
+/** Véhicule candidat au partage de tournée (#161). */
+export interface VehicleShareView {
+  id: number;
+  label: string;
 }
 
 export interface VehiclePanelView extends SelectionSummary {
   status: string;
+  /** Nom du modèle catalogue, ou null pour la flotte de démonstration. */
+  modelName: string | null;
+  /** Cargaison courante et remplissage. */
+  cargo: { label: string; amount: number; capacity: number; percent: number };
   orders: VehicleOrderView[];
+  /** Index de l'ordre courant, ou null. */
+  currentOrder: number | null;
+  /** Refits disponibles pour le modèle, vide si inconnu. */
+  refits: VehicleRefitView[];
+  /** Le véhicule est arrêté dans un dépôt : refit et duplication possibles. */
+  inDepot: boolean;
+  /** Cargaison qui sera perdue par un refit. */
+  cargoAtRisk: number;
+  /** Autres véhicules de l'entreprise pour partager la tournée. */
+  shareCandidates: VehicleShareView[];
   canStart: boolean;
   canStop: boolean;
   canSell: boolean;

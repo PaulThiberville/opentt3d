@@ -17,6 +17,7 @@ import type {
   CompanySnapshot,
   EngineCommand,
   EngineDriver,
+  OrderOptions,
   TownActionKind,
   WorldSnapshot,
 } from '../engine/protocol';
@@ -38,10 +39,13 @@ import {
 import { tileKindAt } from '../game/mapGrid';
 import {
   buyVehicleCommand,
+  cloneOrderOptions,
+  cloneVehicleCommand,
   depotAtTile,
   depotOrder,
   orderVehicleCommand,
   ordersFromSnapshot,
+  refitVehicleCommand,
   stationAtTile,
   stationOrder,
   validateVehicleOrders,
@@ -1158,6 +1162,12 @@ export class GameSession {
       onAddOrder: (vehicleId) => this.toggleOrderPicking(vehicleId),
       onRemoveOrder: (vehicleId, index) => this.removeOrder(vehicleId, index),
       onMoveOrder: (vehicleId, index, delta) => this.moveOrder(vehicleId, index, delta),
+      onRefitVehicle: (vehicleId, cargo) => this.refitVehicle(vehicleId, cargo),
+      onUpdateOrder: (vehicleId, index, options) =>
+        this.updateOrderOptions(vehicleId, index, options),
+      onAddConditionalOrder: (vehicleId) => this.addConditionalOrder(vehicleId),
+      onShareOrders: (vehicleId, targetId) => this.shareOrders(vehicleId, targetId),
+      onCloneVehicle: (vehicleId) => this.cloneVehicle(vehicleId),
       onCloseVehicle: () => this.clearSelection(),
       onPlaceFocus: (x, y) => this.focusPlace(x, y),
       onPlaceSelect: (target) => this.selectPlaceTarget(target),
@@ -1806,7 +1816,10 @@ export class GameSession {
     const company = this.localCompanyId();
     if (company === null) return;
     const vehicle = this.game?.getLatestSnapshot()?.vehicles.find((item) => item.id === vehicleId);
-    if (vehicle && vehicle.orderTargets.length === 0) {
+    const hasOrder =
+      vehicle?.orderDetails?.some((order) => order.kind !== 'conditional') ??
+      (vehicle?.orderTargets.length ?? 0) > 0;
+    if (vehicle && !hasOrder) {
       this.hud?.notify('warning', 'Ajoutez au moins une gare à la tournée avant de démarrer.');
       return;
     }
@@ -1926,6 +1939,109 @@ export class GameSession {
     });
   }
 
+  /** Reconfigure la cargaison d'un véhicule arrêté dans un dépôt (#160). */
+  private refitVehicle(vehicleId: number, cargo: string): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(refitVehicleCommand(company, vehicleId, cargo));
+  }
+
+  /** Remplace les options d'un ordre existant (#161/#162). */
+  private updateOrderOptions(vehicleId: number, index: number, options: OrderOptions): void {
+    this.updateOrders(vehicleId, (orders) =>
+      orders.map((order, position) =>
+        position === index
+          ? {
+              target: order.target,
+              kind: order.kind,
+              options: cloneOrderOptions(options),
+            }
+          : order,
+      ),
+    );
+  }
+
+  /** Ajoute un ordre conditionnel par défaut (chargement ≥ 100 %) (#161). */
+  private addConditionalOrder(vehicleId: number): void {
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    if (!snapshot) return;
+    const vehicle = snapshot.vehicles.find((item) => item.id === vehicleId);
+    if (!vehicle) return;
+    const orders = ordersFromSnapshot(vehicle, snapshot);
+    if (orders.length === 0) {
+      this.hud?.notify('warning', 'Ajoutez d’abord un arrêt avant une condition.');
+      return;
+    }
+    const next: VehicleOrder[] = [
+      ...orders,
+      {
+        target: -1,
+        kind: 'conditional',
+        options: {
+          condition: { type: 'percentage', comparator: 'more_or_equal', value: 100 },
+          jump: 0,
+        },
+      },
+    ];
+    const validation = validateVehicleOrders(next, snapshot);
+    if (!validation.ok) {
+      this.hud?.notify('warning', validation.reason ?? 'Condition refusée.');
+      return;
+    }
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(orderVehicleCommand(company, vehicleId, next));
+    this.hud?.notify('info', 'Ordre conditionnel ajouté.');
+  }
+
+  /** Copie la tournée d'un véhicule vers un autre de la même entreprise. */
+  private shareOrders(vehicleId: number, targetId: number): void {
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    if (!snapshot) return;
+    const source = snapshot.vehicles.find((item) => item.id === vehicleId);
+    const target = snapshot.vehicles.find((item) => item.id === targetId);
+    if (!source || !target) return;
+    const orders = ordersFromSnapshot(source, snapshot);
+    if (orders.length === 0) {
+      this.hud?.notify('warning', 'Aucune tournée à partager.');
+      return;
+    }
+    const validation = validateVehicleOrders(orders, snapshot);
+    if (!validation.ok) {
+      this.hud?.notify('warning', validation.reason ?? 'Tournée non partageable.');
+      return;
+    }
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(orderVehicleCommand(company, targetId, orders));
+    this.hud?.notify('info', `Tournée partagée avec le véhicule #${targetId}.`);
+  }
+
+  /** Achète un clone du véhicule dans son dépôt (#161). */
+  private cloneVehicle(vehicleId: number): void {
+    const game = this.game;
+    if (!game) return;
+    const company = this.localCompanyId();
+    if (company === null) return;
+    const before = new Set(game.getLatestSnapshot()?.vehicles.map((item) => item.id) ?? []);
+    game.issueCommand(cloneVehicleCommand(company, vehicleId));
+    if (this.isNetwork) {
+      this.hud?.notify('info', 'Duplication envoyée : elle sera appliquée au prochain tour.');
+      return;
+    }
+    game.refresh();
+    const snapshot = game.getLatestSnapshot();
+    const cloned = snapshot?.vehicles
+      .filter((item) => item.company === company && !before.has(item.id))
+      .sort((a, b) => b.id - a.id)[0];
+    if (cloned) {
+      this.selectVehicle(cloned.id);
+      this.hud?.notify('info', `Véhicule #${cloned.id} dupliqué depuis #${vehicleId}.`);
+      return;
+    }
+    this.refreshHud();
+  }
+
   private updateOrders(
     vehicleId: number,
     transform: (orders: VehicleOrder[]) => VehicleOrder[],
@@ -1934,7 +2050,18 @@ export class GameSession {
     if (!snapshot) return;
     const vehicle = snapshot.vehicles.find((item) => item.id === vehicleId);
     if (!vehicle) return;
-    const orders = transform(ordersFromSnapshot(vehicle, snapshot));
+    const next = transform(ordersFromSnapshot(vehicle, snapshot));
+    const lastIndex = Math.max(0, next.length - 1);
+    const orders = next.map((order) => {
+      if (order.kind !== 'conditional' || order.options?.jump === undefined) return order;
+      return {
+        ...order,
+        options: {
+          ...cloneOrderOptions(order.options),
+          jump: Math.min(order.options.jump, lastIndex),
+        },
+      };
+    });
     const company = this.localCompanyId();
     if (company === null) return;
     this.issueVehicleCommand(orderVehicleCommand(company, vehicleId, orders));

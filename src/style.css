@@ -2670,13 +2670,189 @@ select.input {
 
 .hud-order {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto repeat(3, 24px);
+  grid-template-columns: 18px minmax(0, 1fr) auto repeat(4, 24px);
   gap: 4px;
   align-items: center;
   padding: 3px 4px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.04);
   font-size: 11.5px;
+}
+
+.hud-order.is-current {
+  background: var(--hud-accent-soft);
+  box-shadow: inset 2px 0 0 var(--hud-accent);
+}
+
+.hud-order-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.hud-order-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.hud-order-badge {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--hud-muted);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.hud-order-badge.is-full_load,
+.hud-order-badge.is-transfer {
+  color: var(--hud-accent-strong);
+}
+
+.hud-order-badge.is-condition {
+  color: #f0c674;
+}
+
+.hud-order-badge.is-timetable {
+  color: #9fd3ff;
+}
+
+.hud-order-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--hud-border-strong);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.hud-order-editor-title {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.hud-order-fields,
+.hud-order-condition,
+.hud-order-timetable {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hud-order-field {
+  display: flex;
+  flex: 1 1 110px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 96px;
+}
+
+.hud-order-field-label {
+  color: var(--hud-muted);
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.hud-order-input {
+  width: 100%;
+  padding: 3px 5px;
+  border: 1px solid var(--hud-border);
+  border-radius: 5px;
+  background: var(--hud-bg);
+  color: var(--hud-text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.hud-order-check {
+  display: flex;
+  flex: 1 1 100%;
+  align-items: center;
+  gap: 5px;
+  color: var(--hud-muted);
+  font-size: 10.5px;
+}
+
+.hud-order-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.hud-order-button-text {
+  padding: 4px 9px;
+  font-size: 11px;
+}
+
+.hud-vehicle-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--hud-border);
+}
+
+.hud-refit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hud-refit-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border: 1px solid var(--hud-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.hud-refit-option.is-disabled {
+  opacity: 0.62;
+}
+
+.hud-refit-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.hud-refit-name {
+  font-weight: 600;
+  font-size: 11.5px;
+}
+
+.hud-refit-specs {
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-refit-reason {
+  color: var(--hud-muted);
+  font-size: 9.5px;
+}
+
+.hud-share-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.hud-share-row .hud-order-input {
+  flex: 1 1 130px;
+  width: auto;
+}
+
+.hud-panel-hint.is-warning {
+  color: #f0c674;
 }
 
 .hud-order-index {
