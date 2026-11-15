@@ -12,7 +12,7 @@ import { createBuildSettings } from '../game/buildRules';
 import type { QualityLevel } from '../render/quality';
 import type { BuildHintView } from './buildHint';
 import { el } from './dom';
-import { t } from './i18n';
+import { onLanguageChange, t } from './i18n';
 import { formatShortGameDate, type GameDateLike } from './format';
 import { NewsQueue, type NewsKind } from './news';
 import type { NetworkAlertView } from './netlobby';
@@ -76,6 +76,8 @@ export class Hud {
   private topBar: TopBar;
   private audioButton: HTMLButtonElement;
   private photoButton: HTMLButtonElement;
+  private audioMuted = false;
+  private stopAudioLanguage: () => void;
   private selectionPanel: SelectionPanel;
   private depotPanel: DepotPanel;
   private vehiclePanel: VehiclePanel;
@@ -114,13 +116,14 @@ export class Hud {
       text: '🔊',
       attrs: {
         type: 'button',
-        title: 'Couper le son',
-        'aria-label': 'Couper le son',
+        title: t('hud.audio.mute'),
+        'aria-label': t('hud.audio.mute'),
         'aria-pressed': 'false',
       },
     });
     this.audioButton.addEventListener('click', () => this.callbacks.onToggleAudio?.());
     this.audioButton.hidden = this.callbacks.onToggleAudio === undefined;
+    this.stopAudioLanguage = onLanguageChange(() => this.refreshAudioLabel());
     const tools = this.topBar.element.querySelector('.hud-tools');
     (tools ?? this.topBar.element).append(this.audioButton);
 
@@ -345,11 +348,17 @@ export class Hud {
 
   /** Met à jour le bouton mute (état réel du moteur audio). */
   setAudioMuted(muted: boolean): void {
+    this.audioMuted = muted;
     this.audioButton.textContent = muted ? '🔇' : '🔊';
-    this.audioButton.title = muted ? 'Rétablir le son' : 'Couper le son';
-    this.audioButton.setAttribute('aria-label', this.audioButton.title);
+    this.refreshAudioLabel();
     this.audioButton.setAttribute('aria-pressed', muted ? 'true' : 'false');
     this.audioButton.classList.toggle('is-active', muted);
+  }
+
+  private refreshAudioLabel(): void {
+    const label = t(this.audioMuted ? 'hud.audio.unmute' : 'hud.audio.mute');
+    this.audioButton.title = label;
+    this.audioButton.setAttribute('aria-label', label);
   }
 
   /** Affiche le coût estimé et le motif d'invalidité au-dessus de la barre. */
@@ -440,6 +449,7 @@ export class Hud {
 
   dispose(): void {
     document.removeEventListener('keydown', this.handleEscape);
+    this.stopAudioLanguage();
     this.topBar.dispose();
     this.toolbar.dispose();
     this.help.dispose();

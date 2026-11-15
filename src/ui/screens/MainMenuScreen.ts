@@ -170,8 +170,8 @@ export class MainMenuScreen extends BaseScreen {
     if (options.liveSimulation) {
       const live = el('div', { className: 'menu-live' });
       live.append(
-        el('span', { className: 'menu-live-dot' }),
-        el('span', { text: 'Simulation en direct' }),
+        el('span', { className: 'menu-live-dot', attrs: { 'aria-hidden': 'true' } }),
+        el('span', { text: t('menu.live') }),
       );
       this.element.append(live);
     }

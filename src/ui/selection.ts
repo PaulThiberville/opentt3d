@@ -20,10 +20,11 @@ import {
   vehicleStatusLabel,
 } from './labels';
 import { formatDecimal, formatInt, formatRating, formatSignedMoney } from './format';
+import { t } from './i18n';
 import type { SelectionStat, SelectionSummary } from './types';
 
 function cargoText(cargo: { type: string; amount: number; capacity: number } | null): string {
-  if (!cargo) return 'Vide';
+  if (!cargo) return t('selection.vacant');
   return `${cargoLabel(cargo.type)} · ${formatInt(cargo.amount)} / ${formatInt(cargo.capacity)}`;
 }
 
@@ -32,7 +33,7 @@ function waitingTotal(station: { waiting: { amount: number }[] }): number {
 }
 
 function waitingBreakdown(station: { waiting: { cargo: string; amount: number }[] }): string {
-  if (station.waiting.length === 0) return 'Aucune';
+  if (station.waiting.length === 0) return t('selection.noWaiting');
   return station.waiting
     .map((entry) => `${cargoLabel(entry.cargo)} ${formatInt(entry.amount)}`)
     .join(' · ');
@@ -53,21 +54,28 @@ export function describeSelection(
       const company = snapshot.companies.find((item) => item.id === vehicle.company);
       const status = vehicleStatusLabel(vehicle.status);
       const stats: SelectionStat[] = [
-        { label: 'Type', value: vehicleLabel(vehicle.kind) },
-        { label: 'Vitesse', value: `${formatInt(vehicle.speed)} tuiles/j` },
-        { label: 'Cargaison', value: cargoText(vehicle.cargo) },
-        { label: 'Statut', value: status },
+        { label: t('selection.stat.type'), value: vehicleLabel(vehicle.kind) },
         {
-          label: 'Bénéfice',
+          label: t('selection.stat.speed'),
+          value: t('format.tilesPerDay', { value: formatInt(vehicle.speed) }),
+        },
+        { label: t('selection.stat.cargo'), value: cargoText(vehicle.cargo) },
+        { label: t('selection.stat.status'), value: status },
+        {
+          label: t('selection.stat.profit'),
           value: formatSignedMoney(vehicle.profitLastYear),
           tone: vehicle.profitLastYear >= 0 ? 'good' : 'bad',
         },
-        { label: 'Âge', value: `${formatInt(vehicle.ageDays)} j`, tone: 'muted' },
+        {
+          label: t('selection.stat.age'),
+          value: t('selection.unit.days', { value: formatInt(vehicle.ageDays) }),
+          tone: 'muted',
+        },
       ];
       return {
         selection,
-        title: `Véhicule #${vehicle.id} — ${vehicleLabel(vehicle.kind)}`,
-        detail: `${company?.name ?? 'Entreprise inconnue'} · ${status}`,
+        title: t('selection.vehicleTitle', { id: vehicle.id, kind: vehicleLabel(vehicle.kind) }),
+        detail: `${company?.name ?? t('selection.unknownCompany')} · ${status}`,
         stats,
         colour: companyColour(company?.colour ?? 8),
       };
@@ -78,12 +86,19 @@ export function describeSelection(
       return {
         selection,
         title: town.name,
-        detail: `${formatInt(town.population)} habitants · ${formatInt(town.buildings)} bâtiments`,
+        detail: t('selection.townDetail', {
+          population: formatInt(town.population),
+          buildings: formatInt(town.buildings),
+        }),
         stats: [
-          { label: 'Population', value: formatInt(town.population) },
-          { label: 'Bâtiments', value: formatInt(town.buildings) },
-          { label: 'Croissance', value: `+${formatInt(town.growthRate)}/jour`, tone: 'good' },
-          { label: 'Note', value: formatRating(town.rating) },
+          { label: t('selection.stat.population'), value: formatInt(town.population) },
+          { label: t('selection.stat.buildings'), value: formatInt(town.buildings) },
+          {
+            label: t('selection.stat.growth'),
+            value: t('selection.unit.perDay', { value: formatInt(town.growthRate) }),
+            tone: 'good',
+          },
+          { label: t('selection.stat.rating'), value: formatRating(town.rating) },
         ],
         colour: null,
       };
@@ -96,16 +111,23 @@ export function describeSelection(
           ? industry.stocks
               .map((entry) => `${cargoLabel(entry.cargo)} ${formatInt(entry.amount)}`)
               .join(' · ')
-          : 'Aucun';
+          : t('selection.noStock');
       return {
         selection,
         title: industry.name,
-        detail: `${industryKindLabel(industry.kind)} · production ${formatInt(industry.production)}`,
+        detail: t('selection.industryDetail', {
+          kind: industryKindLabel(industry.kind),
+          value: formatInt(industry.production),
+        }),
         stats: [
-          { label: 'Type', value: industryKindLabel(industry.kind) },
-          { label: 'Production', value: formatInt(industry.production) },
-          { label: 'Transporté', value: formatInt(industry.transported), tone: 'good' },
-          { label: 'Stocks', value: stocks, tone: 'muted' },
+          { label: t('selection.stat.type'), value: industryKindLabel(industry.kind) },
+          { label: t('selection.stat.production'), value: formatInt(industry.production) },
+          {
+            label: t('selection.stat.transported'),
+            value: formatInt(industry.transported),
+            tone: 'good',
+          },
+          { label: t('selection.stat.stocks'), value: stocks, tone: 'muted' },
         ],
         colour: null,
       };
@@ -118,16 +140,19 @@ export function describeSelection(
       return {
         selection,
         title: station.name,
-        detail: `${stationLabel(station.kind)} · ${formatInt(total)} unités en attente`,
+        detail: t('selection.stationDetail', {
+          kind: stationLabel(station.kind),
+          count: formatInt(total),
+        }),
         stats: [
-          { label: 'Type', value: stationLabel(station.kind) },
+          { label: t('selection.stat.type'), value: stationLabel(station.kind) },
           {
-            label: 'Attente',
-            value: `${formatInt(total)} unités`,
+            label: t('selection.stat.waiting'),
+            value: t('selection.unit.units', { count: formatInt(total) }),
             tone: total > 0 ? 'good' : 'muted',
           },
-          { label: 'Cargaisons', value: waitingBreakdown(station) },
-          { label: 'Entreprise', value: company?.name ?? '—', tone: 'muted' },
+          { label: t('selection.stat.cargoes'), value: waitingBreakdown(station) },
+          { label: t('selection.stat.company'), value: company?.name ?? '—', tone: 'muted' },
         ],
         colour: company ? companyColour(company.colour) : null,
       };
@@ -138,8 +163,8 @@ export function describeSelection(
       if (x === null || y === null) {
         return {
           selection,
-          title: 'Tuile',
-          detail: 'Sélectionnée sur la carte',
+          title: t('selection.tile'),
+          detail: t('selection.tileSelected'),
           stats: [],
           colour: null,
         };
@@ -154,11 +179,10 @@ export function describeSelection(
       ) {
         return {
           selection,
-          title: `Tuile (${x}, ${y})`,
-          detail: 'Carte non chargée',
+          title: t('selection.tileCoords', { x, y }),
+          detail: t('selection.mapNotLoaded'),
           stats: [
-            { label: 'X', value: formatInt(x) },
-            { label: 'Y', value: formatInt(y) },
+            { label: t('selection.stat.coords'), value: t('selection.tileCoords', { x, y }) },
           ],
           colour: null,
         };
@@ -169,23 +193,30 @@ export function describeSelection(
       const ownerId = map.owner[index] ?? COMPANY_NONE;
       const owner =
         ownerId === COMPANY_NONE
-          ? 'Aucune'
+          ? t('selection.ownerNone')
           : (snapshot.companies.find((company) => company.id === ownerId)?.name ?? `#${ownerId}`);
       const depot = depotAtTile(snapshot, x, y);
       const typeLabel = depot ? depotKindLabel(depot.kind) : tileKindLabel(kind);
       return {
         selection,
-        title: depot ? `${typeLabel} (${x}, ${y})` : `Tuile (${x}, ${y})`,
-        detail: `${typeLabel} · hauteur ${formatDecimal(Number(height))}`,
+        title: depot ? `${typeLabel} (${x}, ${y})` : t('selection.tileCoords', { x, y }),
+        detail: t('selection.tileDetail', {
+          type: typeLabel,
+          height: formatDecimal(Number(height)),
+        }),
         stats: [
-          { label: 'Type', value: typeLabel },
-          { label: 'Hauteur', value: formatDecimal(Number(height)) },
+          { label: t('selection.stat.type'), value: typeLabel },
+          { label: t('selection.stat.height'), value: formatDecimal(Number(height)) },
           {
-            label: 'Propriétaire',
+            label: t('selection.stat.owner'),
             value: owner,
             tone: ownerId === COMPANY_NONE ? 'muted' : undefined,
           },
-          { label: 'Coordonnées', value: `${formatInt(x)} · ${formatInt(y)}`, tone: 'muted' },
+          {
+            label: t('selection.stat.coords'),
+            value: `${formatInt(x)} · ${formatInt(y)}`,
+            tone: 'muted',
+          },
         ],
         colour: null,
       };

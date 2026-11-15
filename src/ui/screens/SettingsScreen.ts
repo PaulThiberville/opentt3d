@@ -228,7 +228,8 @@ export class SettingsScreen extends BaseScreen {
         'aria-describedby': 'settings-relay-hint',
       },
     });
-    relay.value = this.settings.p2pRelay || DEFAULT_P2P_RELAY;
+    const relayValue = this.settings.p2pRelay || DEFAULT_P2P_RELAY;
+    relay.value = relayValue === DEFAULT_P2P_RELAY ? t('settings.relay.auto') : relayValue;
     relayField.append(fieldLabel(t('settings.relay.label'), 'settings-relay'), relay);
     relayField.append(this.hint('settings-relay-hint', t('settings.relay.hint')));
 
