@@ -15,6 +15,9 @@ import {
   ordersFromSnapshot,
 } from '../game/vehicleRules';
 import { RAIL_TYPE_LABELS } from '../game/railRules';
+import { modelKindFor } from '../game/vehicleInterpolation';
+import { companyColour } from '../render/tileVisuals';
+import { vehicleVariantFor, type VehicleVariant } from '../render/vehicleModels';
 import { cargoLabel, vehicleLabel, vehicleStatusLabel } from './labels';
 import { formatInt, formatMoney } from './format';
 import { describeSelection } from './selection';
@@ -22,6 +25,26 @@ import type { DepotPanelView, VehiclePanelView } from './types';
 
 /** Distance maximale (tuiles) pour considérer un véhicule « dans » le dépôt. */
 const DEPOT_RADIUS = 1.25;
+
+/**
+ * Archétype visuel de chaque modèle du catalogue.
+ *
+ * Le catalogue du contrat ne transporte pas encore de variante : on l'aligne
+ * ici sur les archétypes du rendu principal, sans modifier les règles de jeu.
+ */
+const CATALOGUE_VARIANTS: Record<string, VehicleVariant> = {
+  bus_city: 'bus-city',
+  bus_intercity: 'bus-coach',
+  truck_flatbed: 'truck-flat',
+  truck_tanker: 'truck-tanker',
+  rail_autorail: 'train-coach',
+  rail_freight: 'train-steam',
+};
+
+/** Variante d'un modèle du catalogue, avec repli sur la famille du contrat. */
+function catalogueVariant(modelId: string, kind: string): VehicleVariant {
+  return CATALOGUE_VARIANTS[modelId] ?? (kind === 'train' ? 'train-coach' : 'truck-flat');
+}
 
 /** Panneau d'un dépôt : modèles achetables et véhicules sur place. */
 export function describeDepotPanel(
@@ -34,6 +57,8 @@ export function describeDepotPanel(
   if (!depot) return null;
   const company = snapshot.companies.find((item) => item.id === companyId) ?? null;
   const money = company?.money ?? 0;
+  // Livrée des vignettes : couleur d'entreprise, ou bleu par défaut.
+  const colour = companyColour(company?.colour ?? 8);
   const kindLabel = depotKindLabel(depot.kind);
   const models = modelsForDepot(depot.kind, depot.railType).map((model) => ({
     id: model.id,
@@ -45,6 +70,8 @@ export function describeDepotPanel(
     maintenance: model.maintenance,
     description: model.description,
     affordable: money >= model.cost,
+    variant: catalogueVariant(model.id, model.kind),
+    colour,
   }));
   const centreX = depot.x + depot.width / 2;
   const centreY = depot.y + depot.height / 2;
@@ -68,6 +95,8 @@ export function describeDepotPanel(
         detail: `${vehicleStatusLabel(vehicle.status)} · ${cargo}`,
         canStart: vehicle.orderTargets.length > 0,
         canStop: false,
+        variant: vehicleVariantFor(modelKindFor(vehicle), vehicle.id),
+        colour,
       };
     });
   return {

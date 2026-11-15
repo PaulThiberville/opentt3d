@@ -8,6 +8,7 @@
 import type { TownActionKind, WorldSnapshot } from '../engine/protocol';
 import type { GameSpeed, Selection } from '../game/Game';
 import type { QualityLevel } from '../render/quality';
+import type { VehicleVariant } from '../render/vehicleModels';
 import type { NewsKind } from './news';
 
 export interface SelectionStat {
@@ -89,6 +90,10 @@ export interface DepotModelView {
   maintenance: number;
   description: string;
   affordable: boolean;
+  /** Archétype visuel utilisé pour la vignette. */
+  variant: VehicleVariant;
+  /** Couleur d'entreprise 0xRRGGBB de la livrée de la vignette. */
+  colour: number;
 }
 
 export interface DepotVehicleView {
@@ -97,6 +102,10 @@ export interface DepotVehicleView {
   detail: string;
   canStart: boolean;
   canStop: boolean;
+  /** Archétype visuel réel du véhicule sur place. */
+  variant: VehicleVariant;
+  /** Couleur d'entreprise 0xRRGGBB de la livrée de la vignette. */
+  colour: number;
 }
 
 export interface DepotPanelView {

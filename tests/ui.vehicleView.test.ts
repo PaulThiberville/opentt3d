@@ -9,6 +9,7 @@ import {
   type VehicleSnapshot,
   type WorldSnapshot,
 } from '../src/engine/protocol';
+import { companyColour } from '../src/render/tileVisuals';
 import { describeDepotPanel, describeVehiclePanel } from '../src/ui/vehicleView';
 
 function makeMap(width = 16, height = 16): MapSnapshot {
@@ -145,6 +146,40 @@ describe('panneau dépôt', () => {
     const view = describeDepotPanel(snapshot([], 100_000, [depot({ id: 6, kind: 'rail' })]), 0, 6);
     expect(view?.models.length).toBeGreaterThan(0);
     expect(view?.models.every((model) => model.id.startsWith('rail_'))).toBe(true);
+  });
+
+  it('expose la variante visuelle et la livrée de chaque vignette', () => {
+    const map = makeMap();
+    markDepot(map, 2, 2, 'road');
+    const view = describeDepotPanel(snapshot([vehicle()]), 0, 5);
+    const byId = new Map(view?.models.map((model) => [model.id, model]));
+    expect(byId.get('bus_city')?.variant).toBe('bus-city');
+    expect(byId.get('bus_intercity')?.variant).toBe('bus-coach');
+    expect(byId.get('truck_flatbed')?.variant).toBe('truck-flat');
+    expect(byId.get('truck_tanker')?.variant).toBe('truck-tanker');
+    const expectedColour = companyColour(8);
+    expect(view?.models.every((model) => model.colour === expectedColour)).toBe(true);
+    // Véhicule routier de test : marchandises, id impair → citerne.
+    expect(view?.vehicles[0]?.variant).toBe('truck-tanker');
+    expect(view?.vehicles[0]?.colour).toBe(expectedColour);
+  });
+
+  it('choisit une variante ferroviaire pour le catalogue rail', () => {
+    const map = makeMap();
+    markDepot(map, 2, 2, 'rail');
+    const view = describeDepotPanel(snapshot([], 100_000, [depot({ id: 6, kind: 'rail' })]), 0, 6);
+    const byId = new Map(view?.models.map((model) => [model.id, model]));
+    expect(byId.get('rail_autorail')?.variant).toBe('train-coach');
+    expect(byId.get('rail_freight')?.variant).toBe('train-steam');
+  });
+
+  it('suit la livrée de l’entreprise pour les vignettes', () => {
+    const map = makeMap();
+    markDepot(map, 2, 2, 'road');
+    const world = snapshot([]);
+    world.companies = [{ ...company(), colour: 3 }];
+    const view = describeDepotPanel(world, 0, 5);
+    expect(view?.models.every((model) => model.colour === companyColour(3))).toBe(true);
   });
 });
 
