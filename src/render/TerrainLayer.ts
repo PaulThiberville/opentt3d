@@ -14,7 +14,7 @@
  */
 
 import * as THREE from 'three';
-import type { MapSnapshot } from '../engine/protocol';
+import type { MapSnapshot, TileKind } from '../engine/protocol';
 import {
   HEIGHT_SCALE,
   cornerHeightWorld,
@@ -28,6 +28,23 @@ import { qualitySettings, type QualityLevel } from './quality';
 
 export const CHUNK_SIZE = 32;
 const WATER_OFFSET = 0.5;
+
+/**
+ * Émission nocturne par type de tuile : les routes, rails et ouvrages restent
+ * lisibles à l'échelle carte sans ajouter de géométrie ni de draw call.
+ */
+const NIGHT_GLOW: Partial<Record<TileKind, readonly [number, number, number]>> = {
+  road: [0.14, 0.09, 0.04],
+  rail: [0.07, 0.1, 0.14],
+  bridge: [0.11, 0.075, 0.035],
+  tunnel: [0.04, 0.04, 0.03],
+  station: [0.1, 0.075, 0.04],
+  airport: [0.06, 0.07, 0.09],
+  dock: [0.07, 0.05, 0.025],
+  water: [0.015, 0.04, 0.07],
+  river: [0.015, 0.04, 0.07],
+  canal: [0.015, 0.04, 0.07],
+};
 
 interface Chunk {
   cx: number;
@@ -70,6 +87,10 @@ export class TerrainLayer {
   private groundMaterial: THREE.MeshLambertMaterial;
   private waterMaterial: THREE.MeshPhongMaterial;
   private waterTime: { value: number } | null = null;
+  private nightUniform: { value: number } = { value: 0 };
+  private nightAmount = 0;
+  private oceanDayColor = new THREE.Color(0x1b4664);
+  private oceanNightColor = new THREE.Color(0x0a1828);
   private elapsed = 0;
   private animateWater = true;
   private chunksX = 0;
@@ -83,6 +104,25 @@ export class TerrainLayer {
   constructor() {
     this.group.name = 'terrain';
     this.groundMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: false });
+    this.groundMaterial.onBeforeCompile = (shader) => {
+      shader.uniforms.uNight = this.nightUniform;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          '#include <common>\nattribute vec3 aNightGlow;\nvarying vec3 vNightGlow;',
+        )
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vNightGlow = aNightGlow;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          '#include <common>\nuniform float uNight;\nvarying vec3 vNightGlow;',
+        )
+        .replace(
+          '#include <emissivemap_fragment>',
+          '#include <emissivemap_fragment>\n  totalEmissiveRadiance += vNightGlow * uNight;',
+        );
+    };
+    this.groundMaterial.customProgramCacheKey = () => 'opentt3d-terrain-night-v1';
     this.waterMaterial = this.createWaterMaterial();
     // Fond océanique : masque la découpe de la carte et donne une île crédible.
     this.oceanGeometry = new THREE.PlaneGeometry(1, 1);
@@ -113,6 +153,7 @@ export class TerrainLayer {
     });
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = this.waterTime ?? { value: 0 };
+      shader.uniforms.uNight = this.nightUniform;
       this.waterTime = shader.uniforms.uTime as { value: number };
       shader.vertexShader = shader.vertexShader
         .replace(
@@ -130,7 +171,7 @@ export class TerrainLayer {
       shader.fragmentShader = shader.fragmentShader
         .replace(
           '#include <common>',
-          '#include <common>\nuniform float uTime;\nvarying vec3 vWaterWorld;',
+          '#include <common>\nuniform float uTime;\nuniform float uNight;\nvarying vec3 vWaterWorld;',
         )
         .replace(
           '#include <color_fragment>',
@@ -138,9 +179,14 @@ export class TerrainLayer {
            float waveA = sin( uTime * 1.15 + vWaterWorld.x * 0.55 + vWaterWorld.z * 0.45 );
            float waveB = sin( uTime * 0.7 - vWaterWorld.x * 0.2 + vWaterWorld.z * 0.35 );
            diffuseColor.rgb *= 1.0 + waveA * 0.045 + waveB * 0.035;`,
+        )
+        .replace(
+          '#include <emissivemap_fragment>',
+          `#include <emissivemap_fragment>
+           totalEmissiveRadiance += vec3( 0.035, 0.075, 0.13 ) * uNight;`,
         );
     };
-    material.customProgramCacheKey = () => 'opentt3d-water-v1';
+    material.customProgramCacheKey = () => 'opentt3d-water-night-v1';
     return material;
   }
 
@@ -237,6 +283,7 @@ export class TerrainLayer {
     const tileCount = width * height;
     const positions = new Float32Array(tileCount * 6 * 3);
     const colours = new Float32Array(tileCount * 6 * 3);
+    const nightColours = new Float32Array(tileCount * 6 * 3);
     let vertex = 0;
 
     // Hauteurs de coin du chunk, calculées une fois (33×33 au maximum).
@@ -270,6 +317,10 @@ export class TerrainLayer {
           ),
           rgb,
         );
+        const glow = NIGHT_GLOW[kind];
+        const glowR = glow?.[0] ?? 0;
+        const glowG = glow?.[1] ?? 0;
+        const glowB = glow?.[2] ?? 0;
 
         const hA = cornerAt(tx, ty);
         const hB = cornerAt(tx + 1, ty);
@@ -285,6 +336,9 @@ export class TerrainLayer {
         colours[vertex * 3] = rgb.r;
         colours[vertex * 3 + 1] = rgb.g;
         colours[vertex * 3 + 2] = rgb.b;
+        nightColours[vertex * 3] = glowR;
+        nightColours[vertex * 3 + 1] = glowG;
+        nightColours[vertex * 3 + 2] = glowB;
         vertex += 1;
         positions[vertex * 3] = px + 1;
         positions[vertex * 3 + 1] = hC;
@@ -292,6 +346,9 @@ export class TerrainLayer {
         colours[vertex * 3] = rgb.r;
         colours[vertex * 3 + 1] = rgb.g;
         colours[vertex * 3 + 2] = rgb.b;
+        nightColours[vertex * 3] = glowR;
+        nightColours[vertex * 3 + 1] = glowG;
+        nightColours[vertex * 3 + 2] = glowB;
         vertex += 1;
         positions[vertex * 3] = px + 1;
         positions[vertex * 3 + 1] = hB;
@@ -299,6 +356,9 @@ export class TerrainLayer {
         colours[vertex * 3] = rgb.r;
         colours[vertex * 3 + 1] = rgb.g;
         colours[vertex * 3 + 2] = rgb.b;
+        nightColours[vertex * 3] = glowR;
+        nightColours[vertex * 3 + 1] = glowG;
+        nightColours[vertex * 3 + 2] = glowB;
         vertex += 1;
 
         // Triangle A, D, C
@@ -308,6 +368,9 @@ export class TerrainLayer {
         colours[vertex * 3] = rgb.r;
         colours[vertex * 3 + 1] = rgb.g;
         colours[vertex * 3 + 2] = rgb.b;
+        nightColours[vertex * 3] = glowR;
+        nightColours[vertex * 3 + 1] = glowG;
+        nightColours[vertex * 3 + 2] = glowB;
         vertex += 1;
         positions[vertex * 3] = px;
         positions[vertex * 3 + 1] = hD;
@@ -315,6 +378,9 @@ export class TerrainLayer {
         colours[vertex * 3] = rgb.r;
         colours[vertex * 3 + 1] = rgb.g;
         colours[vertex * 3 + 2] = rgb.b;
+        nightColours[vertex * 3] = glowR;
+        nightColours[vertex * 3 + 1] = glowG;
+        nightColours[vertex * 3 + 2] = glowB;
         vertex += 1;
         positions[vertex * 3] = px + 1;
         positions[vertex * 3 + 1] = hC;
@@ -322,6 +388,9 @@ export class TerrainLayer {
         colours[vertex * 3] = rgb.r;
         colours[vertex * 3 + 1] = rgb.g;
         colours[vertex * 3 + 2] = rgb.b;
+        nightColours[vertex * 3] = glowR;
+        nightColours[vertex * 3 + 1] = glowG;
+        nightColours[vertex * 3 + 2] = glowB;
         vertex += 1;
       }
     }
@@ -334,6 +403,10 @@ export class TerrainLayer {
     groundGeometry.setAttribute(
       'color',
       new THREE.BufferAttribute(colours.subarray(0, vertex * 3), 3),
+    );
+    groundGeometry.setAttribute(
+      'aNightGlow',
+      new THREE.BufferAttribute(nightColours.subarray(0, vertex * 3), 3),
     );
     groundGeometry.computeVertexNormals();
     groundGeometry.computeBoundingSphere();
@@ -447,6 +520,17 @@ export class TerrainLayer {
     this.groundMaterial.dithering = level !== 'low';
     this.waterMaterial.shininess =
       settings.level === 'low' ? 40 : settings.level === 'high' ? 130 : 90;
+  }
+
+  /** 0 = jour, 1 = nuit : active l'émission des routes, rails et de l'eau. */
+  setNight(amount: number): void {
+    this.nightAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
+    this.nightUniform.value = this.nightAmount;
+    this.oceanMaterial.color.copy(this.oceanDayColor).lerp(this.oceanNightColor, this.nightAmount);
+  }
+
+  get night(): number {
+    return this.nightAmount;
   }
 
   update(deltaSeconds: number): void {

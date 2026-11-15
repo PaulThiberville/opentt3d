@@ -74,15 +74,16 @@ export class CityLayer {
            if ( uNight > 0.001 ) {
              float facade = 1.0 - step( 0.5, abs( vBoxNormal.y ) );
              float u = abs( vBoxNormal.x ) > abs( vBoxNormal.z ) ? vBoxPosition.z : vBoxPosition.x;
-             vec2 grid = vec2( u * 3.0, vBoxPosition.y * 4.0 );
+             vec2 grid = vec2( u * 2.0, vBoxPosition.y * 3.0 );
              vec2 cell = fract( grid );
-             float frame = step( 0.3, cell.x ) * step( cell.x, 0.7 ) *
-                           step( 0.28, cell.y ) * step( cell.y, 0.72 );
+             float frame = step( 0.2, cell.x ) * step( cell.x, 0.8 ) *
+                           step( 0.2, cell.y ) * step( cell.y, 0.8 );
              float seed = fract( sin( dot(
                vec3( floor( grid.x ), floor( grid.y ), dot( vColor.rgb, vec3( 31.0, 17.0, 7.0 ) ) ),
                vec3( 12.9898, 78.233, 37.719 ) ) ) * 43758.5453 );
-             float lit = step( 0.42, seed );
-             totalEmissiveRadiance += vec3( 1.0, 0.58, 0.24 ) * facade * frame * lit * uNight * 1.1;
+             float lit = step( 0.35, seed );
+             totalEmissiveRadiance += vColor.rgb * facade * uNight * 0.045;
+             totalEmissiveRadiance += vec3( 1.0, 0.56, 0.2 ) * facade * frame * lit * uNight * 1.2;
            }`,
         );
     };
@@ -199,6 +200,10 @@ export class CityLayer {
   setNight(amount: number): void {
     this.nightAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
     this.nightUniform.value = this.nightLights ? this.nightAmount : 0;
+  }
+
+  get night(): number {
+    return this.nightAmount;
   }
 
   /** Active/désactive les fenêtres éclairées (preset basse qualité). */

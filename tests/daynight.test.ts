@@ -12,25 +12,25 @@ import {
 } from '../src/render/dayNight';
 
 describe('conversion date de jeu → phase', () => {
-  it('expose 74 ticks par jour et démarre à l’aube', () => {
+  it('expose 74 ticks par jour et démarre en matinée', () => {
     expect(DAY_TICKS).toBe(74);
-    expect(phaseFromDayFraction(0)).toBeCloseTo(0.25, 6);
-    expect(phaseFromDayFraction(18.5)).toBeCloseTo(0.5, 6);
-    expect(phaseFromDayFraction(37)).toBeCloseTo(0.75, 6);
-    expect(phaseFromDayFraction(55.5)).toBeCloseTo(0, 6);
+    expect(phaseFromDayFraction(0)).toBeCloseTo(0.3, 6);
+    expect(phaseFromDayFraction(14.8)).toBeCloseTo(0.5, 6);
+    expect(phaseFromDayFraction(33.3)).toBeCloseTo(0.75, 6);
+    expect(phaseFromDayFraction(51.8)).toBeCloseTo(0, 6);
   });
 
   it('normalise les valeurs hors bornes', () => {
-    expect(phaseFromDayFraction(-18.5)).toBeCloseTo(0, 6);
-    expect(phaseFromDayFraction(DAY_TICKS * 3)).toBeCloseTo(0.25, 6);
-    expect(phaseFromDayFraction(Number.NaN)).toBeCloseTo(0.25, 6);
+    expect(phaseFromDayFraction(-22.2)).toBeCloseTo(0, 6);
+    expect(phaseFromDayFraction(DAY_TICKS * 3)).toBeCloseTo(0.3, 6);
+    expect(phaseFromDayFraction(Number.NaN)).toBeCloseTo(0.3, 6);
     expect(wrap01(1.25)).toBeCloseTo(0.25, 6);
     expect(wrap01(-0.25)).toBeCloseTo(0.75, 6);
   });
 
   it('lit directement le snapshot d’économie', () => {
-    expect(phaseFromEconomy({ dayFraction: 18.5 })).toBeCloseTo(0.5, 6);
-    expect(phaseFromEconomy({ dayFraction: 0 })).toBeCloseTo(0.25, 6);
+    expect(phaseFromEconomy({ dayFraction: 14.8 })).toBeCloseTo(0.5, 6);
+    expect(phaseFromEconomy({ dayFraction: 0 })).toBeCloseTo(0.3, 6);
   });
 });
 
@@ -106,16 +106,24 @@ describe('position et couleur du soleil', () => {
     expect(dawn.colour).not.toBe(noon.colour);
   });
 
+  it('démarre une nouvelle partie en matinée lisible', () => {
+    const start = sunState(phaseFromDayFraction(0));
+    expect(start.daylight).toBeGreaterThan(0.8);
+    expect(start.night).toBeLessThan(0.1);
+    expect(start.intensity).toBeGreaterThan(2);
+    expect(start.segment).toBe('day');
+  });
+
   it('allume étoiles et lune uniquement la nuit', () => {
     expect(sunState(0.5).starOpacity).toBe(0);
     expect(sunState(0.5).moonIntensity).toBe(0);
     expect(sunState(0).starOpacity).toBeGreaterThan(0.95);
-    expect(sunState(0).moonIntensity).toBeGreaterThan(0.3);
+    expect(sunState(0).moonIntensity).toBeGreaterThan(0.9);
   });
 
   it('garde une ambiance nocturne non nulle pour la lisibilité', () => {
     const night = sunState(0);
-    expect(night.ambient).toBeGreaterThanOrEqual(0.4);
+    expect(night.ambient).toBeGreaterThanOrEqual(0.75);
     expect(night.hemiGround).not.toBe(0);
     expect(night.fogColour).not.toBe(night.skyColour);
   });

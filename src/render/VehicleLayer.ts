@@ -46,6 +46,8 @@ export class VehicleLayer {
 
   private geometries: Record<VehicleModelKind, THREE.BufferGeometry>;
   private material: THREE.MeshLambertMaterial;
+  private nightUniform: { value: number } = { value: 0 };
+  private nightAmount = 0;
   private slots = new Map<VehicleModelKind, ModelSlot>();
   private halo: THREE.Mesh;
   private haloMaterial: THREE.MeshBasicMaterial;
@@ -66,6 +68,17 @@ export class VehicleLayer {
     this.group.name = 'vehicles';
     this.geometries = buildVehicleGeometries();
     this.material = new THREE.MeshLambertMaterial({ vertexColors: true });
+    this.material.onBeforeCompile = (shader) => {
+      shader.uniforms.uNight = this.nightUniform;
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform float uNight;')
+        .replace(
+          '#include <emissivemap_fragment>',
+          `#include <emissivemap_fragment>
+           totalEmissiveRadiance += ( vColor.rgb * 0.5 + vec3( 0.06, 0.045, 0.02 ) ) * uNight;`,
+        );
+    };
+    this.material.customProgramCacheKey = () => 'opentt3d-vehicles-night-v1';
 
     const haloGeometry = new THREE.RingGeometry(0.52, 0.78, 28);
     haloGeometry.rotateX(-Math.PI / 2);
@@ -168,6 +181,16 @@ export class VehicleLayer {
   setShadows(enabled: boolean): void {
     this.shadows = enabled;
     for (const slot of this.slots.values()) slot.mesh.castShadow = enabled;
+  }
+
+  /** 0 = jour, 1 = nuit : léger halo émissif pour rester lisible en carte. */
+  setNight(amount: number): void {
+    this.nightAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
+    this.nightUniform.value = this.nightAmount;
+  }
+
+  get night(): number {
+    return this.nightAmount;
   }
 
   setSelected(id: number | null): void {

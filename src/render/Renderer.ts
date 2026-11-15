@@ -327,7 +327,7 @@ export class Renderer {
       this.scene.background = this.skyColor.clone();
     }
     this.fog.color.setHex(state.fogColour);
-    this.webgl.toneMappingExposure = 0.96 + 0.06 * state.daylight;
+    this.webgl.toneMappingExposure = 1.12 - 0.1 * state.daylight;
 
     const showSky = this.settings.nightSky;
     this.stars.visible = showSky && state.starOpacity > 0.02;

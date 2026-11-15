@@ -127,7 +127,14 @@ export class WorldView {
     const phase = phaseFromEconomy(snapshot.economy);
     this.night = sunState(phase).night;
     this.timeOfDay?.setTimeOfDay(phase);
-    this.cityLayer.setNight(this.timeOfDay?.nightAmount ?? this.night);
+    this.applyNight(this.night);
+  }
+
+  /** Diffuse le facteur nuit aux couches qui ont un rendu nocturne. */
+  private applyNight(amount: number): void {
+    this.terrain.setNight(amount);
+    this.vehicles.setNight(amount);
+    this.cityLayer.setNight(amount);
   }
 
   /** Frame : interpolation, entités, caméra, picking au survol. */
@@ -143,7 +150,7 @@ export class WorldView {
     this.terrain.update(deltaSeconds);
     this.vegetation.update(deltaSeconds);
     this.industries.update(deltaSeconds, this.camera.position);
-    this.cityLayer.setNight(this.timeOfDay?.nightAmount ?? this.night);
+    this.applyNight(this.timeOfDay?.nightAmount ?? this.night);
     this.updateHover();
   }
 

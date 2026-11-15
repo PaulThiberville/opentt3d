@@ -15,10 +15,10 @@ import type { EconomySnapshot } from '../engine/protocol';
 export const DAY_TICKS = 74;
 
 /**
- * Convention de rendu : la journée de jeu démarre à l'aube (06:00). On décale
- * donc la phase d'un quart de journée pour que minuit reste à 0 et midi à 0,5.
+ * Convention de rendu : une nouvelle journée de jeu démarre en matinée (07:12).
+ * La phase reste linéaire sur 74 ticks et minuit reste à 0, midi à 0,5.
  */
-export const DAY_START_OFFSET = 0.25;
+export const DAY_START_OFFSET = 0.3;
 
 export const TAU = Math.PI * 2;
 /** Élévation maximale du soleil (radians), volontairement sous le zénith. */
@@ -130,13 +130,13 @@ export function mixColour(a: number, b: number, t: number): number {
   );
 }
 
-const NIGHT_SKY = 0x0b1322;
+const NIGHT_SKY = 0x0c1628;
 const DUSK_SKY = 0xe98a5d;
 const DAY_SKY = 0x9dc3dc;
-const NIGHT_HEMI_SKY = 0x22304a;
+const NIGHT_HEMI_SKY = 0x6b84ad;
 const DUSK_HEMI_SKY = 0xcf9a7e;
 const DAY_HEMI_SKY = 0xe6f2ff;
-const NIGHT_HEMI_GROUND = 0x101822;
+const NIGHT_HEMI_GROUND = 0x283444;
 const DAY_HEMI_GROUND = 0x38412f;
 const DUSK_SUN = 0xff9a5c;
 const DAY_SUN = 0xfff4dd;
@@ -161,7 +161,7 @@ export function sunState(phase: number): SunState {
     z: Math.sin(azimuth) * cosElevation,
   };
 
-  const daylight = smoothstep(-0.02, 0.3, altitude);
+  const daylight = smoothstep(-0.18, 0.35, altitude);
   const night = 1 - smoothstep(-0.22, 0.06, altitude);
   const warm = smoothstep(-0.05, 0.5, altitude);
   const skyColour =
@@ -181,8 +181,8 @@ export function sunState(phase: number): SunState {
     azimuth,
     direction,
     colour: mixColour(DUSK_SUN, DAY_SUN, warm),
-    intensity: 2.35 * smoothstep(-0.05, 0.55, altitude),
-    moonIntensity: 0.55 * smoothstep(0.25, 0.9, night),
+    intensity: 2.35 * smoothstep(-0.28, 0.3, altitude),
+    moonIntensity: 1.0 * smoothstep(0.2, 0.85, night),
     skyColour,
     fogColour: mixColour(skyColour, DAY_SKY, 0.08),
     hemiSky: mixColour(
@@ -191,7 +191,7 @@ export function sunState(phase: number): SunState {
       smoothstep(0.12, 0.5, altitude),
     ),
     hemiGround: mixColour(NIGHT_HEMI_GROUND, DAY_HEMI_GROUND, daylight),
-    ambient: 0.58 + 0.42 * daylight,
+    ambient: 0.82 + 0.18 * daylight,
     night,
     daylight,
     starOpacity: smoothstep(0.45, 0.95, night),
