@@ -141,4 +141,30 @@ suite('intégration moteur WASM réel', () => {
       engine.dispose();
     }
   }, 120_000);
+
+  it('sauvegarde et recharge l’état réel', async () => {
+    const first = new WasmEngine({ factory: await createNodeFactory() });
+    const second = new WasmEngine({ factory: await createNodeFactory() });
+    try {
+      await first.init({ moduleUrl: pathToFileURL(MODULE_PATH).href });
+      await first.newGame({ seed: 42, width: 128, height: 128 });
+      first.step(100);
+      const hash = first.hash();
+      const tick = first.status().tick;
+      const saved = await first.save();
+      expect(saved.length).toBeGreaterThan(1000);
+
+      await second.init({ moduleUrl: pathToFileURL(MODULE_PATH).href });
+      await second.load(saved);
+      expect(second.hash()).toBe(hash);
+      expect(second.status().tick).toBe(tick);
+
+      first.step(100);
+      second.step(100);
+      expect(second.hash()).toBe(first.hash());
+    } finally {
+      first.dispose();
+      second.dispose();
+    }
+  }, 120_000);
 });
