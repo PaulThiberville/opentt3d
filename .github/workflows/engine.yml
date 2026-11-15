@@ -4,6 +4,8 @@ name: Engine WASM (manuel)
 # Manuel uniquement : un build à froid coûte ~30-40 min de quota Actions.
 # Pas de cache persistant (> 1 h interdit) ; l'artefact est conservé 1 jour.
 # Pour un usage régulier, préférer `npm run engine:build` en local.
+# NE JAMAIS ajouter de déclencheur push/tags/release : les artefacts lourds ne
+# sont jamais produits automatiquement à chaque version.
 on:
   workflow_dispatch:
 
