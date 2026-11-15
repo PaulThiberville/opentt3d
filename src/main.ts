@@ -111,8 +111,9 @@ const webglAvailable = Renderer.isWebGLAvailable();
 
 /**
  * Moteur sélectionné par `?engine=mock|wasm`. Le mock reste le défaut : le
- * moteur réel n'est activé que sur demande explicite, le temps de valider
- * l'intégration (issue #13). Le réseau force le mock (#73).
+ * moteur réel n'est activé que sur demande explicite. En réseau, ce choix est
+ * le réglage initial du salon ; il est ensuite figé dans `StartInfo` pour que
+ * tous les pairs utilisent le même moteur (#93).
  */
 function readEngineMode(): EngineMode {
   const raw = new URLSearchParams(window.location.search).get('engine');
@@ -324,6 +325,7 @@ function createRoom(request: CreateRoomRequest): void {
       isPublic: request.isPublic,
       directory: request.isPublic && directory ? directory : undefined,
       settings: {
+        engine: engineMode,
         mapSize: request.mapSize,
         difficulty: request.difficulty,
         maxPlayers: 8,
@@ -615,7 +617,7 @@ async function startNetworkGame(info: StartInfo): Promise<void> {
     uiRoot: uiMount,
     config: mapped.options,
     settings,
-    engine: 'mock',
+    engine: info.settings.engine,
     network: info,
     callbacks: {
       onProgress: (progress, message) => loading.setProgress(progress, message),

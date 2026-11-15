@@ -13,11 +13,13 @@ import {
   LOBBY_CHANNELS,
   LOBBY_PROTOCOL_VERSION,
   isRoomId,
+  type LobbyEngine,
   type LobbySettings,
   type LobbyState,
   type StartInfo,
 } from '../net/lobby-types';
 import type { Transport, TransportKind } from '../net/transport';
+import { engineBuildId } from '../engine/loadEngine';
 import type { GameSpeed } from '../game/Game';
 import type { QualityLevel } from '../render/quality';
 import type { NewGameOptions } from './gameOptions';
@@ -137,8 +139,10 @@ const CLIMATE_TO_ENGINE: Record<LobbySettings['climate'], NewGameOptions['climat
 /**
  * Les pairs doivent générer exactement le même monde : seed, taille, climat,
  * difficulté et nombre d'IA viennent tous du `StartInfo`, jamais des réglages
- * locaux. Le mock plafonne les cartes à 512 ; 1024/2048 sont ramenées à 512
- * avec un avertissement visible.
+ * locaux. Le mock plafonne les cartes à 512 et les IA à trois ; le WASM accepte
+ * davantage d'IA. Les cartes du salon au-delà de 512 sont ramenées à 512 sur
+ * tous les pairs, car le contrat `NewGameOptions` de l'interface n'expose que
+ * 128/256/512.
  */
 export function mapStartInfoToGameOptions(
   info: Pick<StartInfo, 'seed' | 'settings' | 'players'>,
@@ -146,18 +150,25 @@ export function mapStartInfoToGameOptions(
   startYear = 1950,
 ): MappedGameOptions {
   const warnings: string[] = [];
+  const wasm = info.settings.engine === 'wasm';
   let size: NewGameOptions['size'];
-  if (info.settings.mapSize === 512) size = 512;
-  else if (info.settings.mapSize === 256) size = 256;
-  else {
+  if (info.settings.mapSize === 512) {
+    size = 512;
+  } else if (info.settings.mapSize === 256) {
+    size = 256;
+  } else {
+    // L'interface de partie n'expose que 128/256/512. Les grandes cartes du
+    // salon sont ramenées à 512 partout : c'est le seul moyen de garantir la
+    // même configuration sur tous les pairs sans modifier le contrat UI.
     size = 512;
     warnings.push(
-      `Carte ${info.settings.mapSize}×${info.settings.mapSize} ramenée à 512×512 en mode mock.`,
+      `Carte ${info.settings.mapSize}×${info.settings.mapSize} ramenée à 512×512 ` +
+        `pour cette version${wasm ? ' (moteur WASM)' : ' (mode mock)'}.`,
     );
   }
 
   const aiCount = info.players.filter((player) => player.ai !== null).length;
-  if (aiCount > 3) {
+  if (!wasm && aiCount > 3) {
     warnings.push('Le mock limite la partie à trois entreprises IA.');
   }
 
@@ -167,7 +178,7 @@ export function mapStartInfoToGameOptions(
       size,
       quality,
       difficulty: DIFFICULTY_TO_ENGINE[info.settings.difficulty] as NewGameOptions['difficulty'],
-      aiCompanies: Math.min(3, aiCount),
+      aiCompanies: wasm ? aiCount : Math.min(3, aiCount),
       climate: CLIMATE_TO_ENGINE[info.settings.climate],
       startYear,
     },
@@ -175,11 +186,49 @@ export function mapStartInfoToGameOptions(
   };
 }
 
+export interface NetworkEnginePlan {
+  mode: LobbyEngine;
+  /** Identifiant de build annoncé par le salon. */
+  build: string;
+  /** Message bloquant quand le mode ou la version d'artefacts diffère. */
+  error: string | null;
+}
+
+/**
+ * Vérifie que le build moteur annoncé correspond au mode figé dans le salon.
+ * C'est la garde explicite contre un mélange mock/WASM ou deux versions
+ * d'artefacts : sans elle, les pairs divergeraient au premier tick. Le
+ * chargement des artefacts reste fait par `GameSession` (erreur dédiée si le
+ * WASM est absent).
+ */
+export function planNetworkEngine(
+  info: Pick<StartInfo, 'settings' | 'engineBuild'>,
+): NetworkEnginePlan {
+  const mode = info.settings.engine;
+  const expected = engineBuildId(mode);
+  if (info.engineBuild !== expected) {
+    return {
+      mode,
+      build: info.engineBuild,
+      error:
+        `Moteur incompatible : le salon annonce « ${info.engineBuild || 'inconnu'} » ` +
+        `mais ce client attend « ${expected} » (mode ${mode}). ` +
+        'Tous les joueurs doivent utiliser la même version de l’application et le même moteur.',
+    };
+  }
+  return { mode, build: expected, error: null };
+}
+
 export const MAP_SIZE_LABELS: Record<LobbySettings['mapSize'], string> = {
   256: '256×256',
   512: '512×512',
   1024: '1024×1024',
   2048: '2048×2048',
+};
+
+export const ENGINE_LABELS: Record<LobbyEngine, string> = {
+  mock: 'Mock (simulé)',
+  wasm: 'WASM (OpenTTD réel)',
 };
 
 export const CLIMATE_LABELS: Record<LobbySettings['climate'], string> = {

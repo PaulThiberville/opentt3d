@@ -29,6 +29,27 @@ export const ENGINE_ASSET_DIR = 'engine';
 export type EngineMode = 'mock' | 'wasm';
 export const ENGINE_MODES: readonly EngineMode[] = ['mock', 'wasm'];
 
+/**
+ * Version des artefacts WASM attendue par ce build du frontend (#93).
+ *
+ * Le pont n'expose pas encore d'identifiant de build : cette constante est donc
+ * incrémentée à chaque changement incompatible du protocole moteur ou du format
+ * de sauvegarde. Deux pairs qui n'annoncent pas le même identifiant se refusent
+ * au lieu de diverger silencieusement.
+ */
+export const ENGINE_ARTIFACT_VERSION = 1;
+
+/**
+ * Identifiant de moteur échangé dans le salon et le lockstep. Il encode à la
+ * fois le mode (`mock`/`wasm`) et la version d'artefacts : un mélange de modes
+ * ou de builds est ainsi refusé par une simple comparaison de chaînes.
+ */
+export function engineBuildId(mode: EngineMode): string {
+  return mode === 'wasm'
+    ? `opentt3d-wasm-${ENGINE_ARTIFACT_VERSION}`
+    : `opentt3d-mock-${ENGINE_ARTIFACT_VERSION}`;
+}
+
 /** Normalise `?engine=` ; renvoie `null` si la valeur est inconnue. */
 export function parseEngineMode(value: string | null | undefined): EngineMode | null {
   if (value === null || value === undefined) return null;

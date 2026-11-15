@@ -60,8 +60,22 @@ export type MapSize = 256 | 512 | 1024 | 2048;
 
 export const MAP_SIZES: readonly MapSize[] = [256, 512, 1024, 2048];
 
+/** Moteur choisi dans le salon (#93) : mock déterministe ou OpenTTD WASM. */
+export type LobbyEngine = 'mock' | 'wasm';
+
+export const LOBBY_ENGINES: readonly LobbyEngine[] = ['mock', 'wasm'];
+
+export function isLobbyEngine(value: unknown): value is LobbyEngine {
+  return value === 'mock' || value === 'wasm';
+}
+
 /** Game settings chosen in the lobby and frozen in `StartInfo.settings`. */
 export interface LobbySettings {
+  /**
+   * Moteur de la partie. Il est identique sur tous les pairs : un mélange
+   * mock/WASM ferait diverger les hashes dès le premier tick.
+   */
+  engine: LobbyEngine;
   mapSize: MapSize;
   climate: Climate;
   difficulty: AIDifficulty;
@@ -71,6 +85,7 @@ export interface LobbySettings {
 }
 
 export const DEFAULT_LOBBY_SETTINGS: LobbySettings = Object.freeze({
+  engine: 'mock',
   mapSize: 512,
   climate: 'temperate',
   difficulty: 'normal',
@@ -137,6 +152,11 @@ export type StartPeers = Record<number, string>;
 export interface StartPayload {
   seed: number;
   settings: LobbySettings;
+  /**
+   * Identifiant du build moteur (`engineBuildId`). Il encode le mode et la
+   * version d'artefacts : un pair différent est refusé avant le premier tick.
+   */
+  engineBuild: string;
   players: StartPlayer[];
   peers: StartPeers;
 }
@@ -268,6 +288,7 @@ export function freeColour(slots: readonly Pick<Slot, 'colour'>[]): number {
 export function isLobbySettings(value: unknown): value is LobbySettings {
   if (!isRecord(value)) return false;
   return (
+    isLobbyEngine(value.engine) &&
     isMapSize(value.mapSize) &&
     isClimate(value.climate) &&
     isAIDifficulty(value.difficulty) &&
@@ -427,6 +448,13 @@ export function isStartPayload(value: unknown): value is StartPayload {
   if (!isRecord(value)) return false;
   if (!isNat(value.seed) || value.seed > 0xffffffff) return false;
   if (!isLobbySettings(value.settings)) return false;
+  if (
+    typeof value.engineBuild !== 'string' ||
+    value.engineBuild.length === 0 ||
+    value.engineBuild.length > 64
+  ) {
+    return false;
+  }
   if (!Array.isArray(value.players)) return false;
   if (value.players.length < 1 || value.players.length > MAX_LOBBY_PLAYERS) return false;
   if (!value.players.every(isStartPlayer)) return false;
