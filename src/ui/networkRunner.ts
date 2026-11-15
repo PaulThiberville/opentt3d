@@ -245,6 +245,7 @@ export function createLockstepDriver(engine: EngineDriver): LockstepGameDriver {
     },
     init: (options) => engine.init(options),
     newGame: (options) => engine.newGame(options),
+    setLocalCompany: (company) => engine.setLocalCompany?.(company) ?? false,
     snapshot: (): WorldSnapshot => engine.snapshot(),
     send: (command) => engine.send(command),
     hash: () => engine.hash(),

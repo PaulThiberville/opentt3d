@@ -20,6 +20,7 @@ import type { JoinProgress, JoinWindowStatus } from '../net/session';
 import type { JoinRejectReason } from '../net/types';
 import { isJoinRejectReason } from '../net/types';
 import type { Transport } from '../net/transport';
+import { freeCompanyForPayload } from './netlobby';
 
 /** Version du petit protocole de découverte, indépendante du lockstep. */
 export const LATE_JOIN_PROTOCOL_VERSION = 1;
@@ -157,6 +158,7 @@ export function createLateJoinStartInfo(
   payload: StartPayload,
   transport: Transport,
   localPlayer: number,
+  localCompany: number | undefined = freeCompanyForPayload(payload),
 ): StartInfo {
   return {
     seed: payload.seed,
@@ -164,7 +166,9 @@ export function createLateJoinStartInfo(
     engineBuild: payload.engineBuild,
     players: payload.players.map((player) => ({ ...player })),
     peers: { ...payload.peers },
+    ...(payload.companySeats === undefined ? {} : { companySeats: payload.companySeats }),
     localPlayer,
+    ...(localCompany === undefined ? {} : { localCompany }),
     isHost: false,
     transport,
   };
@@ -480,6 +484,7 @@ export function startPayloadFromInfo(info: StartInfo): StartPayload {
     engineBuild: info.engineBuild,
     players: info.players.map((player) => ({ ...player })),
     peers: { ...info.peers },
+    ...(info.companySeats === undefined ? {} : { companySeats: info.companySeats }),
   };
 }
 

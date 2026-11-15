@@ -278,6 +278,19 @@ export interface NewGameOptions {
   startYear?: number;
   /** Climat : temperate, subarctic, subtropical, toyland. */
   climate?: 'temperate' | 'subarctic' | 'subtropical' | 'toyland';
+  /**
+   * Entreprises humaines à créer au démarrage (#99), dans l'ordre des ids
+   * 0..n-1. Absent : une seule entreprise locale (comportement solo). En
+   * réseau, la liste vient du `StartInfo` et est identique sur tous les pairs.
+   */
+  companies?: CompanyProfile[];
+}
+
+/** Profil d'une entreprise humaine créée au démarrage (#99). */
+export interface CompanyProfile {
+  name: string;
+  /** Couleur OpenTTD 0..15. */
+  colour: number;
 }
 
 /**
@@ -339,6 +352,13 @@ export interface EngineStatus {
 export interface EngineDriver {
   init(options: EngineInitOptions): Promise<void>;
   newGame(options: NewGameOptions): Promise<void>;
+  /**
+   * Indique l'entreprise contrôlée par ce module (#99) : le snapshot la marque
+   * `isLocal` et les commandes sans `company` la ciblent. Retourne faux si
+   * l'entreprise n'existe pas (ou est contrôlée par une IA). Chaque pair réseau
+   * choisit la sienne : l'état simulé et le hash ne changent pas.
+   */
+  setLocalCompany?(company: CompanyId): boolean;
   /** Avance la simulation et renvoie le nombre de ticks réellement exécutés. */
   step(ticks: number): number;
   /** Snapshot complet ou delta selon l'implémentation (voir `map: null`). */

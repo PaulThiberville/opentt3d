@@ -490,42 +490,93 @@ class WorldBuilder {
     this.owner = new Uint8Array(size).fill(COMPANY_NONE);
     this.flags = new Uint8Array(size);
     this.trackBits = new Uint8Array(size);
-    this.companies = [
-      {
-        id: 0,
-        name: 'Transports du Nord',
-        president: 'A. Martin',
-        colour: COMPANY_COLOURS[0],
-        money: 2_400_000,
-        loan: 400_000,
-        value: 3_100_000,
-        income: 0,
-        expenses: 0,
-        isAI: false,
-        isLocal: true,
-        bankrupt: false,
-        deliveredToday: 0,
-        vehicleCount: 0,
-        stationCount: 0,
-      },
-      {
-        id: 1,
-        name: 'Ligne du Lac',
-        president: 'IA · C. Dubois',
-        colour: COMPANY_COLOURS[1],
-        money: 1_850_000,
-        loan: 250_000,
-        value: 2_300_000,
-        income: 0,
-        expenses: 0,
-        isAI: true,
-        isLocal: false,
-        bankrupt: false,
-        deliveredToday: 0,
-        vehicleCount: 0,
-        stationCount: 0,
-      },
-    ];
+    this.companies = [];
+
+    /* Entreprises humaines (#99) : une par profil fourni, ids 0..n-1. Sans
+     * profil, le mock conserve son entreprise de démonstration historique. */
+    const profiles = options.companies ?? [];
+    if (profiles.length > 0) {
+      for (const [index, profile] of profiles.entries()) {
+        this.companies.push({
+          id: index,
+          name: profile.name.trim() !== '' ? profile.name : `Entreprise ${index + 1}`,
+          president: index === 0 ? 'Vous' : `Joueur ${index + 1}`,
+          colour: clampInt(profile.colour, 0, 15),
+          money: 2_400_000,
+          loan: 400_000,
+          value: 3_100_000,
+          income: 0,
+          expenses: 0,
+          isAI: false,
+          isLocal: index === 0,
+          bankrupt: false,
+          deliveredToday: 0,
+          vehicleCount: 0,
+          stationCount: 0,
+        });
+      }
+
+      const aiNames = ['Ligne du Lac', 'Express Côtier', 'Route des Cimes'];
+      const aiPresidents = ['IA · C. Dubois', 'IA · M. Lefèvre', 'IA · S. Bernard'];
+      const aiCount = clampInt(options.aiCompanies ?? 0, 0, aiNames.length);
+      for (let i = 0; i < aiCount; i += 1) {
+        const id = this.companies.length;
+        this.companies.push({
+          id,
+          name: aiNames[i] ?? `IA ${i + 1}`,
+          president: aiPresidents[i] ?? `IA · Joueur ${i + 1}`,
+          colour: (profiles.length + i) % 16,
+          money: 1_850_000,
+          loan: 250_000,
+          value: 2_300_000,
+          income: 0,
+          expenses: 0,
+          isAI: true,
+          isLocal: false,
+          bankrupt: false,
+          deliveredToday: 0,
+          vehicleCount: 0,
+          stationCount: 0,
+        });
+      }
+    } else {
+      this.companies.push(
+        {
+          id: 0,
+          name: 'Transports du Nord',
+          president: 'A. Martin',
+          colour: COMPANY_COLOURS[0],
+          money: 2_400_000,
+          loan: 400_000,
+          value: 3_100_000,
+          income: 0,
+          expenses: 0,
+          isAI: false,
+          isLocal: true,
+          bankrupt: false,
+          deliveredToday: 0,
+          vehicleCount: 0,
+          stationCount: 0,
+        },
+        {
+          id: 1,
+          name: 'Ligne du Lac',
+          president: 'IA · C. Dubois',
+          colour: COMPANY_COLOURS[1],
+          money: 1_850_000,
+          loan: 250_000,
+          value: 2_300_000,
+          income: 0,
+          expenses: 0,
+          isAI: true,
+          isLocal: false,
+          bankrupt: false,
+          deliveredToday: 0,
+          vehicleCount: 0,
+          stationCount: 0,
+        },
+      );
+    }
   }
 
   private index(x: number, y: number): number {
@@ -969,6 +1020,8 @@ class WorldBuilder {
     const townA = this.towns[0];
     const townB = this.towns[1];
     const townC = this.towns[2];
+    /** Compagnie de démonstration secondaire, ou la locale si elle n'existe pas. */
+    const second = this.companies.length > 1 ? 1 : 0;
 
     const trainA = townA
       ? this.addStation(
@@ -985,7 +1038,7 @@ class WorldBuilder {
       ? this.addStation(
           'train',
           { x: townB.x - 4, y: townB.y + 2 },
-          1,
+          second,
           `Gare de ${townB.name}`,
           2,
           3,
@@ -1007,7 +1060,7 @@ class WorldBuilder {
       ? this.addStation(
           'road',
           { x: townC.x - 5, y: townC.y - 2 },
-          1,
+          second,
           `Arrêt de ${townC.name}`,
           2,
           2,
@@ -1031,10 +1084,10 @@ class WorldBuilder {
       this.findCoast(this.width - 8, this.height / 2, 32);
     let dock: MockStation | null = null;
     if (coast) {
-      this.paintArea(coast, 2, 2, K.dock, 1);
+      this.paintArea(coast, 2, 2, K.dock, second);
       dock = {
         id: this.stations.length,
-        company: 1,
+        company: second,
         name: 'Dock du Lac',
         kind: 'ship',
         x: coast.x + 0.5,
@@ -1073,7 +1126,7 @@ class WorldBuilder {
       );
       this.addVehiclesOnLoop(
         path,
-        1,
+        second,
         'train',
         5,
         [20, 32],
@@ -1104,7 +1157,7 @@ class WorldBuilder {
       );
       this.addVehiclesOnLoop(
         path,
-        1,
+        second,
         'road',
         5,
         [11, 19],
@@ -1138,7 +1191,7 @@ class WorldBuilder {
       );
       this.addVehiclesOnLoop(
         path,
-        1,
+        second,
         'road',
         4,
         [10, 15],
@@ -1170,7 +1223,7 @@ class WorldBuilder {
     const shipPath = loopPath(shipStops);
     this.addVehiclesOnLoop(
       shipPath,
-      1,
+      second,
       'ship',
       6,
       [10, 18],
@@ -2401,6 +2454,16 @@ export class MockEngine implements EngineDriver {
     this.loading = false;
     this.progress = 1;
     this.lastError = null;
+  }
+
+  /** Choisit l'entreprise locale (#99) sans modifier l'état simulé ni le hash. */
+  setLocalCompany(company: number): boolean {
+    const world = this.world;
+    if (!world) return false;
+    const target = world.companies.find((item) => item.id === company);
+    if (!target || target.isAI) return false;
+    for (const item of world.companies) item.isLocal = item.id === company;
+    return true;
   }
 
   step(ticks: number): number {

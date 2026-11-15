@@ -10,6 +10,7 @@
  * valeur est refusée ici, avant d'atteindre le moteur.
  */
 
+import type { CompanyProfile } from '../engine/protocol';
 import type { QualityLevel } from '../render/quality';
 import { QUALITY_LEVELS } from '../render/quality';
 
@@ -45,6 +46,11 @@ export interface NewGameOptions {
   aiCompanies: number;
   climate: Climate;
   startYear: number;
+  /**
+   * Entreprises humaines créées au démarrage (#99). Absent en solo (une seule
+   * entreprise locale) ; en réseau, la liste vient du `StartInfo` du salon.
+   */
+  companies?: CompanyProfile[];
 }
 
 export interface FieldError {

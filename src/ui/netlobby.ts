@@ -12,14 +12,18 @@ import { buildInviteLink, parseInviteLink, type InviteLink } from '../net/lobby'
 import {
   LOBBY_CHANNELS,
   LOBBY_PROTOCOL_VERSION,
+  MAX_START_COMPANIES,
   isRoomId,
   type LobbyEngine,
   type LobbySettings,
   type LobbyState,
   type StartInfo,
+  type StartPayload,
+  type StartPlayer,
 } from '../net/lobby-types';
 import type { Transport, TransportKind } from '../net/transport';
 import { engineBuildId } from '../engine/loadEngine';
+import type { CompanyProfile } from '../engine/protocol';
 import type { GameSpeed } from '../game/Game';
 import type { QualityLevel } from '../render/quality';
 import type { NewGameOptions } from './gameOptions';
@@ -136,6 +140,97 @@ const CLIMATE_TO_ENGINE: Record<LobbySettings['climate'], NewGameOptions['climat
   toyland: 'toyland',
 };
 
+/** Joueurs humains d'un payload, triés par index (ordre des entreprises). */
+function humanPlayers(players: readonly StartPlayer[]): StartPlayer[] {
+  return players.filter((player) => player.ai === null).sort((a, b) => a.player - b.player);
+}
+
+/** Les payloads antérieurs à #99 n'ont aucun mapping d'entreprise. */
+export function hasCompanyMapping(info: Pick<StartPayload, 'players'>): boolean {
+  return info.players.some((player) => player.company !== undefined);
+}
+
+/** Nombre d'entreprises humaines créées, réserves pour retardataires incluses. */
+export function companySeatsForStart(info: Pick<StartPayload, 'players' | 'companySeats'>): number {
+  const humans = humanPlayers(info.players);
+  const highestCompany = humans.reduce(
+    (max, player) => Math.max(max, (player.company ?? -1) + 1),
+    0,
+  );
+  const fallback = Math.max(humans.length, highestCompany);
+  const seats = info.companySeats ?? fallback;
+  return Math.max(0, Math.min(MAX_START_COMPANIES, seats));
+}
+
+/** Entreprise contrôlée par un joueur, d'après le mapping figé du salon. */
+export function companyForPlayer(
+  info: Pick<StartPayload, 'players'>,
+  player: number,
+): number | undefined {
+  return info.players.find((entry) => entry.player === player)?.company;
+}
+
+/** Entreprise du joueur local (mapping du salon, sinon première entreprise). */
+export function localCompanyForStart(
+  info: Pick<StartPayload, 'players'> & { localPlayer: number; localCompany?: number },
+): number | undefined {
+  return info.localCompany ?? companyForPlayer(info, info.localPlayer);
+}
+
+/**
+ * Profils des entreprises humaines à créer au démarrage (#99).
+ *
+ * Les sièges sans joueur (réserves pour les retardataires) reçoivent un nom et
+ * une couleur stables, dérivés de la configuration du salon : tous les pairs
+ * construisent exactement la même liste. Renvoie `[]` pour les payloads #93
+ * sans mapping, afin de conserver l'entreprise locale unique historique.
+ */
+export function companyProfilesFromStart(
+  info: Pick<StartPayload, 'players' | 'companySeats'>,
+): CompanyProfile[] {
+  if (!hasCompanyMapping(info)) return [];
+  const seats = companySeatsForStart(info);
+  const humans = humanPlayers(info.players);
+  const usedColours = new Set<number>();
+  for (const player of humans) {
+    if (player.company !== undefined && player.company < seats) usedColours.add(player.colour);
+  }
+  const profiles: CompanyProfile[] = [];
+  for (let company = 0; company < seats; company += 1) {
+    const player = humans.find((entry) => entry.company === company);
+    if (player) {
+      profiles.push({
+        name: player.companyName.trim() || `${player.name} Transport`,
+        colour: player.colour,
+      });
+      continue;
+    }
+    let colour = 0;
+    while (colour < 16 && usedColours.has(colour)) colour += 1;
+    usedColours.add(colour);
+    profiles.push({
+      name: `Entreprise ${company + 1} (réserve)`,
+      colour: colour % 16,
+    });
+  }
+  return profiles;
+}
+
+/** Première entreprise humaine libre, pour un joueur qui rejoint en cours. */
+export function freeCompanyForPayload(
+  payload: Pick<StartPayload, 'players' | 'companySeats'>,
+): number | undefined {
+  const seats = companySeatsForStart(payload);
+  const used = new Set<number>();
+  for (const player of payload.players) {
+    if (player.company !== undefined) used.add(player.company);
+  }
+  for (let company = 0; company < seats; company += 1) {
+    if (!used.has(company)) return company;
+  }
+  return undefined;
+}
+
 /**
  * Les pairs doivent générer exactement le même monde : seed, taille, climat,
  * difficulté et nombre d'IA viennent tous du `StartInfo`, jamais des réglages
@@ -145,7 +240,7 @@ const CLIMATE_TO_ENGINE: Record<LobbySettings['climate'], NewGameOptions['climat
  * 128/256/512.
  */
 export function mapStartInfoToGameOptions(
-  info: Pick<StartInfo, 'seed' | 'settings' | 'players'>,
+  info: Pick<StartInfo, 'seed' | 'settings' | 'players' | 'companySeats'>,
   quality: QualityLevel,
   startYear = 1950,
 ): MappedGameOptions {
@@ -171,6 +266,7 @@ export function mapStartInfoToGameOptions(
   if (!wasm && aiCount > 3) {
     warnings.push('Le mock limite la partie à trois entreprises IA.');
   }
+  const companies = companyProfilesFromStart(info);
 
   return {
     options: {
@@ -181,6 +277,7 @@ export function mapStartInfoToGameOptions(
       aiCompanies: wasm ? aiCount : Math.min(3, aiCount),
       climate: CLIMATE_TO_ENGINE[info.settings.climate],
       startYear,
+      ...(companies.length > 0 ? { companies } : {}),
     },
     warnings,
   };
