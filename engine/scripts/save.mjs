@@ -134,6 +134,7 @@ function wrap(engine) {
     engine,
     boot: engine.cwrap('ottd_boot', 'number', []),
     newGame: engine.cwrap('ottd_new_game', 'number', ['number', 'number', 'number']),
+    newGameEx: engine.cwrap('ottd_new_game_ex', 'number', ['number', 'number', 'number', 'string']),
     step: engine.cwrap('ottd_step', 'number', ['number']),
     lastError: engine.cwrap('ottd_last_error', 'string', []),
     companyId: engine.cwrap('ottd_company_id', 'number', []),
@@ -748,6 +749,80 @@ async function runCommandsRoundTrip() {
 }
 
 /**
+ * Scénario 4 bis : partie avec deux IA, sauvegarde, chargement, puis 500 ticks.
+ * Vérifie que les scripts IA reprennent sans reconstruire une seconde ligne
+ * (`Save`/`Load` de `engine/ai/opentt3d`).
+ */
+async function runAiRoundTrip() {
+  const diagnostics = makeDiagnostics();
+  const source = wrap(await createInstance('ai-source', diagnostics));
+  if (source.boot() !== 0) fail(`ai source boot : ${readError(source)}`);
+  const created = source.newGameEx(
+    SEED,
+    MAP_SIZE,
+    MAP_SIZE,
+    JSON.stringify({ climate: 'temperate', start_year: 2000, difficulty: 2, ai_companies: 2 }),
+  );
+  if (created !== 0) fail(`ai new_game_ex() = ${created} : ${readError(source)}`);
+  assert(source.step(WARMUP_TICKS) === WARMUP_TICKS, `ai warmup : ${readError(source)}`);
+
+  const sourceJson = makeJsonReader(source.engine);
+  const state = sourceJson.read();
+  assert(state.counts.companies === 3, `IA : ${state.counts.companies} entreprises au lieu de 3`);
+  assert(state.counts.stations >= 2, `IA : ${state.counts.stations} gares construites`);
+  assert(state.counts.vehicles >= 2, `IA : ${state.counts.vehicles} véhicules construits`);
+  const hash = hashHex(source.engine);
+  const tick = source.engine._ottd_tick();
+  const saved = saveGame(source);
+
+  const targetDiagnostics = makeDiagnostics();
+  const target = wrap(await createInstance('ai-target', targetDiagnostics));
+  if (target.boot() !== 0) fail(`ai target boot : ${readError(target)}`);
+  const loaded = loadGame(target, saved.bytes);
+  assert(loaded.status === 0, `ai load : ${loaded.status} — ${readError(target)}`);
+  assert(hashHex(target.engine) === hash, `IA : hash après chargement ≠ ${hash}`);
+  assert(target.engine._ottd_tick() === tick, 'IA : tick après chargement différent');
+
+  const targetJson = makeJsonReader(target.engine);
+  assertSameState(state, targetJson.read(), 'IA : état après chargement');
+
+  assert(source.step(POST_LOAD_TICKS) === POST_LOAD_TICKS, 'IA source : step après save');
+  assert(target.step(POST_LOAD_TICKS) === POST_LOAD_TICKS, 'IA cible : step après load');
+  assert(
+    hashHex(source.engine) === hashHex(target.engine),
+    `IA : hash après ${POST_LOAD_TICKS} ticks différent`,
+  );
+  assertSameState(sourceJson.read(), targetJson.read(), 'IA : état après ticks');
+  const after = targetJson.read();
+  assert(
+    after.counts.stations === state.counts.stations,
+    `IA : ${after.counts.stations} gares après ticks au lieu de ${state.counts.stations}`,
+  );
+  assert(
+    after.counts.vehicles === state.counts.vehicles,
+    `IA : ${after.counts.vehicles} véhicules après ticks au lieu de ${state.counts.vehicles}`,
+  );
+
+  assertNoBackupWarnings([...diagnostics.stdout, ...diagnostics.stderr], 'IA source');
+  assertNoBackupWarnings([...targetDiagnostics.stdout, ...targetDiagnostics.stderr], 'IA cible');
+
+  sourceJson.free();
+  targetJson.free();
+  source.engine._ottd_shutdown();
+  target.engine._ottd_shutdown();
+
+  return {
+    hash,
+    hashAfter: hashHex(source.engine),
+    tick,
+    size: saved.size,
+    saveMs: saved.elapsed,
+    loadMs: loaded.elapsed,
+    counts: state.counts,
+  };
+}
+
+/**
  * Scénario 5 : refus propre des sauvegardes invalides, état préservé.
  */
 function runCorruptionChecks(api, validSave, diagnostics) {
@@ -858,6 +933,16 @@ if (REFERENCE_HASH_COMMANDS !== null && commandsTrip.hash !== REFERENCE_HASH_COM
       '  Mettez à jour REFERENCE_HASH_COMMANDS consciemment.',
   );
 }
+
+const aiTrip = await runAiRoundTrip();
+log(
+  `[IA] ${aiTrip.counts.companies} entreprises, ${aiTrip.counts.stations} gares, ` +
+    `${aiTrip.counts.vehicles} véhicules ; ${aiTrip.size} octets`,
+);
+log(
+  `[IA] hash ${aiTrip.hash} conservé au chargement, ` +
+    `${POST_LOAD_TICKS} ticks → ${aiTrip.hashAfter} (identiques, pas de reconstruction)`,
+);
 
 /* Instance dédiée aux refus : on repart d'une partie neuve sauvegardée. */
 const corruptionDiagnostics = makeDiagnostics();
