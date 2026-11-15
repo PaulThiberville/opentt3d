@@ -355,6 +355,11 @@ describe('CityLayer : signatures et LOD', () => {
     layer.build([{ ...town, population: town.population + 500 }], map);
     expect(layer.builds).toBe(1);
     expect(layer.group.children.filter((child) => child.name.startsWith('city-'))).toEqual(buckets);
+    // Un changement de qualité réinstancie les lots mais ne doit pas être
+    // suivi d'une reconstruction complète au snapshot suivant.
+    layer.setQuality('high');
+    layer.build([town], map);
+    expect(layer.builds).toBe(1);
     layer.dispose();
   });
 

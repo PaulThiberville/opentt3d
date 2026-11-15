@@ -124,6 +124,7 @@ export class CityLayer {
   private farDistance = 95;
   private shadows = false;
   private signature = 0;
+  private townSnapshots: readonly TownSnapshot[] = [];
   /** Nombre de reconstructions réelles des villes (diagnostic/tests). */
   builds = 0;
   /** Nombre de bascules near/far (diagnostic/tests). */
@@ -159,6 +160,7 @@ export class CityLayer {
   /** Reconstruit les bâtiments de toutes les villes. */
   build(towns: readonly TownSnapshot[], map: MapSnapshot): void {
     this.map = map;
+    this.townSnapshots = towns;
     const signature = computeCitySignature(towns, map, this.detail);
     if (this.builds > 0 && signature === this.signature) return;
     this.signature = signature;
@@ -324,6 +326,11 @@ export class CityLayer {
   /** Change le niveau de détail des bâtiments (qualité graphique). */
   setQuality(level: QualityLevel): void {
     this.applyQuality(level);
+    // La signature dépend du détail : sans cette mise à jour, le prochain
+    // snapshot déclencherait une reconstruction complète inutile des villes.
+    if (this.map) {
+      this.signature = computeCitySignature(this.townSnapshots, this.map, this.detail);
+    }
     if (this.towns.size > 0) {
       this.allDirty = true;
       this.farDirty = true;
@@ -798,6 +805,7 @@ export class CityLayer {
     this.stationBaseMaterial.dispose();
     this.material.dispose();
     this.map = null;
+    this.townSnapshots = [];
   }
 
   get mapSnapshot(): MapSnapshot | null {
