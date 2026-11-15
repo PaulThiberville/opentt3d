@@ -124,6 +124,17 @@ describe('manifeste PWA', () => {
   });
 });
 
+describe('intégration à la page', () => {
+  it('référence le manifeste et les icônes relativement à la base Vite', () => {
+    const html = readFileSync(`${root}index.html`, 'utf8');
+    // GitHub Pages sert le jeu sous /opentt3d/ : les chemins absolus casseraient.
+    expect(html).toContain('href="%BASE_URL%manifest.webmanifest"');
+    expect(html).toContain('href="%BASE_URL%favicon.svg"');
+    expect(html).toContain('href="%BASE_URL%icons/icon-192.png"');
+    expect(html).not.toContain('href="/manifest.webmanifest"');
+  });
+});
+
 describe('liste de précache', () => {
   const files = [
     'index.html',
