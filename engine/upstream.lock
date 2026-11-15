@@ -1,0 +1,11 @@
+# Version d'OpenTTD utilisée par le moteur OpenTT3D.
+# Toute mise à jour doit être faite ici, puis relancée avec `npm run engine:fetch`.
+# Le SHA256 est celui publié dans le manifeste officiel :
+# https://cdn.openttd.org/openttd-releases/15.3/manifest.yaml
+OPENTTD_VERSION="15.3"
+OPENTTD_SOURCE_URL="https://cdn.openttd.org/openttd-releases/${OPENTTD_VERSION}/openttd-${OPENTTD_VERSION}-source.tar.xz"
+OPENTTD_SOURCE_SHA256="5ea21eea7d59c78a42071924ac18c6bc0116088f2e96b14cfee9369175973be7"
+
+# Image Docker Emscripten recommandée par OpenTTD (os/emscripten/Dockerfile).
+# Elle contient emsdk 6.0.1, cmake, ninja et les basesets de test.
+OPENTTD_EMSDK_IMAGE="emscripten/emsdk:6.0.1"
