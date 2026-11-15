@@ -44,7 +44,7 @@ Ajoute une option CMake desactivee par defaut. Quand elle est active :
 +        target_link_libraries(WASM::WASM INTERFACE "-sINVOKE_RUN=0")
 +        target_link_libraries(WASM::WASM INTERFACE "-sFORCE_FILESYSTEM=1")
 +        target_link_libraries(WASM::WASM INTERFACE "-sSTACK_SIZE=8388608")
-+        target_link_libraries(WASM::WASM INTERFACE "-sEXPORTED_FUNCTIONS='[\"_main\",\"_em_openttd_add_server\",\"_ottd_boot\",\"_ottd_new_game\",\"_ottd_step\",\"_ottd_tick\",\"_ottd_hash\",\"_ottd_last_error\",\"_ottd_snapshot_json\",\"_ottd_shutdown\",\"_malloc\",\"_free\"]'")
++        target_link_libraries(WASM::WASM INTERFACE "-sEXPORTED_FUNCTIONS='[\"_main\",\"_em_openttd_add_server\",\"_ottd_boot\",\"_ottd_new_game\",\"_ottd_step\",\"_ottd_tick\",\"_ottd_hash\",\"_ottd_last_error\",\"_ottd_snapshot_json\",\"_ottd_snapshot_map\",\"_ottd_shutdown\",\"_malloc\",\"_free\"]'")
 +        target_link_libraries(WASM::WASM INTERFACE "-sEXPORTED_RUNTIME_METHODS='[\"cwrap\",\"UTF8ToString\",\"stringToUTF8\",\"lengthBytesUTF8\",\"FS\"]'")
  
 -    # Build the .html (which builds the .js, .wasm, and .data too).
