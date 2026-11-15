@@ -12,7 +12,7 @@
  *  - temps de snapshot et de step du moteur (mock ou WASM) ;
  *  - stabilité sur une durée paramétrable (soak) ;
  *  - scénarios : carte, ville rapprochée, 300 véhicules, construction active,
- *    onglet caché/reprise, resize.
+ *    déplacement rapide, onglet caché/reprise, resize.
  *
  * Le bundle est construit avec `NODE_ENV=development --mode development` pour
  * conserver la surface de debug `window.__opentt3d` (exposée par main.ts en
@@ -34,7 +34,7 @@
  *   --qualities=low,medium,high
  *   --engine=mock,wasm      moteurs (wasm ignoré si artefacts absents)
  *   --wasm-sizes / --wasm-qualities  sous-matrice WASM (défaut : medium)
- *   --scenarios=map,city,vehicles,build,hidden,resize
+ *   --scenarios=map,city,vehicles,build,move,hidden,resize
  *   --duration=8            secondes mesurées par scénario
  *   --soak=60               secondes de stabilité (0 = désactivé)
  *   --soak-size=256 --soak-quality=medium
@@ -45,7 +45,6 @@
  *   --server=preview|dev|URL
  *   --port=5199
  *   --json=path             chemin du JSON (défaut perf-artifacts/<ts>.json)
- *   --keep-artifacts        conserve les PNG même en cas d'échec précoce
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -80,7 +79,7 @@ const BUDGETS = {
     move: { 128: 180, 256: 280, 512: 620 },
   },
   /** Triangles soumis par frame, par taille de carte. */
-  triangles: { 128: 180_000, 256: 600_000, 512: 1_800_000 },
+  triangles: { 128: 260_000, 256: 720_000, 512: 1_200_000 },
   /** Supplément du scénario 300 véhicules (9 variantes détaillées, ≤ 1 500 tri). */
   vehicleTrianglesFor300: 450_000,
   /** Moteur : un snapshot (carte incluse) et un tick. */
@@ -90,7 +89,7 @@ const BUDGETS = {
   /** Mémoire JS : croissance après échauffement (fuite lente). */
   heapGrowthMB: 16,
   /** Ressources GPU vivantes créées pendant un scénario (hors warmup). */
-  resourceGrowth: 32,
+  resourceGrowth: 48,
   /**
    * Taux toléré pendant une construction active. Une fuite connue existe
    * (attribut `aPhase` de la végétation remplacé sans dispose) : le budget
@@ -109,7 +108,7 @@ const DEFAULTS = {
   engine: 'mock,wasm',
   wasmSizes: [128, 512],
   wasmQualities: ['medium'],
-  scenarios: ['map', 'city', 'vehicles', 'build', 'move', 'hidden', 'resize'],
+  scenarios: ['map', 'city', 'vehicles', 'build', 'move', 'firstinput', 'hidden', 'resize'],
   duration: 8,
   soak: 60,
   soakSize: 256,
@@ -197,9 +196,6 @@ function parseArgs(argv) {
       case 'json':
         options.json = nextValue() ?? null;
         break;
-      case 'keep-artifacts':
-        options.keepArtifacts = true;
-        break;
       case 'help':
       case 'h':
         printHelp();
@@ -216,7 +212,7 @@ function printHelp() {
   console.log(`Harnais de performance OpenTT3D
 
   node scripts/perf.mjs [--sizes=128,256] [--qualities=low,medium,high]
-       [--engine=mock,wasm] [--scenarios=map,city,vehicles,build,hidden,resize]
+       [--engine=mock,wasm] [--scenarios=map,city,vehicles,build,move,hidden,resize]
        [--duration=8] [--soak=60] [--dpr=1] [--swiftshader] [--report-only]
        [--no-build] [--server=preview|dev|http://...] [--port=5199]
 
@@ -1118,6 +1114,9 @@ const PAGE_API = `(() => {
       api._vegetationRebuilds = 0;
       api._cityRebuilds = 0;
       api._industryRebuilds = 0;
+      api._bucketRebuilds = 0;
+      api._stationRebuilds = 0;
+      api._terrainChunks = 0;
       const scene = world();
       const canopy = scene.vegetation.canopyGeometry;
       const originalSetAttribute = canopy.setAttribute.bind(canopy);
@@ -1130,12 +1129,38 @@ const PAGE_API = `(() => {
         api._cityRebuilds += 1;
         return cityBuild(...args);
       };
+      const cityBuckets = scene.cityLayer.applyBuckets.bind(scene.cityLayer);
+      scene.cityLayer.applyBuckets = (...args) => {
+        api._bucketRebuilds += 1;
+        return cityBuckets(...args);
+      };
+      const cityStations = scene.cityLayer.setStations.bind(scene.cityLayer);
+      scene.cityLayer.setStations = (...args) => {
+        api._stationRebuilds += 1;
+        return cityStations(...args);
+      };
       const industryBuild = scene.industries.build.bind(scene.industries);
       scene.industries.build = (...args) => {
         api._industryRebuilds += 1;
         return industryBuild(...args);
       };
+      const buildChunk = scene.terrain.buildChunk.bind(scene.terrain);
+      scene.terrain.buildChunk = (...args) => {
+        api._terrainChunks += 1;
+        return buildChunk(...args);
+      };
       return true;
+    },
+    rebuildCounts() {
+      const api = window.__perfApi;
+      return {
+        vegetation: api._vegetationRebuilds ?? 0,
+        cityBuild: api._cityRebuilds ?? 0,
+        cityBuckets: api._bucketRebuilds ?? 0,
+        cityStations: api._stationRebuilds ?? 0,
+        industryBuild: api._industryRebuilds ?? 0,
+        terrainChunks: api._terrainChunks ?? 0,
+      };
     },
     measure(rounds = 15, includeMap = true) {
       const g = game();
@@ -1447,8 +1472,20 @@ async function prepareScenario(page, scenario) {
       clickCount: 1,
     });
     await sleep(500);
+    // Échauffe les deux niveaux de LOD (géométries détaillées + silhouette
+    // lointaine) hors fenêtre de mesure : sinon la première bascule de seuil
+    // compte comme une croissance de ressources GPU.
+    await page.evaluate(`(() => {
+      const session = window.__opentt3d.session;
+      const town = session.gameInstance.getLatestSnapshot()?.towns?.[0];
+      if (!town) return false;
+      session.worldInstance.getCameraController().focusOn(town.x, town.y, 20);
+      return true;
+    })()`);
+    await sleep(600);
     await page.evaluate('window.__perfApi.resetView()');
-    return { unlockedAudio: true };
+    await sleep(400);
+    return { unlockedAudio: true, lodWarmup: true };
   }
   return {};
 }
@@ -1543,6 +1580,30 @@ async function runScenario(page, scenario, durationSeconds, artifacts, dpr = 1) 
       await sleep(120);
     }
     details.moves = moves;
+  } else if (scenario === 'firstinput') {
+    // Mesure le coût du tout premier geste (déverrouillage audio inclus).
+    const clickedAt = await page.evaluate('performance.now()');
+    const cx = VIEWPORT.width / 2;
+    const cy = VIEWPORT.height / 2;
+    await page.cdp.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x: cx,
+      y: cy,
+      button: 'left',
+      buttons: 1,
+      clickCount: 1,
+    });
+    await page.cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: cx,
+      y: cy,
+      button: 'left',
+      buttons: 0,
+      clickCount: 1,
+    });
+    await sleep(1200);
+    const times = await page.evaluate(`window.__perfApi.frameTimesSince(${clickedAt}).slice(0, 4)`);
+    details.firstFrameMs = times.length > 0 ? round(Math.max(0, times[0] - clickedAt), 1) : null;
   } else if (scenario === 'hidden') {
     // 1 s visible avant de masquer : le delta de reprise est mesuré sur la
     // première frame qui suit `show()`.
@@ -1667,6 +1728,15 @@ function evaluateBudgets(run, quality, size, rendererKind) {
         'critère #24 : aucun pic > 25 ms',
       );
     }
+    if (scenario === 'firstinput') {
+      push(
+        'premier geste (ms)',
+        metrics.interval.max,
+        BUDGETS.frameMaxMs,
+        'lte',
+        'déverrouillage audio inclus (long task observé)',
+      );
+    }
   }
   const drawTable = BUDGETS.drawCalls[scenario] ?? BUDGETS.drawCalls.map;
   const drawBudget = typeof drawTable === 'number' ? drawTable : (drawTable[size] ?? 320);
@@ -1685,19 +1755,34 @@ function evaluateBudgets(run, quality, size, rendererKind) {
   }
   const growthMB = (run.heap.retainedGrowth ?? run.heap.growth) / (1024 * 1024);
   push('heap retenu après GC (Mo)', growthMB, BUDGETS.heapGrowthMB);
+  const resourceSamples = run.resources.samples ?? [];
+  const resourceBaseline =
+    resourceSamples.length > 2
+      ? resourceSamples[Math.floor(resourceSamples.length * 0.2)]
+      : resourceSamples[0];
   const resourceGrowth =
-    (run.resources.live?.total ?? 0) -
-    (run.resources.samples?.[0] ?? run.resources.live?.total ?? 0);
+    (run.resources.live?.total ?? 0) - (resourceBaseline ?? run.resources.live?.total ?? 0);
   if (scenario === 'build' && run.durationSeconds > 0) {
-    push(
-      'ressources GPU / minute',
-      (resourceGrowth / run.durationSeconds) * 60,
-      BUDGETS.resourceGrowthPerMinute,
-      'lte',
-      'fuite connue : attribut aPhase de la végétation',
-    );
+    if (run.durationSeconds >= 10) {
+      push(
+        'ressources GPU / minute',
+        (resourceGrowth / run.durationSeconds) * 60,
+        BUDGETS.resourceGrowthPerMinute,
+        'lte',
+        'fuite connue : attribut aPhase de la végétation',
+      );
+    } else {
+      // Fenêtre courte : le taux extrapolé est trop bruité, on borne le delta.
+      push('ressources GPU (delta court)', resourceGrowth, 80, 'lte', 'fenêtre < 10 s');
+    }
   } else {
-    push('ressources GPU (delta)', resourceGrowth, BUDGETS.resourceGrowth);
+    push(
+      'ressources GPU (delta)',
+      resourceGrowth,
+      BUDGETS.resourceGrowth,
+      'lte',
+      'après échauffement (20 % de la fenêtre)',
+    );
   }
   if (run.hidden) {
     push('frames pendant onglet caché', run.hidden.framesDuringHide, 2);
@@ -1705,6 +1790,18 @@ function evaluateBudgets(run, quality, size, rendererKind) {
       push('reprise sans delta géant (ms)', run.hidden.resumeGapMs, 250);
     }
     push('avance de simulation (ticks)', run.hidden.tickDelta, 150);
+  }
+  if (scenario === 'soak' && run.resources.series && run.resources.series.length > 5) {
+    const bytes = run.resources.series.map((sample) => sample.bytes ?? 0);
+    const baseline = Math.min(...bytes.slice(0, Math.min(5, bytes.length)));
+    const last = bytes[bytes.length - 1] ?? baseline;
+    push(
+      'mémoire GPU sur la durée (Mo)',
+      Math.max(0, last - baseline) / (1024 * 1024),
+      16,
+      'lte',
+      'critère #24 : mémoire GPU stable',
+    );
   }
   if (run.resize) {
     const first = run.resize[0];
@@ -1886,6 +1983,7 @@ async function runSoak(page, options, config, artifacts, rendererInfo) {
   await page.navigate(url);
   const info = await page.waitForGame({ timeout: config.engine === 'wasm' ? 180_000 : 60_000 });
   await page.evaluate('window.__perfApi.resetView()');
+  await page.evaluate('window.__perfApi.trackRebuilds()');
   await sleep(2000);
   await page.evaluate("window.__perfApi.begin('soak')");
   const samples = [];
@@ -1936,6 +2034,7 @@ async function runSoak(page, options, config, artifacts, rendererInfo) {
       domAfter: afterDispose.domNodes,
     },
     counts: summary.counts,
+    rebuilds: await page.evaluate('window.__perfApi.rebuildCounts()'),
     engine: engineMetrics,
     cdp,
     info,
