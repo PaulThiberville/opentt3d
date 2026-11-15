@@ -11,6 +11,7 @@ export default tseslint.config(
       'engine/upstream/**',
       'engine/build/**',
       'engine/build-host/**',
+      'engine/.cache/**',
       'public/**',
     ],
   },
@@ -22,6 +23,20 @@ export default tseslint.config(
       '@typescript-eslint/consistent-type-imports': 'error',
       '@typescript-eslint/no-explicit-any': 'warn',
       'no-console': 'off',
+    },
+  },
+  {
+    files: ['engine/scripts/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        Buffer: 'readonly',
+        URL: 'readonly',
+        clearTimeout: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        process: 'readonly',
+        setTimeout: 'readonly',
+      },
     },
   },
   prettier,

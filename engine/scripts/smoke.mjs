@@ -144,7 +144,9 @@ async function run(label) {
   const zero = api.step(0);
   const tickAfterZeroStep = api.engine._ottd_tick();
   if (zero !== 0 || tickBeforeZeroStep !== tickAfterZeroStep) {
-    fail(`ottd_step(0) doit être un no-op (retour ${zero}, tick ${tickBeforeZeroStep}→${tickAfterZeroStep})`);
+    fail(
+      `ottd_step(0) doit être un no-op (retour ${zero}, tick ${tickBeforeZeroStep}→${tickAfterZeroStep})`,
+    );
   }
 
   // Contrat : un buffer trop petit renvoie la taille requise et n'écrit rien.
@@ -152,7 +154,9 @@ async function run(label) {
   try {
     const required = api.engine._ottd_snapshot_json(tiny, 8);
     if (required <= 8 || api.engine.UTF8ToString(tiny) !== '') {
-      fail(`ottd_snapshot_json(8) devrait renvoyer une taille > 8 et un buffer vide (reçu ${required})`);
+      fail(
+        `ottd_snapshot_json(8) devrait renvoyer une taille > 8 et un buffer vide (reçu ${required})`,
+      );
     }
   } finally {
     api.engine._free(tiny);
@@ -205,7 +209,9 @@ log(`\n✅ Déterminisme vérifié : ${first.hash} sur deux instances indépenda
 const longStart = Date.now();
 const longTicks = first.api.step(10_000);
 if (longTicks !== 10_000) fail(`ottd_step(10000) = ${longTicks} : ${readError(first.api)}`);
-log(`[instance-1] 10 000 ticks supplémentaires en ${Date.now() - longStart} ms (tick ${first.api.engine._ottd_tick()})`);
+log(
+  `[instance-1] 10 000 ticks supplémentaires en ${Date.now() - longStart} ms (tick ${first.api.engine._ottd_tick()})`,
+);
 
 // Libération explicite : vérifie `ottd_shutdown` et rend la mémoire au système.
 first.api.engine._ottd_shutdown();
