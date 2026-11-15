@@ -44,11 +44,15 @@ export interface EmscriptenModule {
   UTF8ToString(pointer: number, maxBytesToRead?: number): string;
   _malloc(size: number): number;
   _free(pointer: number): void;
-  ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[]): unknown;
+  ccall?(name: string, returnType: string | null, argTypes: string[], args: unknown[]): unknown;
   cwrap(name: string, returnType: string | null, argTypes: string[]): (...args: number[]) => number;
+  stringToUTF8?(text: string, pointer: number, maxBytes: number): void;
+  lengthBytesUTF8?(text: string): number;
   /** Pont OpenTT3D (voir `engine/bridge/ottd_bridge.cpp`). */
   _ottd_boot(): number;
   _ottd_new_game(seed: number, width: number, height: number): number;
+  _ottd_new_game_ex?(seed: number, width: number, height: number, configPointer: number): number;
+  _ottd_set_game_config?(configJson: string): number;
   _ottd_step(ticks: number): number;
   _ottd_tick(): number;
   _ottd_hash(): number | bigint;

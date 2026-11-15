@@ -240,7 +240,7 @@ export class NewGameScreen extends BaseScreen {
         className: 'field-hint',
         text:
           mode === 'wasm'
-            ? 'Le pont WASM ne gère pas encore le climat, l’année de départ, les IA ni la difficulté : la partie démarre en tempéré, en 1950, sans IA (#60).'
+            ? 'Les options (climat, année, difficulté, IA) sont transmises au pont OpenTTD. Villes et industries sont des cibles : le nombre final peut varier.'
             : 'Simulation déterministe locale. Ajoutez ?engine=wasm à l’URL pour tester le moteur OpenTTD réel.',
       }),
     );
