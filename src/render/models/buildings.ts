@@ -628,7 +628,7 @@ export function createStationHallGeometry(detail: BuildingDetail): THREE.BufferG
 /** Quai couvert : une tuile de plateforme instanciée par tuile de gare. */
 export function createStationPlatformGeometry(detail: BuildingDetail): THREE.BufferGeometry {
   const builder = new ModelBuilder();
-  builder.box(0, 0, 0.12, 0.86, 0.09, 0.5, 0x9a9a94);
+  builder.box(0, 0, 0.12, 0.86, 0.09, 0.5, 0x7e8076);
   builder.box(0, 0.09, 0.36, 0.86, 0.012, 0.06, 0xd8d2c4);
   builder.box(-0.34, 0.09, 0.16, 0.035, 0.34, 0.035, 0x6b7176);
   builder.box(0.34, 0.09, 0.16, 0.035, 0.34, 0.035, 0x6b7176);
@@ -679,6 +679,14 @@ export function createDepotLiveryGeometry(kind: DepotKind): THREE.BufferGeometry
   builder.box(0, 0.36, 0.19, 0.42, 0.06, 0.02, 0xffffff);
   if (kind === 'rail') builder.box(0, 0.5, 0.44, 0.88, 0.03, 0.06, 0xffffff);
   return fitFootprint(builder.build());
+}
+
+/** Socle local d'une tuile de gare : épouse la pente, jamais une dalle globale. */
+export function createStationBaseGeometry(): THREE.BufferGeometry {
+  const builder = new ModelBuilder();
+  builder.box(0, 0, 0, 0.9, 1, 0.9, 0x68665c);
+  builder.box(0, 0.94, 0, 0.92, 0.06, 0.92, 0x7c7a6e);
+  return fitFootprint(builder.build(), 0.48);
 }
 
 /** Nombre de triangles d'une géométrie fusionnée. */
