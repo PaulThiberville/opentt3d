@@ -160,6 +160,7 @@ async function bootstrap(): Promise<void> {
       camera: renderer.camera,
       canvas,
       quality,
+      timeOfDay: renderer,
       onSelect: (target) => applySelection(target),
       onHover: () => undefined,
       onNotice: (text) => hud.notify('info', text),

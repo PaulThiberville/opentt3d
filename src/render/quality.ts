@@ -29,6 +29,12 @@ export interface QualitySettings {
   maxTrees: number;
   /** Nombre de lampes d'appoint (hémisphérique + directionnelle). */
   ambientLight: number;
+  /** Étoiles et lune la nuit : coupé en basse qualité. */
+  nightSky: boolean;
+  /** Fenêtres éclairées des bâtiments la nuit. */
+  nightWindows: boolean;
+  /** Fumée animée des cheminées d'industrie. */
+  industrySmoke: boolean;
 }
 
 export const QUALITY_PRESETS: Record<QualityLevel, QualitySettings> = {
@@ -46,6 +52,9 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualitySettings> = {
     wind: false,
     maxTrees: 4_000,
     ambientLight: 0.95,
+    nightSky: false,
+    nightWindows: false,
+    industrySmoke: false,
   },
   medium: {
     level: 'medium',
@@ -61,6 +70,9 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualitySettings> = {
     wind: true,
     maxTrees: 9_000,
     ambientLight: 0.78,
+    nightSky: true,
+    nightWindows: true,
+    industrySmoke: true,
   },
   high: {
     level: 'high',
@@ -76,6 +88,9 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualitySettings> = {
     wind: true,
     maxTrees: 16_000,
     ambientLight: 0.68,
+    nightSky: true,
+    nightWindows: true,
+    industrySmoke: true,
   },
 };
 

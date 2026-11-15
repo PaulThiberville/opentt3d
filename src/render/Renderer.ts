@@ -8,6 +8,8 @@
 
 import * as THREE from 'three';
 import { clamp } from '../game/interpolation';
+import { Prng } from '../game/prng';
+import { approachPhase, sunState, wrap01, type SunState } from './dayNight';
 import {
   detectQuality,
   qualitySettings,
@@ -16,6 +18,11 @@ import {
   type QualityLevel,
   type QualitySettings,
 } from './quality';
+
+const STAR_COUNT = 520;
+const STAR_RADIUS = 240;
+const MOON_RADIUS = 220;
+const SUN_DISTANCE = 180;
 
 export interface RendererOptions {
   canvas: HTMLCanvasElement;
@@ -42,8 +49,19 @@ export class Renderer {
   private qualityLevel: QualityLevel;
   private settings: QualitySettings;
   private sun: THREE.DirectionalLight;
+  private moon: THREE.DirectionalLight;
   private hemi: THREE.HemisphereLight;
   private fog: THREE.Fog;
+  private skyColor = new THREE.Color(0x9dc3dc);
+  private stars: THREE.Points;
+  private starMaterial: THREE.PointsMaterial;
+  private moonDisc: THREE.Mesh;
+  private moonDiscMaterial: THREE.MeshBasicMaterial;
+  private phase = 0.35;
+  private targetPhase = 0.35;
+  private dayState: SunState = sunState(0.35);
+  private sunDirection = new THREE.Vector3(0, 1, 0);
+  private moonDirection = new THREE.Vector3(0, 1, 0);
   private running = false;
   private hidden = false;
   private handle: number | null = null;
@@ -108,6 +126,56 @@ export class Renderer {
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
 
+    this.moon = new THREE.DirectionalLight(0x9fb6e8, 0);
+    this.moon.castShadow = false;
+    this.scene.add(this.moon);
+    this.scene.add(this.moon.target);
+
+    const starGeometry = new THREE.BufferGeometry();
+    const starPositions = new Float32Array(STAR_COUNT * 3);
+    const starRng = new Prng(0x51a7c0de);
+    for (let i = 0; i < STAR_COUNT; i += 1) {
+      const theta = starRng.float(0, Math.PI * 2);
+      const y = starRng.float(0.06, 1);
+      const ring = Math.sqrt(Math.max(0, 1 - y * y));
+      starPositions[i * 3] = Math.cos(theta) * ring * STAR_RADIUS;
+      starPositions[i * 3 + 1] = y * STAR_RADIUS;
+      starPositions[i * 3 + 2] = Math.sin(theta) * ring * STAR_RADIUS;
+    }
+    starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+    this.starMaterial = new THREE.PointsMaterial({
+      color: 0xdfe8ff,
+      size: 2.1,
+      sizeAttenuation: false,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      fog: false,
+    });
+    this.stars = new THREE.Points(starGeometry, this.starMaterial);
+    this.stars.name = 'stars';
+    this.stars.frustumCulled = false;
+    this.stars.renderOrder = -2;
+    this.stars.visible = false;
+    this.scene.add(this.stars);
+
+    const moonGeometry = new THREE.CircleGeometry(4.4, 24);
+    this.moonDiscMaterial = new THREE.MeshBasicMaterial({
+      color: 0xe8eeff,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      fog: false,
+    });
+    this.moonDisc = new THREE.Mesh(moonGeometry, this.moonDiscMaterial);
+    this.moonDisc.name = 'moon';
+    this.moonDisc.frustumCulled = false;
+    this.moonDisc.renderOrder = -1;
+    this.moonDisc.visible = false;
+    this.scene.add(this.moonDisc);
+
+    this.applyDayNightState();
+
     this.resize();
     window.addEventListener('resize', this.handleResize);
     document.addEventListener('visibilitychange', this.handleVisibility);
@@ -123,6 +191,34 @@ export class Renderer {
 
   get settingsSnapshot(): QualitySettings {
     return this.settings;
+  }
+
+  /**
+   * Phase normalisée du jour (0 = minuit, 0,25 = lever, 0,5 = midi).
+   * Le rendu lisse les sauts de snapshot pour éviter tout clignotement ;
+   * `immediate` force la phase (captures, chargement, tests).
+   */
+  setTimeOfDay(fraction: number, immediate = false): void {
+    if (!Number.isFinite(fraction)) return;
+    this.targetPhase = wrap01(fraction);
+    if (immediate) {
+      this.phase = this.targetPhase;
+      this.dayState = sunState(this.phase);
+      this.applyDayNightState();
+    }
+  }
+
+  getTimeOfDay(): number {
+    return this.phase;
+  }
+
+  /** 0 = jour, 1 = nuit profonde (phase lissée). */
+  get nightAmount(): number {
+    return this.dayState.night;
+  }
+
+  get sunStateSnapshot(): SunState {
+    return this.dayState;
   }
 
   /** Applique un preset. L'antialiasing reste celui du contexte créé. */
@@ -141,6 +237,7 @@ export class Renderer {
     this.fog.far = this.settings.drawDistance;
     this.camera.far = this.settings.drawDistance;
     this.camera.updateProjectionMatrix();
+    this.applyDayNightState();
     this.resize();
   }
 
@@ -201,20 +298,71 @@ export class Renderer {
     this.lastTime = time;
     const delta = clamp(Number.isFinite(rawDelta) ? rawDelta : 0, 0, this.maxDelta);
     this.onFrame?.(delta);
-    this.render();
+    this.render(delta);
     this.schedule();
   };
 
-  private render(): void {
-    if (this.settings.shadows) {
-      this.camera.getWorldDirection(this.forward);
-      this.focus.copy(this.camera.position).addScaledVector(this.forward, 45);
-      this.sun.position.set(this.focus.x + 55, this.focus.y + 110, this.focus.z + 40);
-      this.sun.target.position.copy(this.focus);
-      this.sun.target.updateMatrixWorld();
-      this.sun.shadow.camera.updateProjectionMatrix();
-    }
+  private render(deltaSeconds = 0): void {
+    this.phase = approachPhase(this.phase, this.targetPhase, deltaSeconds, 0.16);
+    this.dayState = sunState(this.phase);
+    this.applyDayNightState();
+    this.updateCelestialPositions();
     this.webgl.render(this.scene, this.camera);
+  }
+
+  /** Couleurs, intensités et éléments de ciel pour la phase courante. */
+  private applyDayNightState(): void {
+    const state = this.dayState;
+    this.sun.color.setHex(state.colour);
+    this.sun.intensity = state.intensity;
+    this.sun.castShadow = this.settings.shadows && state.intensity > 0.06;
+    this.moon.intensity = state.moonIntensity;
+    this.hemi.color.setHex(state.hemiSky);
+    this.hemi.groundColor.setHex(state.hemiGround);
+    this.hemi.intensity = this.settings.ambientLight * state.ambient;
+    this.skyColor.setHex(state.skyColour);
+    if (this.scene.background instanceof THREE.Color) {
+      this.scene.background.copy(this.skyColor);
+    } else {
+      this.scene.background = this.skyColor.clone();
+    }
+    this.fog.color.setHex(state.fogColour);
+    this.webgl.toneMappingExposure = 1.12 - 0.1 * state.daylight;
+
+    const showSky = this.settings.nightSky;
+    this.stars.visible = showSky && state.starOpacity > 0.02;
+    this.starMaterial.opacity = state.starOpacity * 0.9;
+    this.moonDisc.visible = showSky && state.night > 0.12;
+    this.moonDiscMaterial.opacity = Math.min(1, state.night * 0.95);
+  }
+
+  /** Soleil, lune et étoiles suivent la caméra et le point visé. */
+  private updateCelestialPositions(): void {
+    const state = this.dayState;
+    this.camera.getWorldDirection(this.forward);
+    this.focus.copy(this.camera.position).addScaledVector(this.forward, 45);
+
+    this.sunDirection
+      .set(state.direction.x, Math.max(0.06, state.direction.y), state.direction.z)
+      .normalize();
+    this.sun.position.copy(this.focus).addScaledVector(this.sunDirection, SUN_DISTANCE);
+    this.sun.target.position.copy(this.focus);
+    this.sun.target.updateMatrixWorld();
+    if (this.settings.shadows) this.sun.shadow.camera.updateProjectionMatrix();
+
+    this.moonDirection
+      .set(-state.direction.x, Math.max(0.15, -state.direction.y), -state.direction.z)
+      .normalize();
+    this.moon.position.copy(this.focus).addScaledVector(this.moonDirection, SUN_DISTANCE);
+    this.moon.target.position.copy(this.focus);
+    this.moon.target.updateMatrixWorld();
+
+    this.stars.position.copy(this.camera.position);
+    this.stars.rotation.y = this.phase * Math.PI * 2;
+    this.moonDisc.position
+      .copy(this.camera.position)
+      .addScaledVector(this.moonDirection, MOON_RADIUS);
+    this.moonDisc.lookAt(this.camera.position);
   }
 
   private handleResize = (): void => {
@@ -256,8 +404,16 @@ export class Renderer {
     this.resizeObserver = null;
     this.scene.remove(this.sun);
     this.scene.remove(this.sun.target);
+    this.scene.remove(this.moon);
+    this.scene.remove(this.moon.target);
+    this.scene.remove(this.stars);
+    this.scene.remove(this.moonDisc);
     this.scene.remove(this.hemi);
     this.sun.shadow.map?.dispose();
+    this.stars.geometry.dispose();
+    this.starMaterial.dispose();
+    this.moonDisc.geometry.dispose();
+    this.moonDiscMaterial.dispose();
     this.webgl.dispose();
     this.scene.clear();
   }
