@@ -1,9 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  createMemoryBus,
-  createTransport,
-  type Transport,
-} from '../../src/net/transport.js';
+import { afterEach, describe, expect, it } from 'vitest';
+import { createMemoryBus, createTransport, type Transport } from '../../src/net/transport.js';
 import { MAX_MESSAGE_BYTES } from '../../src/net/types.js';
 import { wait, waitFor } from './helpers.js';
 

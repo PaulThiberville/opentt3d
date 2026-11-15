@@ -39,7 +39,9 @@ describe('guards du protocole réseau', () => {
       }),
     ).toBe(true);
     expect(isEngineCommand({ type: 'speed', speed: 9 })).toBe(false);
-    expect(isEngineCommand({ type: 'build', tool: 'laser', company: 0, from: { x: 0, y: 0 } })).toBe(false);
+    expect(
+      isEngineCommand({ type: 'build', tool: 'laser', company: 0, from: { x: 0, y: 0 } }),
+    ).toBe(false);
     expect(isEngineCommand({ type: 'console', command: 42 })).toBe(false);
     expect(isCommand({ type: 'pause', paused: true, p: 0 })).toBe(true);
     expect(isCommand({ type: 'pause', paused: true, p: 99 })).toBe(false);
@@ -54,12 +56,12 @@ describe('guards du protocole réseau', () => {
   });
 
   it('valide hello / cmd / turn', () => {
-    expect(
-      isHelloMessage({ ...base, k: 'hello', player: 0, tick: 3, host: true, epoch: 0 }),
-    ).toBe(true);
-    expect(
-      isHelloMessage({ ...base, k: 'hello', player: 0, tick: -1, host: true, epoch: 0 }),
-    ).toBe(false);
+    expect(isHelloMessage({ ...base, k: 'hello', player: 0, tick: 3, host: true, epoch: 0 })).toBe(
+      true,
+    );
+    expect(isHelloMessage({ ...base, k: 'hello', player: 0, tick: -1, host: true, epoch: 0 })).toBe(
+      false,
+    );
 
     expect(
       isCmdMessage({
@@ -125,9 +127,9 @@ describe('guards du protocole réseau', () => {
   });
 
   it('rejette une version de protocole inconnue', () => {
-    expect(
-      isHelloMessage({ v: 999, k: 'hello', player: 0, tick: 0, host: false, epoch: 0 }),
-    ).toBe(false);
+    expect(isHelloMessage({ v: 999, k: 'hello', player: 0, tick: 0, host: false, epoch: 0 })).toBe(
+      false,
+    );
   });
 
   it('route la validation par canal', () => {

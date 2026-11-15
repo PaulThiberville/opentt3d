@@ -170,11 +170,7 @@ export function isFiniteNumber(value: unknown): value is number {
 }
 
 export function isPoint(value: unknown): value is { x: number; y: number } {
-  return (
-    isRecord(value) &&
-    isFiniteNumber(value.x) &&
-    isFiniteNumber(value.y)
-  );
+  return isRecord(value) && isFiniteNumber(value.x) && isFiniteNumber(value.y);
 }
 
 /** Channel names: 1..24 chars, `[A-Za-z0-9_-]`. */
@@ -226,11 +222,7 @@ export function isEngineCommand(value: unknown): value is EngineCommand {
       if (value.options !== undefined) {
         if (!isRecord(value.options)) return false;
         for (const item of Object.values(value.options)) {
-          if (
-            typeof item !== 'string' &&
-            typeof item !== 'number' &&
-            typeof item !== 'boolean'
-          ) {
+          if (typeof item !== 'string' && typeof item !== 'number' && typeof item !== 'boolean') {
             return false;
           }
         }
@@ -302,10 +294,7 @@ export function isCmdMessage(value: unknown): value is CmdMessage {
   if (!hasBase(value) || value.k !== 'cmd' || !Array.isArray(value.b)) return false;
   if (value.b.length > 64) return false;
   return value.b.every(
-    (entry: unknown) =>
-      isRecord(entry) &&
-      isNat(entry.s) &&
-      isEngineCommand(entry.c),
+    (entry: unknown) => isRecord(entry) && isNat(entry.s) && isEngineCommand(entry.c),
   );
 }
 
@@ -376,10 +365,7 @@ export function isLeaveMessage(value: unknown): value is LeaveMessage {
 }
 
 /** Validates a message received on a given channel (channels mirror kinds). */
-export function validateChannelMessage(
-  channel: string,
-  value: unknown,
-): NetMessage | null {
+export function validateChannelMessage(channel: string, value: unknown): NetMessage | null {
   switch (channel) {
     case 'hello':
       return isHelloMessage(value) ? value : null;

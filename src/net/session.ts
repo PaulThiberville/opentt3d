@@ -49,7 +49,6 @@ const DEFAULT_INPUT_DELAY = 3;
 const MAX_NORMAL_STEPS = 5;
 const CATCHUP_EXTRA = 4;
 const LAG_PAUSE_TICKS = 50;
-const LAG_RESUME_TICKS = 25;
 const TURN_HISTORY = 600;
 const MAX_TURN_AHEAD = 8192;
 const MAX_CMDS_PER_PLAYER_PER_TURN = 64;
@@ -227,11 +226,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   let waitingFor: string[] = [];
   let lastAppliedSaveTick = -1;
 
-  const { players, peerToPlayer } = normalizePeers(
-    options.peers,
-    transport.selfId,
-    localPlayer,
-  );
+  const { players, peerToPlayer } = normalizePeers(options.peers, transport.selfId, localPlayer);
 
   const selfRecord = players.get(localPlayer);
   if (amHost) {
@@ -240,8 +235,9 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   } else {
     hostPeerId =
       options.hostId ??
-      [...players.values()].sort((a, b) => a.index - b.index).find((p) => p.peerId !== transport.selfId)
-        ?.peerId;
+      [...players.values()]
+        .sort((a, b) => a.index - b.index)
+        .find((p) => p.peerId !== transport.selfId)?.peerId;
   }
 
   // ---- turn state
@@ -274,11 +270,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   function send(channel: string, message: object, target?: string | string[]): void {
     if (disposed) return;
-    transport.send(
-      channel,
-      { v: NET_PROTOCOL_VERSION, ...message },
-      target,
-    );
+    transport.send(channel, { v: NET_PROTOCOL_VERSION, ...message }, target);
   }
 
   function playerOf(peerId: string): PlayerRecord | undefined {
@@ -403,7 +395,14 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     commands.sort((a, b) => a.p - b.p || (a.s ?? -1) - (b.s ?? -1));
 
     storeTurn(index, commands, false);
-    outTurns.push({ v: NET_PROTOCOL_VERSION, k: 'turn', epoch, tick: index, commands, d: inputDelay });
+    outTurns.push({
+      v: NET_PROTOCOL_VERSION,
+      k: 'turn',
+      epoch,
+      tick: index,
+      commands,
+      d: inputDelay,
+    });
   }
 
   function execTurn(): void {
@@ -413,8 +412,9 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     const forEngine: Command[] = [];
     for (const command of commands) {
       if (command.type === 'leave') continue;
-      const { s: _s, ...rest } = command;
-      forEngine.push(rest as Command);
+      const rest = { ...command };
+      delete (rest as { s?: number }).s;
+      forEngine.push(rest);
     }
     runner.step(forEngine);
     const after = runner.tick();
@@ -483,11 +483,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
         sendSave(peerId);
         return;
       }
-      send(
-        'turn',
-        { k: 'turn', epoch, tick, commands, d: inputDelay },
-        peerId,
-      );
+      send('turn', { k: 'turn', epoch, tick, commands, d: inputDelay }, peerId);
     }
   }
 
@@ -631,10 +627,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     if (!player || player.left || !player.connected) return;
     let queued = hostQueue.filter((item) => item.p === player.index).length;
     for (const entry of b) {
-      const last = Math.max(
-        queuedSeq.get(player.index) ?? -1,
-        seenSeq.get(player.index) ?? -1,
-      );
+      const last = Math.max(queuedSeq.get(player.index) ?? -1, seenSeq.get(player.index) ?? -1);
       if (entry.s <= last) continue;
       if (queued >= MAX_QUEUE_PER_PLAYER) break;
       hostQueue.push({ p: player.index, s: entry.s, cmd: entry.c });
@@ -883,11 +876,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     if (disposed || amHost || !hostPeerId) return;
     if (currentNow - lastResyncRequestAt < RESYNC_RETRY_MS) return;
     lastResyncRequestAt = currentNow;
-    send(
-      'resync',
-      { k: 'resync', epoch, tick: runner.tick(), request: true },
-      hostPeerId,
-    );
+    send('resync', { k: 'resync', epoch, tick: runner.tick(), request: true }, hostPeerId);
   }
 
   // ------------------------------------------------------------------ handlers
@@ -1075,8 +1064,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   function update(nowMs: number): NetUpdate {
     if (disposed) return { ...NO_UPDATE, desyncs };
     currentNow = Number.isFinite(nowMs) ? nowMs : currentNow;
-    const dt =
-      lastNow === null ? 0 : Math.min(1000, Math.max(0, currentNow - lastNow));
+    const dt = lastNow === null ? 0 : Math.min(1000, Math.max(0, currentNow - lastNow));
     lastNow = currentNow;
 
     if (amHost) return updateHost(currentNow, dt);
@@ -1149,10 +1137,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
             id,
             index,
             total,
-            data: data.slice(
-              index * MAX_SAVE_CHUNK_CHARS,
-              (index + 1) * MAX_SAVE_CHUNK_CHARS,
-            ),
+            data: data.slice(index * MAX_SAVE_CHUNK_CHARS, (index + 1) * MAX_SAVE_CHUNK_CHARS),
           },
           left: [...leftPlayers],
         },

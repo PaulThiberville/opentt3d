@@ -142,10 +142,7 @@ describe('session lockstep', () => {
     expect(newHost).toBeDefined();
     expect(newHost?.localPlayer).toBe(1);
     expect(remaining.every((session) => session.stats().tick === 800)).toBe(true);
-    const result = hashes(
-      remaining,
-      cluster.runners.slice(1),
-    );
+    const result = hashes(remaining, cluster.runners.slice(1));
     expect(new Set(result).size).toBe(1);
   });
 
@@ -191,10 +188,22 @@ describe('session lockstep', () => {
     if (!hostTransport || !clientTransport) throw new Error('transports manquants');
 
     // Unknown peer trying to inject commands: ignored (no player mapping).
-    intruder.send('cmd', { v: 1, k: 'cmd', b: [{ s: 1, c: { type: 'pause', paused: true } }] }, hostTransport.selfId);
+    intruder.send(
+      'cmd',
+      { v: 1, k: 'cmd', b: [{ s: 1, c: { type: 'pause', paused: true } }] },
+      hostTransport.selfId,
+    );
     // Malformed control messages: rejected by the guards.
-    intruder.send('turn', { v: 1, k: 'turn', epoch: 0, tick: 99999, commands: 'nope', d: 3 }, clientTransport.selfId);
-    intruder.send('hash', { v: 1, k: 'hash', epoch: 0, tick: 'x', hash: 12 }, clientTransport.selfId);
+    intruder.send(
+      'turn',
+      { v: 1, k: 'turn', epoch: 0, tick: 99999, commands: 'nope', d: 3 },
+      clientTransport.selfId,
+    );
+    intruder.send(
+      'hash',
+      { v: 1, k: 'hash', epoch: 0, tick: 'x', hash: 12 },
+      clientTransport.selfId,
+    );
     intruder.send('resync', { v: 1, k: 'resync', epoch: 'x' }, clientTransport.selfId);
     intruder.send('ack', { v: 1, k: 'ack', tick: -3 }, hostTransport.selfId);
     intruder.leave();

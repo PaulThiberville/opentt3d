@@ -25,12 +25,7 @@ export type {
   PeersMap,
   Runner,
 } from './session.js';
-export {
-  ACK_INTERVAL,
-  HASH_INTERVAL,
-  NET_TICK_MS,
-  createNetSession,
-} from './session.js';
+export { ACK_INTERVAL, HASH_INTERVAL, NET_TICK_MS, createNetSession } from './session.js';
 
 export type {
   AckMessage,

@@ -17,10 +17,7 @@
 
 import { joinRoom } from 'trystero';
 import type { DataPayload, MessageAction, Room } from 'trystero';
-import {
-  MAX_MESSAGE_BYTES,
-  isChannelName,
-} from './types.js';
+import { MAX_MESSAGE_BYTES, isChannelName } from './types.js';
 
 export type TransportKind = 'trystero' | 'local' | 'memory';
 
@@ -120,10 +117,7 @@ interface RateLimiter {
 
 function createRateLimit(options: RateLimitOptions | undefined): RateLimiter {
   const burst = Math.max(1, Math.floor(options?.burst ?? DEFAULT_RATE_LIMIT.burst));
-  const perSecond = Math.max(
-    0.001,
-    options?.perSecond ?? DEFAULT_RATE_LIMIT.perSecond,
-  );
+  const perSecond = Math.max(0.001, options?.perSecond ?? DEFAULT_RATE_LIMIT.perSecond);
   const buckets = new Map<string, { tokens: number; last: number }>();
 
   return {
@@ -225,11 +219,7 @@ function createRegistry(label: string): Registry {
 }
 
 /** Serialises and validates an outbound payload. Returns null on refusal. */
-function preparePayload(
-  reg: Registry,
-  channel: string,
-  data: unknown,
-): string | null {
+function preparePayload(reg: Registry, channel: string, data: unknown): string | null {
   let raw: string;
   try {
     raw = JSON.stringify(data);
@@ -243,9 +233,7 @@ function preparePayload(
   }
   const bytes = textBytes(raw);
   if (bytes > MAX_MESSAGE_BYTES) {
-    reg.emitError(
-      `Message trop volumineux (${bytes} octets, limite ${MAX_MESSAGE_BYTES}).`,
-    );
+    reg.emitError(`Message trop volumineux (${bytes} octets, limite ${MAX_MESSAGE_BYTES}).`);
     return null;
   }
   return raw;
@@ -302,14 +290,7 @@ function getMemoryBus(roomKey: string, explicit: MemoryBus | undefined): MemoryB
 
 interface Envelope {
   f: string;
-  k:
-    | 'hello'
-    | 'here'
-    | 'hb'
-    | 'bye'
-    | 'ping'
-    | 'pong'
-    | 'm';
+  k: 'hello' | 'here' | 'hb' | 'bye' | 'ping' | 'pong' | 'm';
   c?: string;
   d?: unknown;
   t?: string | string[];
@@ -464,13 +445,16 @@ function createMemoryTransport(
       if (!target) return Promise.reject(new Error(`Pair inconnu : ${peerId}`));
       return new Promise<number>((resolve) => {
         const nonce = ++pingSeq;
-        const timer = setTimeout(() => {
-          const pending = pings.get(nonce);
-          if (pending) {
-            pings.delete(nonce);
-            pending.resolve(-1);
-          }
-        }, Math.max(1000, latency * 4));
+        const timer = setTimeout(
+          () => {
+            const pending = pings.get(nonce);
+            if (pending) {
+              pings.delete(nonce);
+              pending.resolve(-1);
+            }
+          },
+          Math.max(1000, latency * 4),
+        );
         pings.set(nonce, { peer: peerId, start: nowMs(), timer, resolve });
         deliver({ f: selfId, k: 'ping', t: peerId, n: nonce });
       });
@@ -692,11 +676,6 @@ function createLocalTransport(
 // ---------------------------------------------------------------------------
 // Trystero transport — WebRTC + Nostr public relays
 
-interface PhysicalPeer {
-  physicalId: string;
-  logicalId: string;
-}
-
 function createTrysteroTransport(
   selfId: string,
   roomId: string,
@@ -834,7 +813,10 @@ function createTrysteroTransport(
       }
       const action = ensureAction(channelName);
       void Promise.resolve(
-        action.send(payload as DataPayload, physicalTarget ? { target: physicalTarget } : undefined),
+        action.send(
+          payload as DataPayload,
+          physicalTarget ? { target: physicalTarget } : undefined,
+        ),
       ).catch((error: unknown) => {
         if (closed) return;
         const message = error instanceof Error ? error.message : String(error);
