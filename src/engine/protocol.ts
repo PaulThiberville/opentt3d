@@ -155,13 +155,88 @@ export interface MapSnapshot {
 
 export type VehicleKind = 'train' | 'road' | 'ship' | 'aircraft';
 
-/** Type d'une cible de tournée (gare, industrie ou dépôt). */
-export type OrderTargetKind = 'station' | 'industry' | 'depot';
+/**
+ * Type d'une cible de tournée : gare, industrie, dépôt, ou ordre conditionnel
+ * (#161). Un ordre conditionnel n'a pas de cible physique : `target` est
+ * ignoré et `options.condition`/`options.jump` décident de la suite.
+ */
+export type OrderTargetKind = 'station' | 'industry' | 'depot' | 'conditional';
+
+/**
+ * Comportement à l'arrêt (#161). Regroupe les modes OpenTTD « full load »,
+ * « no load », « unload » et « transfer » en une seule option lisible par l'UI.
+ *
+ * - `normal` : décharge si possible puis charge ce qui est disponible ;
+ * - `full_load` : décharge puis attend le plein (avec délai de garde) ;
+ * - `no_load` : décharge mais ne charge pas ;
+ * - `unload` : force le déchargement (revenu immédiat), sans chargement ;
+ * - `transfer` : dépose la cargaison en gare sans revenu, puis recharge.
+ */
+export type OrderAction = 'normal' | 'full_load' | 'no_load' | 'unload' | 'transfer';
+
+/** Variable évaluée par un ordre conditionnel (#161). */
+export type OrderConditionType = 'cargo' | 'money' | 'date' | 'percentage';
+
+/** Comparateur d'une condition, aligné sur `OrderConditionComparator` d'OpenTTD. */
+export type OrderComparator =
+  'equal' | 'not_equal' | 'less' | 'less_or_equal' | 'more' | 'more_or_equal';
+
+/**
+ * Condition d'un ordre conditionnel (#161).
+ *
+ * `value` porte la quantité (cargaison), la somme (argent), l'année (date) ou
+ * le pourcentage de chargement. Pour `date`, `month` (0..11) complète l'année.
+ */
+export interface OrderCondition {
+  type: OrderConditionType;
+  comparator: OrderComparator;
+  value: number;
+  /** Cargaison comparée quand `type === 'cargo'`. */
+  cargo?: string;
+  /** Mois 0..11 quand `type === 'date'`. */
+  month?: number;
+}
+
+/** Horaire d'un ordre (#162), exprimé en ticks moteur. */
+export interface OrderTimetable {
+  /** Attente planifiée à l'arrêt. */
+  waitTicks?: number;
+  /** Durée de trajet planifiée jusqu'à l'ordre suivant. */
+  travelTicks?: number;
+  /** Démarre automatiquement le véhicule quand la tournée est valide. */
+  autostart?: boolean;
+}
+
+/** Options d'un ordre de tournée (#161/#162). */
+export interface OrderOptions {
+  action?: OrderAction;
+  /** Présent sur un ordre conditionnel. */
+  condition?: OrderCondition;
+  /** Index de l'ordre à sauter quand la condition est vraie. */
+  jump?: number;
+  timetable?: OrderTimetable;
+}
+
+/** Ordre transmis au moteur (`vehicle.order`). */
+export interface VehicleOrderSpec {
+  /** Id de gare, d'industrie ou de dépôt ; ignoré pour `conditional`. */
+  target: number;
+  kind: OrderTargetKind;
+  options?: OrderOptions;
+}
+
+/** Ordre exposé dans le snapshot, options incluses (#161). */
+export interface VehicleOrderSnapshot extends VehicleOrderSpec {
+  /** Index dans la tournée (identique à la position dans `orderDetails`). */
+  index?: number;
+}
 
 export interface VehicleSnapshot {
   id: number;
   kind: VehicleKind;
   company: CompanyId;
+  /** Identifiant du catalogue partagé (`vehicleRules`) si connu (#160). */
+  model?: string;
   /** Position en tuiles (fractionnaire, pour l'interpolation). */
   x: number;
   y: number;
@@ -182,6 +257,13 @@ export interface VehicleSnapshot {
    * pools d'identifiants.
    */
   orderKinds?: OrderTargetKind[];
+  /**
+   * Tournée complète, ordres conditionnels et options inclus (#161). Absent
+   * des moteurs antérieurs : l'UI retombe alors sur `orderTargets`/`orderKinds`.
+   */
+  orderDetails?: VehicleOrderSnapshot[];
+  /** Index de l'ordre courant dans `orderDetails` (#161/#162). */
+  currentOrder?: number;
   profitLastYear: number;
   ageDays: number;
 }
@@ -465,7 +547,7 @@ export type EngineCommand =
     }
   | {
       type: 'vehicle';
-      action: 'buy' | 'sell' | 'refit' | 'order' | 'start' | 'stop';
+      action: 'buy' | 'sell' | 'refit' | 'order' | 'start' | 'stop' | 'clone';
       company: CompanyId;
       vehicle?: number;
       /** Dépôt d'achat par identifiant stable de `depots[]` (prioritaire). */
@@ -473,11 +555,15 @@ export type EngineCommand =
       /** Compatibilité : tuile du dépôt quand le client n'a pas d'id. */
       depot?: { x: number; y: number };
       model?: string;
+      /** Cargaison cible d'un `refit` (#160), slug stable (`goods`, `coal`…). */
+      cargo?: string;
       /**
        * Tournée complète. `target` est un id de gare, d'industrie ou de dépôt
-       * (`depots[].id` pour `kind: 'depot'`).
+       * (`depots[].id` pour `kind: 'depot'`), ou -1 pour un ordre conditionnel.
        */
-      orders?: { target: number; kind: OrderTargetKind }[];
+      orders?: VehicleOrderSpec[];
+      /** `clone` : partage la tournée du véhicule source au lieu de la copier. */
+      shareOrders?: boolean;
     }
   | {
       /** Prêts bancaires (#165). `amount` absent = un pas de prêt. */

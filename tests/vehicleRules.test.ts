@@ -3,14 +3,21 @@ import { PROTOCOL_VERSION, type DepotSnapshot, type WorldSnapshot } from '../src
 import {
   MAX_VEHICLE_ORDERS,
   buyVehicleCommand,
+  cloneOrderOptions,
+  cloneVehicleCommand,
   depotAtTile,
   depotById,
   depotKindLabel,
   depotOrder,
+  inferVehicleModel,
   modelsForDepot,
   orderTargetLabel,
   orderVehicleCommand,
   ordersFromSnapshot,
+  refitCost,
+  refitOption,
+  refitOptions,
+  refitVehicleCommand,
   stationAtTile,
   validateVehicleOrders,
   vehicleActionCommand,
@@ -197,5 +204,161 @@ describe('vehicleRules : ordres et commandes', () => {
       vehicle: 12,
       orders: [{ target: 3, kind: 'station' }],
     });
+  });
+
+  it('copie profondément les options d’ordre dans la commande', () => {
+    const source = {
+      target: 3,
+      kind: 'station' as const,
+      options: {
+        action: 'full_load' as const,
+        timetable: { waitTicks: 120, autostart: true },
+      },
+    };
+    const command = orderVehicleCommand(0, 4, [
+      source,
+      {
+        target: -1,
+        kind: 'conditional',
+        options: {
+          condition: { type: 'cargo', comparator: 'more', value: 10, cargo: 'coal' },
+          jump: 0,
+        },
+      },
+    ]);
+    expect(command.orders).toEqual([
+      {
+        target: 3,
+        kind: 'station',
+        options: { action: 'full_load', timetable: { waitTicks: 120, autostart: true } },
+      },
+      {
+        target: -1,
+        kind: 'conditional',
+        options: {
+          condition: { type: 'cargo', comparator: 'more', value: 10, cargo: 'coal' },
+          jump: 0,
+        },
+      },
+    ]);
+    source.options.timetable.waitTicks = 1;
+    expect(command.orders?.[0]?.options?.timetable?.waitTicks).toBe(120);
+    expect(
+      cloneOrderOptions({
+        action: 'transfer',
+        timetable: { autostart: true },
+      }).timetable?.autostart,
+    ).toBe(true);
+  });
+
+  it('valide les ordres conditionnels et exige un saut dans la tournée', () => {
+    const snap = snapshot();
+    const orders = [
+      { target: 3, kind: 'station' as const },
+      {
+        target: -1,
+        kind: 'conditional' as const,
+        options: {
+          condition: {
+            type: 'percentage' as const,
+            comparator: 'more_or_equal' as const,
+            value: 80,
+          },
+          jump: 0,
+        },
+      },
+    ];
+    expect(validateVehicleOrders(orders, snap).ok).toBe(true);
+    expect(
+      validateVehicleOrders(
+        [
+          { target: 3, kind: 'station' },
+          { target: -1, kind: 'conditional', options: { jump: 0 } },
+        ],
+        snap,
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateVehicleOrders(
+        [
+          { target: 3, kind: 'station' },
+          {
+            target: -1,
+            kind: 'conditional',
+            options: {
+              condition: { type: 'money', comparator: 'more', value: 0 },
+              jump: 9,
+            },
+          },
+        ],
+        snap,
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateVehicleOrders(
+        [
+          {
+            target: -1,
+            kind: 'conditional',
+            options: {
+              condition: { type: 'money', comparator: 'more', value: 0 },
+              jump: 0,
+            },
+          },
+        ],
+        snap,
+      ),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining('au moins un arrêt') });
+  });
+
+  it('préfère orderDetails pour les tournées enrichies', () => {
+    const orders = ordersFromSnapshot(
+      {
+        orderTargets: [3, 5],
+        orderKinds: ['station', 'depot'],
+        orderDetails: [
+          { index: 0, target: 3, kind: 'station', options: { action: 'full_load' } },
+          { index: 1, target: -1, kind: 'conditional', options: { jump: 0 } },
+          { index: 2, target: 5, kind: 'depot', options: { action: 'transfer' } },
+        ],
+      },
+      snapshot(),
+    );
+    expect(orders.map((order) => order.kind)).toEqual(['station', 'conditional', 'depot']);
+    expect(orders[2]?.options?.action).toBe('transfer');
+    expect(orderTargetLabel(orders[1]!, snapshot())).toBe('Ordre conditionnel');
+  });
+
+  it('expose les refits du catalogue, leur capacité et leur coût', () => {
+    const model = vehicleModel('truck_flatbed');
+    if (!model) throw new Error('modèle attendu');
+    expect(refitOptions(model).map((option) => option.cargo)).toEqual([
+      'goods',
+      'coal',
+      'grain',
+      'wood',
+      'steel',
+    ]);
+    expect(refitOption(model, 'coal')?.capacity).toBe(34);
+    expect(refitOption(model, 'passengers')).toBeNull();
+    expect(refitOption(null, 'coal')).toBeNull();
+    expect(refitCost(model)).toBe(560);
+    expect(refitCost(null)).toBe(0);
+    expect(refitVehicleCommand(1, 8, 'coal')).toEqual({
+      type: 'vehicle',
+      action: 'refit',
+      company: 1,
+      vehicle: 8,
+      cargo: 'coal',
+    });
+    expect(cloneVehicleCommand(1, 8, false)).toEqual({
+      type: 'vehicle',
+      action: 'clone',
+      company: 1,
+      vehicle: 8,
+      shareOrders: false,
+    });
+    expect(inferVehicleModel('road', 'coal')?.id).toBe('truck_flatbed');
+    expect(inferVehicleModel('train', 'passengers')?.id).toBe('rail_autorail');
   });
 });

@@ -27,6 +27,9 @@ import {
   type IndustrySnapshot,
   type MapSnapshot,
   type NewGameOptions,
+  type OrderAction,
+  type OrderComparator,
+  type OrderCondition,
   type RailType,
   type SignalDirection,
   type StationSnapshot,
@@ -93,7 +96,12 @@ import {
 } from '../game/signalRules';
 import {
   MAX_VEHICLE_ORDERS,
+  cloneOrder,
+  cloneOrderOptions,
+  cloneCost,
   modelCompatibleWithRail,
+  refitCost,
+  refitOption,
   vehicleModel,
   type DepotKind,
   type VehicleOrder,
@@ -125,6 +133,8 @@ interface P2 {
 interface MockStop {
   kind: 'station' | 'industry' | 'depot';
   id: number;
+  /** Index de l'ordre correspondant dans `vehicle.orders` (#161). */
+  order?: number;
 }
 
 interface MockVehicle {
@@ -143,6 +153,10 @@ interface MockVehicle {
   segmentT: number;
   /** Arrêt par index de segment, `null` si le segment n'est pas une cible. */
   segmentStops: (MockStop | null)[];
+  /** Index de l'ordre courant dans `orders` (#161). */
+  currentOrder: number;
+  /** Ordres (index complets) dans l'ordre du tracé courant (#161). */
+  routeOrders: number[];
   speed: number;
   direction: number;
   status: number;
@@ -521,6 +535,8 @@ interface StopPoint {
   y: number;
   kind: MockStop['kind'];
   id: number;
+  /** Index de l'ordre d'origine (#161). */
+  order?: number;
 }
 
 /** Marque les segments dont le nœud de départ est la tuile d'un arrêt. */
@@ -532,7 +548,9 @@ function segmentsForStopsOnPath(path: P2[], stops: StopPoint[]): (MockStop | nul
     for (const stop of stops) {
       const dx = point.x - (stop.x + 0.5);
       const dy = point.y - (stop.y + 0.5);
-      if (dx * dx + dy * dy <= 1.1) result[i] = { kind: stop.kind, id: stop.id };
+      if (dx * dx + dy * dy <= 1.1) {
+        result[i] = { kind: stop.kind, id: stop.id, order: stop.order };
+      }
     }
   }
   return result;
@@ -560,30 +578,75 @@ function buildRoutePath(start: P2, targets: readonly P2[]): P2[] {
 interface ResolvedOrders {
   targets: P2[];
   stops: StopPoint[];
+  /** Index complets des destinations, dans l'ordre du tracé. */
+  orderIndices: number[];
   error: string | null;
 }
 
-/** Résout les cibles d'une tournée en points du monde et arrêts. */
-function resolveOrders(world: MockWorld, orders: readonly VehicleOrder[]): ResolvedOrders {
+/** Résout une destination physique ; `null` pour un conditionnel. */
+function resolveOrderTarget(world: MockWorld, order: VehicleOrder): P2 | null {
+  if (order.kind === 'conditional') return null;
+  if (order.kind === 'station') {
+    const station = world.stations.find((item) => item.id === order.target);
+    return station ? { x: station.x, y: station.y } : null;
+  }
+  if (order.kind === 'industry') {
+    const industry = world.industries.find((item) => item.id === order.target);
+    return industry ? { x: industry.x, y: industry.y } : null;
+  }
+  const depot = world.depots.find((item) => item.id === order.target);
+  return depot ? { x: depot.x + depot.width / 2, y: depot.y + depot.height / 2 } : null;
+}
+
+/**
+ * Résout les cibles d'une tournée en points du monde et arrêts, en partant de
+ * l'ordre `startIndex` (rotation). Les conditionnels n'ont pas de cible
+ * physique et sont ignorés ici.
+ */
+function resolveOrders(
+  world: MockWorld,
+  orders: readonly VehicleOrder[],
+  startIndex = 0,
+): ResolvedOrders {
   const targets: P2[] = [];
   const stops: StopPoint[] = [];
-  for (const order of orders) {
+  const orderIndices: number[] = [];
+  if (orders.length === 0) return { targets, stops, orderIndices, error: null };
+  const start = ((startIndex % orders.length) + orders.length) % orders.length;
+  for (let offset = 0; offset < orders.length; offset += 1) {
+    const index = (start + offset) % orders.length;
+    const order = orders[index];
+    if (!order || order.kind === 'conditional') continue;
     if (order.kind === 'station') {
       const station = world.stations.find((item) => item.id === order.target);
-      if (!station) return { targets: [], stops: [], error: `Gare #${order.target} introuvable.` };
+      if (!station) {
+        return {
+          targets: [],
+          stops: [],
+          orderIndices: [],
+          error: `Gare #${order.target} introuvable.`,
+        };
+      }
       targets.push({ x: station.x, y: station.y });
       stops.push({
         x: Math.floor(station.x),
         y: Math.floor(station.y),
         kind: 'station',
         id: station.id,
+        order: index,
       });
+      orderIndices.push(index);
       continue;
     }
     if (order.kind === 'industry') {
       const industry = world.industries.find((item) => item.id === order.target);
       if (!industry) {
-        return { targets: [], stops: [], error: `Industrie #${order.target} introuvable.` };
+        return {
+          targets: [],
+          stops: [],
+          orderIndices: [],
+          error: `Industrie #${order.target} introuvable.`,
+        };
       }
       targets.push({ x: industry.x, y: industry.y });
       stops.push({
@@ -591,12 +654,19 @@ function resolveOrders(world: MockWorld, orders: readonly VehicleOrder[]): Resol
         y: Math.floor(industry.y),
         kind: 'industry',
         id: industry.id,
+        order: index,
       });
+      orderIndices.push(index);
       continue;
     }
     const depot = world.depots.find((item) => item.id === order.target);
     if (!depot) {
-      return { targets: [], stops: [], error: `Dépôt ${order.target} introuvable ou démoli.` };
+      return {
+        targets: [],
+        stops: [],
+        orderIndices: [],
+        error: `Dépôt ${order.target} introuvable ou démoli.`,
+      };
     }
     targets.push({ x: depot.x + depot.width / 2, y: depot.y + depot.height / 2 });
     stops.push({
@@ -604,21 +674,123 @@ function resolveOrders(world: MockWorld, orders: readonly VehicleOrder[]): Resol
       y: depot.y,
       kind: 'depot',
       id: depot.id,
+      order: index,
     });
+    orderIndices.push(index);
   }
-  return { targets, stops, error: null };
+  return { targets, stops, orderIndices, error: null };
 }
 
-/** Recalcule la boucle d'un véhicule depuis sa tournée. */
+/** Compare deux valeurs selon un comparateur de condition. */
+function compareOrderValues(left: number, right: number, comparator: OrderComparator): boolean {
+  switch (comparator) {
+    case 'equal':
+      return left === right;
+    case 'not_equal':
+      return left !== right;
+    case 'less':
+      return left < right;
+    case 'less_or_equal':
+      return left <= right;
+    case 'more':
+      return left > right;
+    case 'more_or_equal':
+      return left >= right;
+    default:
+      return false;
+  }
+}
+
+/** Évalue une condition d'ordre (#161) sur l'état du monde et du véhicule. */
+function evaluateOrderCondition(
+  world: MockWorld,
+  vehicle: MockVehicle,
+  condition: OrderCondition,
+): boolean {
+  const company = world.companies[vehicle.company];
+  switch (condition.type) {
+    case 'money':
+      return compareOrderValues(company?.money ?? 0, condition.value, condition.comparator);
+    case 'date': {
+      const left = world.year * MONTHS_PER_YEAR + world.month;
+      const right = condition.value * MONTHS_PER_YEAR + (condition.month ?? 0);
+      return compareOrderValues(left, right, condition.comparator);
+    }
+    case 'percentage': {
+      const percent =
+        vehicle.cargoCapacity > 0
+          ? Math.round((vehicle.cargoAmount / vehicle.cargoCapacity) * 100)
+          : 0;
+      return compareOrderValues(percent, condition.value, condition.comparator);
+    }
+    case 'cargo':
+    default: {
+      const amount =
+        !condition.cargo || condition.cargo === vehicle.cargoType ? vehicle.cargoAmount : 0;
+      return compareOrderValues(amount, condition.value, condition.comparator);
+    }
+  }
+}
+
+/**
+ * Prochain ordre à exécuter après l'arrêt `fromIndex` (#161). Les
+ * conditionnels rencontrés sont évalués dans l'ordre ; un saut reboucle sur la
+ * cible indiquée, avec une garde contre les boucles infinies.
+ */
+function nextOrderIndex(world: MockWorld, vehicle: MockVehicle, fromIndex: number): number | null {
+  const count = vehicle.orders.length;
+  if (count === 0) return null;
+  let index = (fromIndex + 1) % count;
+  let guard = 0;
+  while (guard < count * 2 + 1) {
+    guard += 1;
+    const order = vehicle.orders[index];
+    if (!order) return null;
+    if (order.kind !== 'conditional') return index;
+    const condition = order.options?.condition;
+    const jump = order.options?.jump;
+    if (condition && evaluateOrderCondition(world, vehicle, condition)) {
+      if (jump === undefined || jump < 0 || jump >= count) {
+        addNews(
+          world,
+          'warning',
+          `Véhicule #${vehicle.id} : saut conditionnel invalide vers l'ordre ${String(jump)}.`,
+        );
+        index = (index + 1) % count;
+        continue;
+      }
+      index = jump;
+      continue;
+    }
+    index = (index + 1) % count;
+  }
+  addNews(
+    world,
+    'error',
+    `Véhicule #${vehicle.id} : boucle de conditions sans destination, tournée ignorée.`,
+  );
+  return null;
+}
+
+/** Recalcule la boucle d'un véhicule depuis sa tournée et son ordre courant. */
 function rebuildRoute(world: MockWorld, vehicle: MockVehicle): boolean {
   if (vehicle.orders.length === 0) {
     addNews(world, 'warning', `Véhicule #${vehicle.id} : ajoutez au moins un ordre.`);
     if (vehicle.status !== 3) vehicle.status = 0;
     return false;
   }
-  const resolved = resolveOrders(world, vehicle.orders);
+  const resolved = resolveOrders(world, vehicle.orders, vehicle.currentOrder);
   if (resolved.error) {
     addNews(world, 'error', `Tournée du véhicule #${vehicle.id} refusée : ${resolved.error}`);
+    if (vehicle.status !== 3) vehicle.status = 0;
+    return false;
+  }
+  if (resolved.orderIndices.length === 0) {
+    addNews(
+      world,
+      'error',
+      `Tournée du véhicule #${vehicle.id} refusée : aucun arrêt physique (conditions seules).`,
+    );
     if (vehicle.status !== 3) vehicle.status = 0;
     return false;
   }
@@ -626,11 +798,23 @@ function rebuildRoute(world: MockWorld, vehicle: MockVehicle): boolean {
   vehicle.path = path;
   vehicle.pathLengths = computePathLengths(path);
   vehicle.segmentStops = segmentsForStopsOnPath(path, resolved.stops);
+  vehicle.routeOrders = resolved.orderIndices;
+  vehicle.currentOrder = resolved.orderIndices[0] ?? 0;
   vehicle.segment = 0;
   vehicle.segmentT = 0;
   vehicle.waitTicks = 0;
   vehicle.status = 1;
   return true;
+}
+
+/** Aligne `routeOrders` sur la tournée, sans recalculer le tracé. */
+function syncRouteOrders(vehicle: MockVehicle): void {
+  const positional = vehicle.orders
+    .map((order, index) => ({ order, index }))
+    .filter((item) => item.order.kind !== 'conditional')
+    .map((item) => item.index);
+  vehicle.routeOrders = positional;
+  if (!positional.includes(vehicle.currentOrder)) vehicle.currentOrder = positional[0] ?? 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1206,6 +1390,16 @@ class WorldBuilder {
   ): void {
     const lengths = computePathLengths(path);
     const total = lengths.reduce((acc, value) => acc + value, 0);
+    const orderedStops = segmentStops.map((stop) =>
+      stop
+        ? {
+            ...stop,
+            order: orders.findIndex(
+              (order) => order.kind === stop.kind && order.target === stop.id,
+            ),
+          }
+        : null,
+    );
     for (let n = 0; n < count; n += 1) {
       const speed = this.rng.float(speedRange[0], speedRange[1]);
       const vehicle: MockVehicle = {
@@ -1218,7 +1412,9 @@ class WorldBuilder {
         pathLengths: lengths,
         segment: 0,
         segmentT: 0,
-        segmentStops,
+        segmentStops: orderedStops,
+        currentOrder: 0,
+        routeOrders: orders.map((_, index) => index),
         speed,
         direction: 0,
         status: 1,
@@ -1234,7 +1430,7 @@ class WorldBuilder {
         tripDistance: 0,
         loadedTick: 0,
         orderTargets: orders.map((order) => order.target),
-        orders: orders.map((order) => ({ ...order })),
+        orders: orders.map((order) => cloneOrder(order)),
         profitLastYear: Math.round(this.rng.float(8_000, 90_000)),
         ageDays: this.rng.int(40, 1_400),
       };
@@ -1522,8 +1718,10 @@ class WorldBuilder {
         path: template.path,
         pathLengths: template.pathLengths,
         segmentStops: template.segmentStops,
+        currentOrder: template.currentOrder,
+        routeOrders: [...template.routeOrders],
         orderTargets: [...template.orderTargets],
-        orders: template.orders.map((order) => ({ ...order })),
+        orders: template.orders.map((order) => cloneOrder(order)),
         cargoSource: null,
         tripDistance: 0,
         loadedTick: 0,
@@ -2625,6 +2823,8 @@ function buyVehicle(
     segment: 0,
     segmentT: 0,
     segmentStops: [null],
+    currentOrder: 0,
+    routeOrders: [],
     speed: model.speed,
     direction: 0,
     status: 3,
@@ -2726,6 +2926,200 @@ function stopVehicle(
   addNews(world, 'info', `Véhicule #${vehicle.id} arrêté.`);
 }
 
+/** Valide et normalise une tournée reçue du client (#161). */
+function normalizeOrders(
+  world: MockWorld,
+  specs: readonly NonNullable<Extract<EngineCommand, { type: 'vehicle' }>['orders']>[number][],
+): { orders: VehicleOrder[]; error: string | null } {
+  if (specs.length > MAX_VEHICLE_ORDERS) {
+    return { orders: [], error: `${specs.length} ordres (${MAX_VEHICLE_ORDERS} maximum).` };
+  }
+  const orders: VehicleOrder[] = specs.map((order) => ({
+    target: order.target,
+    kind: order.kind,
+    ...(order.options ? { options: cloneOrderOptions(order.options) } : {}),
+  }));
+  let destinations = 0;
+  for (let index = 0; index < orders.length; index += 1) {
+    const order = orders[index];
+    if (!order) continue;
+    if (order.kind === 'conditional') {
+      if (!order.options?.condition) {
+        return { orders: [], error: `Ordre ${index + 1} : condition manquante.` };
+      }
+      const jump = order.options.jump;
+      if (jump === undefined || !Number.isInteger(jump) || jump < 0 || jump >= orders.length) {
+        return {
+          orders: [],
+          error: `Ordre ${index + 1} : saut invalide (attendu 1..${orders.length}).`,
+        };
+      }
+      continue;
+    }
+    destinations += 1;
+    const target = resolveOrderTarget(world, order);
+    if (!target) {
+      return {
+        orders: [],
+        error:
+          order.kind === 'station'
+            ? `Gare #${order.target} introuvable.`
+            : order.kind === 'industry'
+              ? `Industrie #${order.target} introuvable.`
+              : `Dépôt ${order.target} introuvable ou démoli.`,
+      };
+    }
+  }
+  if (destinations === 0) {
+    return {
+      orders: [],
+      error: 'Aucun arrêt physique : ajoutez une gare, une industrie ou un dépôt.',
+    };
+  }
+  return { orders, error: null };
+}
+
+/**
+ * Refit de cargaison (#160) : exige un véhicule arrêté dans son dépôt, une
+ * cargaison disponible pour le modèle et la trésorerie. La cargaison en cours
+ * est perdue, comme dans OpenTTD.
+ */
+function refitVehicle(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'vehicle' }>,
+  company: MockCompany,
+): void {
+  const vehicle = findVehicle(world, command.vehicle);
+  if (!vehicle) {
+    addNews(world, 'error', `Refit refusé : véhicule #${command.vehicle ?? '?'} introuvable.`);
+    return;
+  }
+  if (vehicle.company !== company.id) {
+    addNews(world, 'error', 'Refit refusé : ce véhicule ne vous appartient pas.');
+    return;
+  }
+  if (vehicle.status !== 3) {
+    addNews(world, 'error', 'Refit refusé : le véhicule doit être arrêté dans un dépôt.');
+    return;
+  }
+  const model = vehicleModel(vehicle.model);
+  if (!model) {
+    addNews(world, 'error', 'Refit refusé : ce véhicule ne suit pas le catalogue partagé.');
+    return;
+  }
+  const cargo = command.cargo ?? '';
+  const option = refitOption(model, cargo);
+  if (!option) {
+    addNews(
+      world,
+      'error',
+      `Refit refusé : ${model.name} n’accepte pas « ${cargo || '?'} » (disponible : ${model.refits
+        .map((item) => item.cargo)
+        .join(', ')}).`,
+    );
+    return;
+  }
+  if (vehicle.cargoType === cargo) {
+    addNews(world, 'error', `Refit inutile : ${model.name} transporte déjà « ${cargo} ».`);
+    return;
+  }
+  const cost = refitCost(model);
+  if (company.money < cost) {
+    addNews(
+      world,
+      'error',
+      `Refit refusé : ${Math.round(cost)} £ requis pour reconfigurer ${model.name}.`,
+    );
+    return;
+  }
+  const lost = vehicle.cargoAmount;
+  vehicle.cargoType = cargo;
+  vehicle.cargoClass = cargo;
+  vehicle.cargoCapacity = option.capacity;
+  vehicle.cargoAmount = 0;
+  company.money -= cost;
+  addNews(
+    world,
+    'info',
+    `Véhicule #${vehicle.id} reconfiguré vers « ${cargo} » pour ${Math.round(cost)} £ : capacité ${option.capacity}, ${lost} unité(s) perdue(s).`,
+  );
+}
+
+/** Duplication d'un véhicule dans son dépôt (#161), tournée copiée. */
+function cloneVehicle(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'vehicle' }>,
+  company: MockCompany,
+): void {
+  const source = findVehicle(world, command.vehicle);
+  if (!source) {
+    addNews(
+      world,
+      'error',
+      `Duplication refusée : véhicule #${command.vehicle ?? '?'} introuvable.`,
+    );
+    return;
+  }
+  if (source.company !== company.id) {
+    addNews(world, 'error', 'Duplication refusée : ce véhicule ne vous appartient pas.');
+    return;
+  }
+  if (source.status !== 3) {
+    addNews(world, 'error', 'Duplication refusée : le véhicule source doit être dans un dépôt.');
+    return;
+  }
+  const model = vehicleModel(source.model);
+  if (!model) {
+    addNews(world, 'error', 'Duplication refusée : ce véhicule ne suit pas le catalogue partagé.');
+    return;
+  }
+  const cost = cloneCost(model);
+  if (company.money < cost) {
+    addNews(
+      world,
+      'error',
+      `Duplication refusée : ${Math.round(cost)} £ requis pour cloner ${model.name}.`,
+    );
+    return;
+  }
+  const clone: MockVehicle = {
+    ...source,
+    id: nextVehicleId(world),
+    path: source.path.map((point) => ({ ...point })),
+    pathLengths: [...source.pathLengths],
+    segmentStops: source.segmentStops.map((stop) => (stop ? { ...stop } : null)),
+    currentOrder: source.currentOrder,
+    routeOrders: [...source.routeOrders],
+    orderTargets: [...source.orderTargets],
+    orders: source.orders.map((order) => cloneOrder(order)),
+    cargoType: source.cargoType,
+    cargoCapacity: source.cargoCapacity,
+    cargoAmount: source.cargoAmount,
+    waitTicks: 0,
+    profitLastYear: 0,
+    ageDays: 0,
+  };
+  if (command.shareOrders === false) {
+    clone.orders = [];
+    clone.orderTargets = [];
+    clone.routeOrders = [];
+    clone.currentOrder = 0;
+    clone.path = [{ x: source.x, y: source.y }];
+    clone.pathLengths = [0];
+    clone.segmentStops = [null];
+    clone.status = 3;
+  }
+  world.vehicles.push(clone);
+  company.money -= cost;
+  syncVehicleCounts(world);
+  updateVehiclesTransforms(world);
+  addNews(
+    world,
+    'info',
+    `${model.name} dupliqué (#${clone.id}) pour ${Math.round(cost)} £ depuis le véhicule #${source.id}.`,
+  );
+}
+
 function orderVehicle(
   world: MockWorld,
   command: Extract<EngineCommand, { type: 'vehicle' }>,
@@ -2740,28 +3134,31 @@ function orderVehicle(
     addNews(world, 'error', 'Tournée refusée : ce véhicule ne vous appartient pas.');
     return;
   }
-  const orders = command.orders ?? [];
-  if (orders.length > MAX_VEHICLE_ORDERS) {
-    addNews(
-      world,
-      'error',
-      `Tournée refusée : ${orders.length} ordres (${MAX_VEHICLE_ORDERS} maximum).`,
-    );
+  const normalized = normalizeOrders(world, command.orders ?? []);
+  if (normalized.error) {
+    addNews(world, 'error', `Tournée refusée : ${normalized.error}`);
     return;
   }
-  const resolved = resolveOrders(
-    world,
-    orders.map((order) => ({ target: order.target, kind: order.kind })),
-  );
-  if (resolved.error) {
-    addNews(world, 'error', `Tournée refusée : ${resolved.error}`);
-    return;
-  }
-  vehicle.orders = orders.map((order) => ({ target: order.target, kind: order.kind }));
-  vehicle.orderTargets = vehicle.orders.map((order) => order.target);
+  vehicle.orders = normalized.orders;
+  vehicle.currentOrder = 0;
+  vehicle.orderTargets = vehicle.orders
+    .filter((order) => order.kind !== 'conditional')
+    .map((order) => order.target);
+  syncRouteOrders(vehicle);
   // Un véhicule déjà en route suit immédiatement sa nouvelle tournée ; un
-  // véhicule à l'arrêt ou en dépôt garde sa position jusqu'au démarrage.
-  if (vehicle.status === 1 || vehicle.status === 2) rebuildRoute(world, vehicle);
+  // véhicule à l'arrêt ou en dépôt garde sa position jusqu'au démarrage, sauf
+  // si un ordre demande le démarrage automatique (#162).
+  if (vehicle.status === 1 || vehicle.status === 2) {
+    rebuildRoute(world, vehicle);
+  } else if (
+    vehicle.status !== 1 &&
+    vehicle.status !== 2 &&
+    vehicle.orders.some((order) => order.options?.timetable?.autostart)
+  ) {
+    if (rebuildRoute(world, vehicle)) {
+      addNews(world, 'info', `Véhicule #${vehicle.id} démarré automatiquement (horaire).`);
+    }
+  }
   addNews(world, 'info', `Tournée du véhicule #${vehicle.id} : ${vehicle.orders.length} ordre(s).`);
 }
 
@@ -2800,7 +3197,10 @@ function applyVehicle(
       orderVehicle(world, command, company);
       break;
     case 'refit':
-      addNews(world, 'warning', 'Le refit de cargaison n’est pas encore supporté (#29).');
+      refitVehicle(world, command, company);
+      break;
+    case 'clone':
+      cloneVehicle(world, command, company);
       break;
     default:
       break;
@@ -3054,30 +3454,95 @@ function creditCompany(world: MockWorld, vehicle: MockVehicle, revenue: number):
   vehicle.profitLastYear += revenue;
 }
 
+/** Délai de garde d'un plein chargement quand la gare reste vide (ticks). */
+const FULL_LOAD_TIMEOUT = 180;
+
+function stopAction(vehicle: MockVehicle, orderIndex: number): OrderAction {
+  const order = vehicle.orders[orderIndex];
+  return order?.options?.action ?? 'normal';
+}
+
+function addStationWaiting(station: MockStation, cargo: string, amount: number): void {
+  if (amount <= 0) return;
+  const existing = station.waiting.find((entry) => entry.cargo === cargo);
+  if (existing) existing.amount += amount;
+  else station.waiting.push({ cargo, amount });
+}
+
+/** Charge le véhicule depuis la gare, selon le mode d'arrêt courant. */
+function loadFromStation(world: MockWorld, vehicle: MockVehicle, station: MockStation): void {
+  const action = stopAction(vehicle, vehicle.currentOrder);
+  // Un transfert est un simple dépôt en gare : le véhicule repart à vide et
+  // la cargaison attend un second véhicule.
+  if (action === 'no_load' || action === 'unload' || action === 'transfer') return;
+  if (vehicle.cargoCapacity <= 0) return;
+  while (vehicle.cargoAmount < vehicle.cargoCapacity) {
+    const entry = station.waiting.find((item) => item.amount > 0 && canCarry(vehicle, item.cargo));
+    if (!entry) break;
+    const load = Math.min(vehicle.cargoCapacity - vehicle.cargoAmount, entry.amount);
+    if (load <= 0) break;
+    vehicle.cargoAmount += load;
+    entry.amount -= load;
+    vehicle.cargoType = entry.cargo;
+    vehicle.cargoSource = null;
+    vehicle.tripDistance = 0;
+    vehicle.loadedTick = world.tick;
+  }
+  station.waiting = station.waiting.filter((item) => item.amount > 0);
+}
+
 function vehicleArrive(world: MockWorld, vehicle: MockVehicle, stop: MockStop): void {
-  if (stop.kind === 'station') {
-    const station = world.stations.find((item) => item.id === stop.id);
-    if (station && vehicle.cargoAmount > 0) {
-      const existing = station.waiting.find((entry) => entry.cargo === vehicle.cargoType);
-      if (existing) existing.amount += vehicle.cargoAmount;
-      else station.waiting.push({ cargo: vehicle.cargoType, amount: vehicle.cargoAmount });
-      creditCompany(world, vehicle, deliveryRevenue(world, vehicle, vehicle.cargoAmount, null));
-      vehicle.cargoAmount = 0;
-      vehicle.cargoSource = null;
-      vehicle.tripDistance = 0;
+  const orderIndex = stop.order ?? -1;
+  if (orderIndex >= 0) vehicle.currentOrder = orderIndex;
+  const action = stopAction(vehicle, vehicle.currentOrder);
+
+  if (vehicle.cargoAmount > 0) {
+    const amount = vehicle.cargoAmount;
+    if (stop.kind === 'station') {
+      const station = world.stations.find((item) => item.id === stop.id);
+      if (station) {
+        if (action === 'transfer') {
+          // Transfert : la cargaison rejoint le quai, sans revenu immédiat.
+          addStationWaiting(station, vehicle.cargoType, amount);
+        } else if (action === 'unload') {
+          // Déchargement forcé : revenu immédiat, pas de stock réutilisable.
+          creditCompany(world, vehicle, deliveryRevenue(world, vehicle, amount, null));
+        } else {
+          // Chargement normal, plein chargement, sans chargement : déchargement
+          // classique, avec revenu et stock en gare.
+          addStationWaiting(station, vehicle.cargoType, amount);
+          creditCompany(world, vehicle, deliveryRevenue(world, vehicle, amount, null));
+        }
+      }
+    } else if (stop.kind === 'industry') {
+      const industry = world.industries.find((item) => item.id === stop.id);
+      if (industry && industry.accepts.includes(vehicle.cargoType)) {
+        industry.transported += amount;
+        creditCompany(world, vehicle, deliveryRevenue(world, vehicle, amount, industry.id));
+      }
     }
-  } else if (stop.kind === 'industry') {
-    const industry = world.industries.find((item) => item.id === stop.id);
-    if (industry && vehicle.cargoAmount > 0 && industry.accepts.includes(vehicle.cargoType)) {
-      const delivered = vehicle.cargoAmount;
-      industry.transported += delivered;
-      creditCompany(world, vehicle, deliveryRevenue(world, vehicle, delivered, industry.id));
-      vehicle.cargoAmount = 0;
-      vehicle.cargoSource = null;
-      vehicle.tripDistance = 0;
+    vehicle.cargoAmount = 0;
+    vehicle.cargoSource = null;
+    vehicle.tripDistance = 0;
+  }
+
+  const timetableWait = vehicle.orders[vehicle.currentOrder]?.options?.timetable?.waitTicks;
+  const baseWait = 14 + ((vehicle.id * 7) % 22);
+  vehicle.waitTicks =
+    timetableWait !== undefined && Number.isFinite(timetableWait)
+      ? Math.max(0, Math.trunc(timetableWait))
+      : action === 'full_load'
+        ? FULL_LOAD_TIMEOUT
+        : baseWait;
+  if (action === 'full_load' && stop.kind === 'station') {
+    const station = world.stations.find((item) => item.id === stop.id);
+    if (station) {
+      // Tentative de chargement immédiate : une gare déjà approvisionnée ne
+      // fait pas attendre le véhicule.
+      loadFromStation(world, vehicle, station);
+      if (vehicle.cargoAmount >= vehicle.cargoCapacity) vehicle.waitTicks = 0;
     }
   }
-  vehicle.waitTicks = 14 + ((vehicle.id * 7) % 22);
   vehicle.status = 2;
   addEvent(world, {
     type: 'vehicle_arrived',
@@ -3088,25 +3553,29 @@ function vehicleArrive(world: MockWorld, vehicle: MockVehicle, stop: MockStop): 
 }
 
 function vehicleDepart(world: MockWorld, vehicle: MockVehicle, stop: MockStop): void {
+  const action = stopAction(vehicle, vehicle.currentOrder);
   if (stop.kind === 'station') {
     const station = world.stations.find((item) => item.id === stop.id);
-    if (station && vehicle.cargoAmount < vehicle.cargoCapacity) {
-      const entry =
-        station.waiting.find((item) => item.amount > 0 && canCarry(vehicle, item.cargo)) ?? null;
-      if (entry) {
-        const load = Math.min(vehicle.cargoCapacity - vehicle.cargoAmount, entry.amount);
-        if (load > 0) {
-          vehicle.cargoAmount += load;
-          entry.amount -= load;
-          vehicle.cargoType = entry.cargo;
-          vehicle.cargoSource = null;
-          vehicle.tripDistance = 0;
-          vehicle.loadedTick = world.tick;
-        }
+    if (station) {
+      if (action === 'normal' || action === 'full_load') {
+        loadFromStation(world, vehicle, station);
       }
-      station.waiting = station.waiting.filter((item) => item.amount > 0);
+      // Complément de démonstration : une gare sans stock ne doit pas bloquer
+      // une ligne de bout en bout. Le plein chargement comble jusqu'à la
+      // capacité, le chargement normal garde l'ancien apport partiel.
+      if (vehicle.cargoAmount === 0 && action === 'normal') {
+        vehicle.cargoAmount = Math.round(vehicle.cargoCapacity * 0.35);
+        vehicle.cargoSource = null;
+        vehicle.tripDistance = 0;
+        vehicle.loadedTick = world.tick;
+      } else if (action === 'full_load' && vehicle.cargoAmount < vehicle.cargoCapacity) {
+        vehicle.cargoAmount = vehicle.cargoCapacity;
+        vehicle.cargoSource = null;
+        vehicle.tripDistance = 0;
+        vehicle.loadedTick = world.tick;
+      }
     }
-  } else if (stop.kind === 'industry') {
+  } else if (stop.kind === 'industry' && (action === 'normal' || action === 'full_load')) {
     const industry = world.industries.find((item) => item.id === stop.id);
     if (
       industry &&
@@ -3133,6 +3602,24 @@ function vehicleDepart(world: MockWorld, vehicle: MockVehicle, stop: MockStop): 
     station: stop.id,
     tick: world.tick,
   });
+
+  // Ordre suivant : un saut conditionnel peut changer la rotation du tracé.
+  const next = nextOrderIndex(world, vehicle, vehicle.currentOrder);
+  if (next === null) {
+    vehicle.status = 0;
+    return;
+  }
+  const position = vehicle.routeOrders.indexOf(vehicle.currentOrder);
+  const expected =
+    position >= 0 && vehicle.routeOrders.length > 0
+      ? vehicle.routeOrders[(position + 1) % vehicle.routeOrders.length]
+      : next;
+  if (next !== expected) {
+    vehicle.currentOrder = next;
+    rebuildRoute(world, vehicle);
+  } else {
+    vehicle.currentOrder = next;
+  }
 }
 
 function moveVehicle(world: MockWorld, vehicle: MockVehicle): void {
@@ -3140,9 +3627,20 @@ function moveVehicle(world: MockWorld, vehicle: MockVehicle): void {
   if (vehicle.status === 0 || vehicle.status === 3) return;
   if (vehicle.path.length < 2) return;
   if (vehicle.waitTicks > 0) {
+    const stop = vehicle.segmentStops[vehicle.segment] ?? null;
+    if (stop && stop.kind === 'station') {
+      const station = world.stations.find((item) => item.id === stop.id);
+      if (station && stopAction(vehicle, vehicle.currentOrder) === 'full_load') {
+        loadFromStation(world, vehicle, station);
+        if (vehicle.cargoAmount >= vehicle.cargoCapacity) {
+          vehicle.waitTicks = 0;
+          vehicleDepart(world, vehicle, stop);
+          return;
+        }
+      }
+    }
     vehicle.waitTicks -= 1;
     if (vehicle.waitTicks === 0) {
-      const stop = vehicle.segmentStops[vehicle.segment] ?? null;
       if (stop) vehicleDepart(world, vehicle, stop);
       else vehicle.status = 1;
     }
@@ -3523,6 +4021,8 @@ function serializeWorld(world: MockWorld): SerializedWorld {
       segment: vehicle.segment,
       segmentT: vehicle.segmentT,
       segmentStops: vehicle.segmentStops,
+      currentOrder: vehicle.currentOrder,
+      routeOrders: vehicle.routeOrders,
       speed: vehicle.speed,
       direction: vehicle.direction,
       status: vehicle.status,
@@ -3765,6 +4265,7 @@ export class MockEngine implements EngineDriver {
       id: vehicle.id,
       kind: vehicle.kind,
       company: vehicle.company,
+      ...(vehicle.model ? { model: vehicle.model } : {}),
       x: vehicle.x,
       y: vehicle.y,
       z: vehicle.z,
@@ -3778,7 +4279,18 @@ export class MockEngine implements EngineDriver {
       },
       orderTargets: vehicle.orderTargets.slice(),
       ...(vehicle.orders.length > 0
-        ? { orderKinds: vehicle.orders.map((order) => order.kind) }
+        ? {
+            orderKinds: vehicle.orders
+              .filter((order) => order.kind !== 'conditional')
+              .map((order) => order.kind),
+            orderDetails: vehicle.orders.map((order, index) => ({
+              index,
+              target: order.target,
+              kind: order.kind,
+              ...(order.options ? { options: cloneOrderOptions(order.options) } : {}),
+            })),
+            currentOrder: vehicle.currentOrder,
+          }
         : {}),
       profitLastYear: vehicle.profitLastYear,
       ageDays: vehicle.ageDays,
@@ -3898,6 +4410,8 @@ export class MockEngine implements EngineDriver {
     for (const vehicle of world.vehicles) {
       hash.mixInt(vehicle.id);
       hash.mixString(vehicle.model);
+      hash.mixString(vehicle.cargoType);
+      hash.mixInt(vehicle.cargoCapacity);
       hash.mixFloat(vehicle.x);
       hash.mixFloat(vehicle.y);
       hash.mixFloat(vehicle.z);
@@ -3907,9 +4421,27 @@ export class MockEngine implements EngineDriver {
       hash.mixString(vehicle.cargoType);
       hash.mixInt(vehicle.cargoSource ?? 255);
       hash.mixInt(vehicle.orders.length);
+      hash.mixInt(vehicle.currentOrder);
       for (const order of vehicle.orders) {
         hash.mixInt(order.target);
         hash.mixString(order.kind);
+        const options = order.options;
+        if (options) {
+          hash.mixString(options.action ?? '');
+          hash.mixInt(options.jump ?? -1);
+          if (options.condition) {
+            hash.mixString(options.condition.type);
+            hash.mixString(options.condition.comparator);
+            hash.mixInt(options.condition.value);
+            hash.mixString(options.condition.cargo ?? '');
+            hash.mixInt(options.condition.month ?? -1);
+          }
+          if (options.timetable) {
+            hash.mixInt(options.timetable.waitTicks ?? -1);
+            hash.mixInt(options.timetable.travelTicks ?? -1);
+            hash.mixInt(options.timetable.autostart ? 1 : 0);
+          }
+        }
       }
     }
     // La carte fait partie de l'état : une construction doit changer le hash
@@ -4015,28 +4547,42 @@ export class MockEngine implements EngineDriver {
     let signalCount = 0;
     for (const value of world.signalData) if (value !== 0) signalCount += 1;
     world.signalCount = signalCount;
-    world.vehicles = saved.vehicles.map((vehicle) => ({
-      ...vehicle,
-      model: vehicle.model ?? '',
-      homeDepot: vehicle.homeDepot ?? null,
-      segmentStops:
-        vehicle.segmentStops ??
-        (vehicle.segmentStations ?? []).map((id) =>
-          id >= 0 ? ({ kind: 'station', id } as MockStop) : null,
-        ),
-      cargoClass: vehicle.cargoClass ?? vehicle.cargoType,
-      cargoSource: vehicle.cargoSource ?? null,
-      tripDistance: vehicle.tripDistance ?? 0,
-      loadedTick: vehicle.loadedTick ?? 0,
-      orders:
+    world.vehicles = saved.vehicles.map((vehicle) => {
+      const orders =
         vehicle.orders && vehicle.orders.length > 0
-          ? vehicle.orders.map((order) => ({ ...order }))
+          ? vehicle.orders.map((order) => cloneOrder(order))
           : (vehicle.orderTargets ?? []).map((target) => ({
               target,
               kind: 'station' as const,
-            })),
-      pathLengths: computePathLengths(vehicle.path),
-    }));
+            }));
+      const positional = orders
+        .map((order, index) => ({ order, index }))
+        .filter((item) => item.order.kind !== 'conditional')
+        .map((item) => item.index);
+      const currentOrder = positional.includes(vehicle.currentOrder ?? 0)
+        ? (vehicle.currentOrder ?? 0)
+        : (positional[0] ?? 0);
+      const segmentStops =
+        vehicle.segmentStops ??
+        (vehicle.segmentStations ?? []).map((id) =>
+          id >= 0 ? ({ kind: 'station', id } as MockStop) : null,
+        );
+      return {
+        ...vehicle,
+        model: vehicle.model ?? '',
+        homeDepot: vehicle.homeDepot ?? null,
+        segmentStops,
+        cargoClass: vehicle.cargoClass ?? vehicle.cargoType,
+        cargoSource: vehicle.cargoSource ?? null,
+        tripDistance: vehicle.tripDistance ?? 0,
+        loadedTick: vehicle.loadedTick ?? 0,
+        orders,
+        currentOrder,
+        routeOrders:
+          vehicle.routeOrders && vehicle.routeOrders.length > 0 ? vehicle.routeOrders : positional,
+        pathLengths: computePathLengths(vehicle.path),
+      };
+    });
     if (!saved.depots) world.depots = legacyDepots(world);
     this.world = world;
     this.ready = true;

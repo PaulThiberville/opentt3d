@@ -238,7 +238,7 @@ suite('intégration moteur WASM réel', () => {
         orders: [{ target: depot.id, kind: 'depot' }],
       });
       const ordered = engine.snapshot();
-      expect(ordered.news.some((item) => /ordre\(s\) ajouté\(s\)/i.test(item.text))).toBe(true);
+      expect(ordered.news.some((item) => /ordre\(s\) enregistré\(s\)/i.test(item.text))).toBe(true);
 
       engine.send({
         type: 'vehicle',

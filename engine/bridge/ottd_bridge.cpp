@@ -21,6 +21,7 @@
 
 #include "ai/ai_info.hpp"
 #include "articulated_vehicles.h"
+#include "cargo_type.h"
 #include "cargotype.h"
 #include "clear_map.h"
 #include "command_func.h"
@@ -35,10 +36,11 @@
 #include "depot_type.h"
 #include "direction_func.h"
 #include "direction_type.h"
-#include "economy_func.h"
 #include "elrail_func.h"
 #include "engine_base.h"
 #include "engine_func.h"
+#include "economy_func.h"
+#include "economy_type.h"
 #include "engine_type.h"
 #include "gfx_func.h"
 #include "genworld.h"
@@ -56,7 +58,6 @@
 #include "order_base.h"
 #include "order_cmd.h"
 #include "order_type.h"
-#include "pricebase.h"
 #include "rail.h"
 #include "rail_cmd.h"
 #include "rail_map.h"
@@ -80,6 +81,7 @@
 #include "tile_map.h"
 #include "timer/timer_game_calendar.h"
 #include "timer/timer_game_tick.h"
+#include "timetable_cmd.h"
 #include "town.h"
 #include "town_cmd.h"
 #include "track_func.h"
@@ -121,6 +123,9 @@ extern void PostMainLoop();
 extern void (*_ottd_fatal_error_hook)(const char *message);
 
 namespace {
+
+/** Utilisé par le snapshot avant sa définition plus bas (#157). */
+const char *RailTypeName(RailType type);
 
 bool _ottd_booted = false;
 bool _ottd_in_game = false;
@@ -1178,6 +1183,63 @@ std::string CargoName(CargoType cargo)
 	return GetString(CargoSpec::Get(cargo)->name);
 }
 
+/** Slug protocolaire stable d'une cargaison (#160). */
+std::string CargoSlug(CargoType cargo)
+{
+	if (!IsValidCargoType(cargo)) return "invalid";
+	const CargoLabel label = CargoSpec::Get(cargo)->label;
+	if (label == CT_PASSENGERS) return "passengers";
+	if (label == CT_MAIL) return "mail";
+	if (label == CT_COAL) return "coal";
+	if (label == CT_WOOD) return "wood";
+	if (label == CT_GRAIN) return "grain";
+	if (label == CT_GOODS) return "goods";
+	if (label == CT_OIL) return "oil";
+	if (label == CT_LIVESTOCK) return "livestock";
+	if (label == CT_VALUABLES) return "valuables";
+	if (label == CT_IRON_ORE) return "iron_ore";
+	if (label == CT_STEEL) return "steel";
+	if (label == CT_WATER) return "water";
+	if (label == CT_FRUIT) return "fruit";
+	if (label == CT_MAIZE) return "maize";
+	if (label == CT_FOOD) return "food";
+	/* NewGRF : repli sur le nom localisé, jamais sur un index instable. */
+	return CargoName(cargo);
+}
+
+/** CargoType correspondant à un slug du protocole, ou `INVALID_CARGO`. */
+CargoType CargoTypeFromSlug(std::string_view slug)
+{
+	struct Entry {
+		const char *name;
+		CargoLabel label;
+	};
+	static const Entry entries[] = {
+		{"passengers", CT_PASSENGERS},
+		{"mail", CT_MAIL},
+		{"coal", CT_COAL},
+		{"wood", CT_WOOD},
+		{"grain", CT_GRAIN},
+		{"goods", CT_GOODS},
+		{"oil", CT_OIL},
+		{"livestock", CT_LIVESTOCK},
+		{"valuables", CT_VALUABLES},
+		{"iron_ore", CT_IRON_ORE},
+		{"steel", CT_STEEL},
+		{"water", CT_WATER},
+		{"fruit", CT_FRUIT},
+		{"maize", CT_MAIZE},
+		{"food", CT_FOOD},
+	};
+	for (const Entry &entry : entries) {
+		if (slug == entry.name) {
+			const CargoType cargo = GetCargoTypeByLabel(entry.label);
+			if (IsValidCargoType(cargo)) return cargo;
+		}
+	}
+	return INVALID_CARGO;
+}
+
 /** Nom d'une entreprise, avec repli stable quand le nom n'est pas encore généré. */
 std::string CompanyName(const Company *c)
 {
@@ -1269,6 +1331,9 @@ const char *VehicleKindName(VehicleType type)
 /** Statut véhicule : 0 arrêté, 1 en route, 2 en gare, 3 en dépôt, 4 en attente. */
 uint8_t VehicleStatus(const Vehicle *v)
 {
+	/* Un véhicule immobilisé dans un dépôt est « en dépôt » même sans ordre
+	 * de retour : l'UI de refit/duplication s'appuie sur ce statut. */
+	if (v->IsStoppedInDepot()) return 3;
 	if (v->vehstatus.Test(VehState::Stopped)) return 0;
 	if (IsTileType(v->tile, MP_STATION)) return 2;
 	if (v->cur_speed == 0 && v->current_order.IsType(OT_GOTO_DEPOT)) return 3;
@@ -1302,8 +1367,87 @@ void AppendVehicleCargo(std::string &out, const Vehicle *v)
 	if (cargo == INVALID_CARGO && IsValidCargoType(v->cargo_type)) cargo = v->cargo_type;
 
 	out += "{\"type\":";
-	AppendJsonString(out, CargoName(cargo));
+	AppendJsonString(out, CargoSlug(cargo));
 	out += fmt::format(",\"amount\":{},\"capacity\":{}}}", amount, capacity);
+}
+
+/** Nom protocolaire du type d'ordre (#161). */
+const char *OrderKindName(const Order &order)
+{
+	if (order.IsType(OT_GOTO_STATION) || order.IsType(OT_GOTO_WAYPOINT)) return "station";
+	if (order.IsType(OT_GOTO_DEPOT)) return "depot";
+	if (order.IsType(OT_CONDITIONAL)) return "conditional";
+	return "unknown";
+}
+
+/** Mode d'arrêt protocolaire déduit des drapeaux OpenTTD (#161). */
+const char *OrderActionName(const Order &order)
+{
+	if (order.IsType(OT_CONDITIONAL)) return "normal";
+	const OrderUnloadType unload = order.GetUnloadType();
+	const OrderLoadType load = order.GetLoadType();
+	if (unload == OrderUnloadType::Transfer) return "transfer";
+	if (unload == OrderUnloadType::Unload && load == OrderLoadType::NoLoad) return "unload";
+	if (load == OrderLoadType::NoLoad) return "no_load";
+	if (load == OrderLoadType::FullLoad || load == OrderLoadType::FullLoadAny) return "full_load";
+	return "normal";
+}
+
+const char *OrderComparatorName(OrderConditionComparator comparator)
+{
+	switch (comparator) {
+		case OrderConditionComparator::Equal:           return "equal";
+		case OrderConditionComparator::NotEqual:        return "not_equal";
+		case OrderConditionComparator::LessThan:        return "less";
+		case OrderConditionComparator::LessThanOrEqual: return "less_or_equal";
+		case OrderConditionComparator::MoreThan:        return "more";
+		case OrderConditionComparator::MoreThanOrEqual: return "more_or_equal";
+		default:                                        return "equal";
+	}
+}
+
+/**
+ * Options d'un ordre dans le snapshot (#161/#162).
+ *
+ * OpenTTD n'expose nativement que des conditions sur le pourcentage de
+ * chargement, la fiabilité, l'âge, etc. Le pont ne restitue donc que
+ * `percentage` ; les conditions argent/date/cargaison restent une extension
+ * du mock et sont refusées explicitement à l'écriture.
+ */
+void AppendOrderOptions(std::string &out, const Order &order, bool timetable_started)
+{
+	out += "{\"action\":";
+	AppendJsonString(out, OrderActionName(order));
+
+	if (order.IsType(OT_CONDITIONAL)) {
+		out += ",\"condition\":{\"type\":\"percentage\",\"comparator\":";
+		AppendJsonString(out, OrderComparatorName(order.GetConditionComparator()));
+		out += fmt::format(",\"value\":{}", order.GetConditionValue());
+		out += "},\"jump\":";
+		out += fmt::format("{}", order.GetConditionSkipToOrder());
+	} else {
+		const uint16_t wait = order.GetTimetabledWait();
+		const uint16_t travel = order.GetTimetabledTravel();
+		if (wait > 0 || travel > 0 || timetable_started) {
+			out += ",\"timetable\":{";
+			bool first = true;
+			if (wait > 0) {
+				out += fmt::format("\"waitTicks\":{}", wait);
+				first = false;
+			}
+			if (travel > 0) {
+				if (!first) out.push_back(',');
+				out += fmt::format("\"travelTicks\":{}", travel);
+				first = false;
+			}
+			if (timetable_started) {
+				if (!first) out.push_back(',');
+				out += "\"autostart\":true";
+			}
+			out.push_back('}');
+		}
+	}
+	out.push_back('}');
 }
 
 /** Union des emprises d'une gare, en tuiles. */
@@ -1554,8 +1698,13 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 			if (!first_action) out.push_back(',');
 			first_action = false;
 			AppendJsonString(out, key);
+			bool available = mask.Test(action);
+			/* Actions déjà en cours : OpenTTD ne les retire pas du masque,
+			 * mais l'UI doit les griser jusqu'à la fin du programme. */
+			if (action == TownAction::RoadRebuild && t->road_build_months != 0) available = false;
+			if (action == TownAction::FundBuildings && t->fund_buildings_months != 0) available = false;
 			out += fmt::format(":{{\"available\":{},\"cost\":{}}}",
-				mask.Test(action) ? "true" : "false",
+				available ? "true" : "false",
 				static_cast<int64_t>(TownActionCost(action)));
 		}
 		out += "}}}";
@@ -1715,7 +1864,25 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 				out += fmt::format("{}", order.GetDestination().base());
 			}
 		}
-		out += fmt::format("],\"profitLastYear\":{:.2f},\"ageDays\":{}}}",
+		out += "],\"orderDetails\":[";
+		const bool timetable_started = v->vehicle_flags.Test(VehicleFlag::TimetableStarted);
+		for (VehicleOrderID index = 0; index < v->GetNumManualOrders(); index++) {
+			const Order *order = v->GetOrder(index);
+			if (order == nullptr) continue;
+			if (index != 0) out.push_back(',');
+			out += fmt::format("{{\"index\":{},\"kind\":", static_cast<unsigned>(index));
+			AppendJsonString(out, OrderKindName(*order));
+			if (order->IsType(OT_CONDITIONAL)) {
+				out += ",\"target\":-1";
+			} else {
+				out += fmt::format(",\"target\":{}", order->GetDestination().base());
+			}
+			out += ",\"options\":";
+			AppendOrderOptions(out, *order, timetable_started);
+			out.push_back('}');
+		}
+		out += fmt::format("],\"currentOrder\":{},\"profitLastYear\":{:.2f},\"ageDays\":{}}}",
+			static_cast<unsigned>(v->cur_real_order_index),
 			static_cast<double>(v->profit_last_year) / 256.0,
 			v->age.base());
 	}
@@ -3651,6 +3818,137 @@ bool VehicleStartStop(CompanyID company, const JsonValue &root, CommandReply &re
 	return Succeed(reply, start ? "Véhicule démarré." : "Véhicule arrêté.");
 }
 
+/** Refit d'un véhicule vers une cargaison (#160). */
+bool VehicleRefit(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	Vehicle *vehicle = FindVehicle(root, company, reply);
+	if (vehicle == nullptr) return false;
+	if (!vehicle->IsPrimaryVehicle()) {
+		return FailWith(reply, "NOT_PRIMARY_VEHICLE", "Seul un véhicule de tête peut être reconfiguré.");
+	}
+	if (!vehicle->IsStoppedInDepot()) {
+		return FailWith(reply, "NOT_IN_DEPOT", "Le véhicule doit être arrêté dans un dépôt.");
+	}
+	std::string cargo;
+	if (!JsonGetString(root.Find("cargo"), cargo) || cargo.empty()) {
+		return FailWith(reply, "INVALID_PARAMETER", "Le champ « cargo » doit être un slug de cargaison.");
+	}
+	const CargoType cargo_type = CargoTypeFromSlug(LowerAscii(cargo));
+	if (!IsValidCargoType(cargo_type)) {
+		return FailWith(reply, "UNKNOWN_CARGO", fmt::format("Cargaison « {} » inconnue.", cargo));
+	}
+
+	auto test = RunCompanyCommand<CMD_REFIT_VEHICLE>(
+			company, vehicle->tile, true, vehicle->index, cargo_type, 0, false, false, 0);
+	const CommandCost test_cost = CostOf(test);
+	if (test_cost.Failed()) {
+		return FailFromCommand(reply, test_cost, "COMMAND_FAILED", "Refit refusé.");
+	}
+	if (std::get<1>(test) == 0) {
+		return FailWith(reply, "REFIT_NOT_AVAILABLE",
+				fmt::format("La cargaison « {} » n'est pas disponible pour ce véhicule.", cargo));
+	}
+	auto result = RunCompanyCommand<CMD_REFIT_VEHICLE>(
+			company, vehicle->tile, false, vehicle->index, cargo_type, 0, false, false, 0);
+	const CommandCost cost = CostOf(result);
+	if (cost.Failed()) return FailFromCommand(reply, cost, "COMMAND_FAILED", "Refit refusé.");
+
+	reply.cost = cost.GetCost();
+	reply.vehicle = vehicle->index;
+	const uint capacity = std::get<1>(result);
+	return Succeed(reply, fmt::format("Véhicule reconfiguré vers « {} » : capacité {}.", cargo, capacity));
+}
+
+/** Duplication d'un véhicule dans son dépôt (#161). */
+bool VehicleClone(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	Vehicle *source = FindVehicle(root, company, reply);
+	if (source == nullptr) return false;
+	if (!source->IsPrimaryVehicle()) {
+		return FailWith(reply, "NOT_PRIMARY_VEHICLE", "Seul un véhicule de tête peut être dupliqué.");
+	}
+	if (!source->IsStoppedInDepot()) {
+		return FailWith(reply, "NOT_IN_DEPOT", "Le véhicule source doit être arrêté dans un dépôt.");
+	}
+	bool share_orders = true;
+	const JsonValue *share = root.Find("shareOrders");
+	if (share != nullptr && share->type == JsonValue::Type::Bool) share_orders = share->boolean;
+
+	/* `CMD_CLONE_VEHICLE` est marquée `NoTest` : une seule exécution, pas
+	 * d'estimation préalable. Un refus laisse l'état inchangé. */
+	auto result = RunCompanyCommand<CMD_CLONE_VEHICLE>(
+			company, source->tile, false, source->tile, source->index, share_orders);
+	const CommandCost cost = CostOf(result);
+	if (cost.Failed()) return FailFromCommand(reply, cost, "COMMAND_FAILED", "Duplication refusée.");
+
+	reply.cost = cost.GetCost();
+	reply.vehicle = std::get<1>(result);
+	return Succeed(reply, fmt::format("Véhicule #{} dupliqué depuis #{}.", reply.vehicle.base(), source->index.base()));
+}
+
+/** Mapping d'un mode d'arrêt du protocole vers les drapeaux OpenTTD. */
+struct OrderActionSpec {
+	OrderLoadType load = OrderLoadType::LoadIfPossible;
+	OrderUnloadType unload = OrderUnloadType::UnloadIfPossible;
+};
+
+bool ParseOrderAction(const std::string &name, OrderActionSpec &action)
+{
+	if (name.empty() || name == "normal") {
+		action.load = OrderLoadType::LoadIfPossible;
+		action.unload = OrderUnloadType::UnloadIfPossible;
+		return true;
+	}
+	if (name == "full_load" || name == "fullload") {
+		action.load = OrderLoadType::FullLoad;
+		action.unload = OrderUnloadType::UnloadIfPossible;
+		return true;
+	}
+	if (name == "no_load" || name == "noload") {
+		action.load = OrderLoadType::NoLoad;
+		action.unload = OrderUnloadType::UnloadIfPossible;
+		return true;
+	}
+	if (name == "unload") {
+		action.load = OrderLoadType::NoLoad;
+		action.unload = OrderUnloadType::Unload;
+		return true;
+	}
+	if (name == "transfer") {
+		action.load = OrderLoadType::NoLoad;
+		action.unload = OrderUnloadType::Transfer;
+		return true;
+	}
+	return false;
+}
+
+std::optional<OrderConditionComparator> ParseOrderComparator(const std::string &name)
+{
+	if (name == "equal") return OrderConditionComparator::Equal;
+	if (name == "not_equal" || name == "notequal") return OrderConditionComparator::NotEqual;
+	if (name == "less") return OrderConditionComparator::LessThan;
+	if (name == "less_or_equal") return OrderConditionComparator::LessThanOrEqual;
+	if (name == "more") return OrderConditionComparator::MoreThan;
+	if (name == "more_or_equal") return OrderConditionComparator::MoreThanOrEqual;
+	return std::nullopt;
+}
+
+/** Ordre analysé, validé avant toute modification de la tournée. */
+struct ParsedOrder {
+	std::string kind;
+	int target = -1;
+	OrderActionSpec action;
+	bool conditional = false;
+	int jump = 0;
+	OrderConditionComparator comparator = OrderConditionComparator::MoreThanOrEqual;
+	uint16_t condition_value = 0;
+	bool has_wait = false;
+	uint16_t wait = 0;
+	bool has_travel = false;
+	uint16_t travel = 0;
+	bool autostart = false;
+};
+
 bool VehicleOrders(CompanyID company, const JsonValue &root, CommandReply &reply)
 {
 	Vehicle *vehicle = FindVehicle(root, company, reply);
@@ -3663,77 +3961,223 @@ bool VehicleOrders(CompanyID company, const JsonValue &root, CommandReply &reply
 	if (orders == nullptr || orders->type != JsonValue::Type::Array || orders->items.empty()) {
 		return FailWith(reply, "INVALID_PARAMETER", "Le champ « orders » doit être un tableau non vide.");
 	}
+	if (orders->items.size() > 64) {
+		return FailWith(reply, "INVALID_PARAMETER", "Une tournée est limitée à 64 ordres.");
+	}
 
-	/* Valider toutes les cibles avant d'insérer le premier ordre évite une
-	 * tournée partielle. Les industries ne sont pas des destinations
+	/* Valider tous les ordres avant de supprimer la tournée existante évite
+	 * une tournée partielle. Les industries ne sont pas des destinations
 	 * directes : il faut passer par une gare. */
+	std::vector<ParsedOrder> parsed;
+	parsed.reserve(orders->items.size());
 	for (const JsonValue &item : orders->items) {
+		ParsedOrder spec;
 		std::string kind;
-		int target = 0;
-		if (!JsonGetString(item.Find("kind"), kind) || !JsonGetInt(item.Find("target"), target) || target < 0) {
-			return FailWith(reply, "INVALID_PARAMETER", "Chaque ordre exige « kind » et « target » (entier ≥ 0).");
+		if (!JsonGetString(item.Find("kind"), kind)) {
+			return FailWith(reply, "INVALID_PARAMETER", "Chaque ordre exige un « kind ».");
 		}
 		kind = LowerAscii(kind);
-		if (kind == "station" || kind == "gare") {
-			if (!Station::IsValidID(StationID(static_cast<uint16_t>(target)))) {
-				return FailWith(reply, "UNKNOWN_STATION", fmt::format("Gare {} inexistante.", target));
+		if (kind == "gare") kind = "station";
+		if (kind == "industrie") kind = "industry";
+		spec.kind = kind;
+
+		int target = -1;
+		const bool has_target = JsonGetInt(item.Find("target"), target);
+		if (kind == "conditional") {
+			spec.conditional = true;
+			const JsonValue *options = item.Find("options");
+			const JsonValue *condition = options != nullptr ? options->Find("condition") : nullptr;
+			if (condition == nullptr || condition->type != JsonValue::Type::Object) {
+				return FailWith(reply, "INVALID_PARAMETER", "Un ordre conditionnel exige une condition.");
 			}
-		} else if (kind == "depot") {
-			const DepotID depot_id(static_cast<uint16_t>(target));
+			std::string type;
+			if (!JsonGetString(condition->Find("type"), type)) {
+				return FailWith(reply, "INVALID_PARAMETER", "La condition exige un « type ».");
+			}
+			type = LowerAscii(type);
+			if (type != "percentage") {
+				return FailWith(reply, "NOT_SUPPORTED",
+						"Le pont OpenTTD ne gère que les conditions de pourcentage ; "
+						"argent, date et cargaison sont disponibles avec le moteur mock.");
+			}
+			std::string comparator;
+			if (!JsonGetString(condition->Find("comparator"), comparator)) {
+				return FailWith(reply, "INVALID_PARAMETER", "La condition exige un « comparator ».");
+			}
+			const std::optional<OrderConditionComparator> parsed_comparator =
+					ParseOrderComparator(LowerAscii(comparator));
+			if (!parsed_comparator.has_value()) {
+				return FailWith(reply, "INVALID_PARAMETER", fmt::format("Comparateur « {} » inconnu.", comparator));
+			}
+			spec.comparator = *parsed_comparator;
+			int value = 0;
+			if (!JsonGetInt(condition->Find("value"), value) || value < 0 || value > 100) {
+				return FailWith(reply, "INVALID_PARAMETER", "Le pourcentage conditionnel doit être entre 0 et 100.");
+			}
+			spec.condition_value = static_cast<uint16_t>(value);
+
+			const JsonValue *jump = options != nullptr ? options->Find("jump") : nullptr;
+			if (!JsonGetInt(jump, spec.jump) || spec.jump < 0 ||
+					spec.jump >= static_cast<int>(orders->items.size())) {
+				return FailWith(reply, "INVALID_PARAMETER",
+						fmt::format("Saut conditionnel invalide (attendu 0..{}).", orders->items.size() - 1));
+			}
+		} else if (!has_target || target < 0) {
+			return FailWith(reply, "INVALID_PARAMETER", "Chaque ordre exige « target » (entier ≥ 0).");
+		} else {
+			spec.target = target;
+		}
+
+		const JsonValue *options = item.Find("options");
+		if (options != nullptr && !spec.conditional) {
+			std::string action;
+			if (JsonGetString(options->Find("action"), action)) {
+				if (!ParseOrderAction(LowerAscii(action), spec.action)) {
+					return FailWith(reply, "INVALID_PARAMETER", fmt::format("Mode d'arrêt « {} » inconnu.", action));
+				}
+			}
+			const JsonValue *timetable = options->Find("timetable");
+			if (timetable != nullptr && timetable->type == JsonValue::Type::Object) {
+				int wait = 0;
+				if (JsonGetInt(timetable->Find("waitTicks"), wait)) {
+					spec.has_wait = true;
+					spec.wait = static_cast<uint16_t>(std::clamp(wait, 0, 65535));
+				}
+				int travel = 0;
+				if (JsonGetInt(timetable->Find("travelTicks"), travel)) {
+					spec.has_travel = true;
+					spec.travel = static_cast<uint16_t>(std::clamp(travel, 0, 65535));
+				}
+				const JsonValue *autostart = timetable->Find("autostart");
+				if (autostart != nullptr && autostart->type == JsonValue::Type::Bool) {
+					spec.autostart = autostart->boolean;
+				}
+			}
+		}
+
+		if (spec.kind == "station") {
+			if (!Station::IsValidID(StationID(static_cast<uint16_t>(spec.target)))) {
+				return FailWith(reply, "UNKNOWN_STATION", fmt::format("Gare {} inexistante.", spec.target));
+			}
+		} else if (spec.kind == "depot") {
+			const DepotID depot_id(static_cast<uint16_t>(spec.target));
 			if (!Depot::IsValidID(depot_id)) {
-				return FailWith(reply, "UNKNOWN_DEPOT", fmt::format("Dépôt {} inexistant.", target));
+				return FailWith(reply, "UNKNOWN_DEPOT", fmt::format("Dépôt {} inexistant.", spec.target));
 			}
 			const TileIndex depot_tile = Depot::Get(depot_id)->xy;
 			if (!IsTileOwner(depot_tile, company)) {
 				return FailWith(reply, "WRONG_OWNER",
-						fmt::format("Dépôt {} d'une autre entreprise.", target));
+						fmt::format("Dépôt {} d'une autre entreprise.", spec.target));
 			}
 			if (GetDepotVehicleType(depot_tile) != vehicle->type) {
 				return FailWith(reply, "WRONG_DEPOT_TYPE",
-						fmt::format("Dépôt {} incompatible avec ce véhicule.", target));
+						fmt::format("Dépôt {} incompatible avec ce véhicule.", spec.target));
 			}
-		} else if (kind == "industry" || kind == "industrie") {
+		} else if (spec.kind == "industry") {
 			return FailWith(reply, "NOT_SUPPORTED",
 					"Les ordres vers une industrie passent par une gare : utilisez « kind: station ».");
-		} else {
+		} else if (spec.kind != "conditional") {
 			return FailWith(reply, "INVALID_PARAMETER", fmt::format("Type d'ordre inconnu « {} ».", kind));
+		}
+		parsed.push_back(std::move(spec));
+	}
+
+	const bool has_destination = std::any_of(parsed.begin(), parsed.end(),
+			[](const ParsedOrder &order) { return !order.conditional; });
+	if (!has_destination) {
+		return FailWith(reply, "INVALID_PARAMETER", "Aucun arrêt physique : ajoutez une gare ou un dépôt.");
+	}
+
+	/* Remplacement complet : la tournée envoyée devient la seule tournée. */
+	for (int guard = 0; vehicle->GetNumManualOrders() > 0 && guard < 256; guard++) {
+		const CommandCost removed = RunCompanyCommand<CMD_DELETE_ORDER>(
+				company, vehicle->tile, false, vehicle->index, VehicleOrderID(static_cast<uint16_t>(0)));
+		if (removed.Failed()) {
+			return FailFromCommand(reply, removed, "COMMAND_FAILED", "Suppression de l'ancienne tournée refusée.");
 		}
 	}
 
-	VehicleOrderID position = vehicle->GetNumManualOrders();
+	VehicleOrderID position = 0;
 	int inserted = 0;
-	for (const JsonValue &item : orders->items) {
-		std::string kind;
-		int target = 0;
-		JsonGetString(item.Find("kind"), kind);
-		JsonGetInt(item.Find("target"), target);
-		kind = LowerAscii(kind);
-
+	bool autostart = false;
+	for (const ParsedOrder &spec : parsed) {
 		Order order;
-		if (kind == "station" || kind == "gare") {
-			order.MakeGoToStation(StationID(static_cast<uint16_t>(target)));
+		if (spec.conditional) {
+			/* Le saut est posé après l'insertion de toute la tournée : OpenTTD
+			 * refuse un saut vers un index qui n'existe pas encore. */
+			order.MakeConditional(VehicleOrderID(static_cast<uint16_t>(0)));
+			order.SetConditionVariable(OrderConditionVariable::LoadPercentage);
+			order.SetConditionComparator(spec.comparator);
+			order.SetConditionValue(spec.condition_value);
+		} else if (spec.kind == "station") {
+			order.MakeGoToStation(StationID(static_cast<uint16_t>(spec.target)));
 			/* Les véhicules routiers n'acceptent que FarEnd : la valeur par
 			 * défaut (NearEnd) fait échouer CmdInsertOrder. */
 			order.SetStopLocation(OrderStopLocation::FarEnd);
+			order.SetLoadType(spec.action.load);
+			order.SetUnloadType(spec.action.unload);
 		} else {
 			OrderDepotTypeFlags depot_flags;
 			depot_flags.Set(OrderDepotTypeFlag::PartOfOrders);
-			order.MakeGoToDepot(DepotID(static_cast<uint16_t>(target)), depot_flags,
+			order.MakeGoToDepot(DepotID(static_cast<uint16_t>(spec.target)), depot_flags,
 					OrderNonStopFlags{}, OrderDepotActionFlags{});
 		}
 
-		CommandCost result = RunCompanyCommand<CMD_INSERT_ORDER>(
+		const CommandCost result = RunCompanyCommand<CMD_INSERT_ORDER>(
 				company, vehicle->tile, false, vehicle->index, position, order);
 		if (result.Failed()) {
 			reply.orders = inserted;
 			return FailFromCommand(reply, result, "COMMAND_FAILED", "Ajout d'ordre refusé.");
 		}
+		if (spec.has_wait) {
+			const CommandCost wait = RunCompanyCommand<CMD_CHANGE_TIMETABLE>(
+					company, vehicle->tile, false, vehicle->index, position, MTF_WAIT_TIME, spec.wait);
+			if (wait.Failed()) {
+				reply.orders = inserted;
+				return FailFromCommand(reply, wait, "COMMAND_FAILED", "Horaire d'attente refusé.");
+			}
+		}
+		if (spec.has_travel) {
+			const CommandCost travel = RunCompanyCommand<CMD_CHANGE_TIMETABLE>(
+					company, vehicle->tile, false, vehicle->index, position, MTF_TRAVEL_TIME, spec.travel);
+			if (travel.Failed()) {
+				reply.orders = inserted;
+				return FailFromCommand(reply, travel, "COMMAND_FAILED", "Horaire de trajet refusé.");
+			}
+		}
+		autostart = autostart || spec.autostart;
 		position++;
 		inserted++;
 	}
 
+	/* Les sauts conditionnels sont appliqués quand tous les index existent. */
+	for (size_t index = 0; index < parsed.size(); index++) {
+		const ParsedOrder &spec = parsed[index];
+		if (!spec.conditional) continue;
+		const CommandCost jump = RunCompanyCommand<CMD_MODIFY_ORDER>(
+				company, vehicle->tile, false, vehicle->index,
+				VehicleOrderID(static_cast<uint16_t>(index)), MOF_COND_DESTINATION,
+				static_cast<uint16_t>(spec.jump));
+		if (jump.Failed()) {
+			reply.orders = inserted;
+			return FailFromCommand(reply, jump, "COMMAND_FAILED", "Saut conditionnel refusé.");
+		}
+	}
+
+	bool timetable_started = false;
+	if (autostart) {
+		if (vehicle->vehstatus.Test(VehState::Stopped)) {
+			RunCompanyCommand<CMD_START_STOP_VEHICLE>(
+					company, vehicle->tile, false, vehicle->index, false);
+		}
+		const CommandCost timer = RunCompanyCommand<CMD_SET_TIMETABLE_START>(
+				company, vehicle->tile, false, vehicle->index, true, TimerGameTick::counter);
+		timetable_started = !timer.Failed();
+	}
+
 	reply.orders = inserted;
-	return Succeed(reply, fmt::format("{} ordre(s) ajouté(s).", inserted));
+	return Succeed(reply, fmt::format("{} ordre(s) enregistré(s){}.",
+			inserted, timetable_started ? " · horaire démarré" : ""));
 }
 
 bool DispatchFinance(CompanyID company, const JsonValue &root, CommandReply &reply)
@@ -3834,9 +4278,8 @@ bool DispatchVehicle(CompanyID company, const JsonValue &root, CommandReply &rep
 	if (action == "start" || action == "demarrer" || action == "démarrer") return VehicleStartStop(company, root, reply, true);
 	if (action == "stop" || action == "arreter" || action == "arrêter") return VehicleStartStop(company, root, reply, false);
 	if (action == "order" || action == "ordre") return VehicleOrders(company, root, reply);
-	if (action == "refit") {
-		return FailWith(reply, "NOT_SUPPORTED", "Le rééquipement (refit) n'est pas supporté par le pont (#11).");
-	}
+	if (action == "refit" || action == "reconfigurer") return VehicleRefit(company, root, reply);
+	if (action == "clone" || action == "dupliquer") return VehicleClone(company, root, reply);
 	return FailWith(reply, "UNKNOWN_ACTION", fmt::format("Action véhicule inconnue « {} ».", action));
 }
 

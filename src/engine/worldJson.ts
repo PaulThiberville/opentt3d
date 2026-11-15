@@ -32,6 +32,9 @@
  * | `vehicle.cargo` | `null` |
  * | `vehicle.status` | 0 (arrêté) |
  * | `vehicle.orderTargets` | `[]` |
+ * | `vehicle.orderDetails` | absent : l'UI retombe sur `orderTargets` |
+ * | `vehicle.currentOrder` | absent |
+ * | `vehicle.model` | absent : modèle inféré par type/cargaison |
  * | `vehicle.kind` inconnu | véhicule ignoré (aucun modèle de rendu) |
  * | `news`/`events` absents | `[]` |
  *
@@ -48,7 +51,13 @@ import {
   type DepotSnapshot,
   type EconomySnapshot,
   type IndustrySnapshot,
+  type OrderAction,
+  type OrderComparator,
+  type OrderCondition,
+  type OrderConditionType,
+  type OrderOptions,
   type OrderTargetKind,
+  type OrderTimetable,
   type SnapshotMeta,
   type StationSnapshot,
   type SubsidySnapshot,
@@ -57,6 +66,7 @@ import {
   type TownAuthoritySnapshot,
   type TownSnapshot,
   type VehicleKind,
+  type VehicleOrderSnapshot,
   type VehicleSnapshot,
   type WorldEvent,
   type WorldSnapshot,
@@ -149,6 +159,100 @@ function cargoList(
 }
 
 const VEHICLE_KINDS: readonly VehicleKind[] = ['train', 'road', 'ship', 'aircraft'];
+
+const ORDER_KINDS: readonly OrderTargetKind[] = ['station', 'industry', 'depot', 'conditional'];
+const ORDER_ACTIONS: readonly OrderAction[] = [
+  'normal',
+  'full_load',
+  'no_load',
+  'unload',
+  'transfer',
+];
+const ORDER_CONDITION_TYPES: readonly OrderConditionType[] = [
+  'cargo',
+  'money',
+  'date',
+  'percentage',
+];
+const ORDER_COMPARATORS: readonly OrderComparator[] = [
+  'equal',
+  'not_equal',
+  'less',
+  'less_or_equal',
+  'more',
+  'more_or_equal',
+];
+
+function oneOf<T extends string>(value: unknown, values: readonly T[]): T | null {
+  return typeof value === 'string' && (values as readonly string[]).includes(value)
+    ? (value as T)
+    : null;
+}
+
+function parseOrderOptions(value: unknown): OrderOptions | undefined {
+  if (!isRecord(value)) return undefined;
+  const action = oneOf(value.action, ORDER_ACTIONS);
+  const conditionRaw = value.condition;
+  let condition: OrderCondition | undefined;
+  if (isRecord(conditionRaw)) {
+    const type = oneOf(conditionRaw.type, ORDER_CONDITION_TYPES);
+    const comparator = oneOf(conditionRaw.comparator, ORDER_COMPARATORS);
+    if (type && comparator) {
+      condition = {
+        type,
+        comparator,
+        value: int(conditionRaw.value, 0),
+        ...(typeof conditionRaw.cargo === 'string' ? { cargo: conditionRaw.cargo } : {}),
+        ...(Number.isFinite(conditionRaw.month)
+          ? { month: clampInt(conditionRaw.month, 0, 11, 0) }
+          : {}),
+      };
+    }
+  }
+  const jump = Number.isFinite(value.jump) ? Math.max(0, int(value.jump, 0)) : undefined;
+  const timetableRaw = value.timetable;
+  let timetable: OrderTimetable | undefined;
+  if (isRecord(timetableRaw)) {
+    const waitTicks = Number.isFinite(timetableRaw.waitTicks)
+      ? Math.max(0, int(timetableRaw.waitTicks, 0))
+      : undefined;
+    const travelTicks = Number.isFinite(timetableRaw.travelTicks)
+      ? Math.max(0, int(timetableRaw.travelTicks, 0))
+      : undefined;
+    const autostart = timetableRaw.autostart === true ? true : undefined;
+    if (waitTicks !== undefined || travelTicks !== undefined || autostart !== undefined) {
+      timetable = {
+        ...(waitTicks !== undefined ? { waitTicks } : {}),
+        ...(travelTicks !== undefined ? { travelTicks } : {}),
+        ...(autostart !== undefined ? { autostart } : {}),
+      };
+    }
+  }
+  if (!action && !condition && jump === undefined && !timetable) return undefined;
+  return {
+    ...(action ? { action } : {}),
+    ...(condition ? { condition } : {}),
+    ...(jump !== undefined ? { jump } : {}),
+    ...(timetable ? { timetable } : {}),
+  };
+}
+
+function parseOrderDetails(value: unknown): VehicleOrderSnapshot[] {
+  const orders: VehicleOrderSnapshot[] = [];
+  for (const entry of list(value)) {
+    if (!isRecord(entry)) continue;
+    const kind = oneOf(entry.kind, ORDER_KINDS);
+    if (!kind) continue;
+    const target = Math.trunc(num(entry.target, kind === 'conditional' ? -1 : 0));
+    const options = parseOrderOptions(entry.options);
+    orders.push({
+      target,
+      kind,
+      ...(options ? { options } : {}),
+    });
+  }
+  return orders;
+}
 
 function vehicleKind(value: unknown): VehicleKind | null {
   return typeof value === 'string' && (VEHICLE_KINDS as readonly string[]).includes(value)
@@ -346,10 +450,16 @@ export function parseVehicle(value: unknown): VehicleSnapshot | null {
     orderKinds.push(kind);
   }
 
+  const orderDetails = parseOrderDetails(raw.orderDetails);
+  const currentOrder = Number.isFinite(raw.currentOrder)
+    ? Math.max(0, int(raw.currentOrder, 0))
+    : undefined;
+
   return {
     id: Math.max(0, int(raw.id, 0)),
     kind,
     company: companyId(raw.company),
+    ...(typeof raw.model === 'string' && raw.model !== '' ? { model: raw.model } : {}),
     x: num(raw.x, 0),
     y: num(raw.y, 0),
     z: num(raw.z, 0),
@@ -359,6 +469,8 @@ export function parseVehicle(value: unknown): VehicleSnapshot | null {
     cargo,
     orderTargets,
     ...(orderKinds.length === orderTargets.length && orderKinds.length > 0 ? { orderKinds } : {}),
+    ...(orderDetails.length > 0 ? { orderDetails } : {}),
+    ...(currentOrder !== undefined ? { currentOrder } : {}),
     profitLastYear: num(raw.profitLastYear, 0),
     ageDays: Math.max(0, int(raw.ageDays, 0)),
   };
