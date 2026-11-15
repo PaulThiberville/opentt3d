@@ -24,6 +24,8 @@ export type TransportKind = 'trystero' | 'local' | 'memory';
 export interface Transport {
   readonly selfId: string;
   readonly kind: TransportKind;
+  /** Room this transport is attached to (used by the lobby and invite links). */
+  readonly roomId?: string;
   peers(): string[];
   send(channel: string, data: unknown, target?: string | string[]): void;
   on(channel: string, fn: (data: unknown, peerId: string) => void): () => void;
@@ -315,6 +317,7 @@ function targetMatches(target: string | string[] | undefined, selfId: string): b
 function createMemoryTransport(
   selfId: string,
   roomKey: string,
+  roomId: string,
   options: MemoryTransportOptions | undefined,
   rateLimit: RateLimiter,
 ): Transport {
@@ -420,6 +423,7 @@ function createMemoryTransport(
   return {
     kind: 'memory',
     selfId,
+    roomId,
     peers: () => [...members].filter((e) => e.id !== selfId && !e.closed).map((e) => e.id),
     send(channel, data, target) {
       if (closed) return;
@@ -481,6 +485,7 @@ function createMemoryTransport(
 function createLocalTransport(
   selfId: string,
   roomKey: string,
+  roomId: string,
   rateLimit: RateLimiter,
   options: LocalTransportOptions | undefined,
 ): Transport {
@@ -609,6 +614,7 @@ function createLocalTransport(
   const transport: Transport = {
     kind: 'local',
     selfId,
+    roomId,
     peers: () => [...peers.keys()],
     send(channelName, data, target) {
       if (closed) return;
@@ -792,6 +798,7 @@ function createTrysteroTransport(
   const transport: Transport = {
     kind: 'trystero',
     selfId,
+    roomId,
     peers: () => [...peers],
     send(channelName, data, target) {
       if (closed) return;
@@ -875,9 +882,9 @@ export function createTransport(options: CreateTransportOptions): Transport {
 
   switch (options.kind) {
     case 'memory':
-      return createMemoryTransport(selfId, roomKey, options.memory, rateLimit);
+      return createMemoryTransport(selfId, roomKey, roomId, options.memory, rateLimit);
     case 'local':
-      return createLocalTransport(selfId, roomKey, rateLimit, options.local);
+      return createLocalTransport(selfId, roomKey, roomId, rateLimit, options.local);
     case 'trystero':
       return createTrysteroTransport(selfId, roomId, appId, rateLimit, options);
     default:
