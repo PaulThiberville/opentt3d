@@ -72,16 +72,21 @@
 #include "station_type.h"
 #include "strings_func.h"
 #include "table/strings.h"
+#include "terraform_cmd.h"
 #include "tile_map.h"
 #include "timer/timer_game_calendar.h"
 #include "timer/timer_game_tick.h"
 #include "town.h"
 #include "track_func.h"
 #include "track_type.h"
+#include "tree_cmd.h"
+#include "tree_map.h"
+#include "tunnelbridge_cmd.h"
 #include "tunnelbridge_map.h"
 #include "vehicle_base.h"
 #include "vehicle_cmd.h"
 #include "vehicle_type.h"
+#include "water_cmd.h"
 #include "water_map.h"
 #include "window_func.h"
 
@@ -883,6 +888,9 @@ enum TileKindIndex : uint8_t {
 	TK_DOCK = 16,
 	TK_CANAL = 17,
 	TK_RIVER = 18,
+	TK_LOCK = 19,
+	TK_AQUEDUCT = 20,
+	TK_CROSSING = 21,
 };
 
 /* Bits de `TILE_FLAG` dans src/engine/protocol.ts. */
@@ -983,7 +991,7 @@ uint8_t TileKind(Tile tile)
 			return TK_RAIL;
 
 		case MP_ROAD:
-			return TK_ROAD;
+			return IsLevelCrossing(tile) ? TK_CROSSING : TK_ROAD;
 
 		case MP_HOUSE:
 			return TK_HOUSE;
@@ -1000,6 +1008,7 @@ uint8_t TileKind(Tile tile)
 			}
 
 		case MP_WATER:
+			if (IsLock(tile)) return TK_LOCK;
 			if (IsCoast(tile)) return TK_COAST;
 			switch (GetWaterClass(tile)) {
 				case WaterClass::Canal: return TK_CANAL;
@@ -1014,7 +1023,8 @@ uint8_t TileKind(Tile tile)
 			return TK_INDUSTRY;
 
 		case MP_TUNNELBRIDGE:
-			return IsBridgeTile(tile) ? TK_BRIDGE : TK_TUNNEL;
+			if (!IsBridgeTile(tile)) return TK_TUNNEL;
+			return GetTunnelBridgeTransportType(tile) == TRANSPORT_WATER ? TK_AQUEDUCT : TK_BRIDGE;
 
 		case MP_OBJECT:
 			return TK_OBJECT;
@@ -2734,6 +2744,269 @@ bool BuildClear(CompanyID company, const JsonValue &root, CommandReply &reply)
 	return Succeed(reply, fmt::format("{} tuile(s) démolie(s).", cleared));
 }
 
+bool BuildTerraform(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const JsonValue *options = root.Find("options");
+	const std::string direction = LowerAscii(OptionString(options, "direction", OptionString(options, "mode", "up")));
+	bool dir_up = true;
+	if (direction == "up" || direction == "raise" || direction == "monter" || direction == "montee") {
+		dir_up = true;
+	} else if (direction == "down" || direction == "lower" || direction == "descendre" || direction == "descente") {
+		dir_up = false;
+	} else {
+		return FailWith(reply, "INVALID_PARAMETER", "« options.direction » doit valoir up ou down.");
+	}
+
+	if (!has_to) {
+		const int size = std::max(1, std::min(4, OptionInt(options, "size", 1)));
+		to_x = std::min<int>(static_cast<int>(Map::SizeX()) - 1, from_x + size - 1);
+		to_y = std::min<int>(static_cast<int>(Map::SizeY()) - 1, from_y + size - 1);
+	}
+	const int min_x = std::min(from_x, to_x);
+	const int max_x = std::max(from_x, to_x);
+	const int min_y = std::min(from_y, to_y);
+	const int max_y = std::max(from_y, to_y);
+	const int64_t area = static_cast<int64_t>(max_x - min_x + 1) * (max_y - min_y + 1);
+	if (area > 256) {
+		return FailWith(reply, "TOO_MANY_TILES", "Zone trop grande : 256 tuiles maximum par terrassement.");
+	}
+
+	std::vector<TileIndex> tiles;
+	tiles.reserve(static_cast<size_t>(area));
+	for (int y = min_y; y <= max_y; y++) {
+		for (int x = min_x; x <= max_x; x++) tiles.push_back(TileXY(x, y));
+	}
+
+	const Slope slope = static_cast<Slope>(SLOPE_N | SLOPE_E | SLOPE_S | SLOPE_W);
+	for (const TileIndex tile : tiles) {
+		auto test = RunCompanyCommand<CMD_TERRAFORM_LAND>(company, tile, true, tile, slope, dir_up);
+		const CommandCost cost = CostOf(test);
+		if (cost.Failed()) return FailFromCommand(reply, cost, "COMMAND_FAILED", "Terrassement refusé : aucune tuile modifiée.");
+	}
+
+	Money spent = 0;
+	int changed = 0;
+	for (const TileIndex tile : tiles) {
+		auto result = RunCompanyCommand<CMD_TERRAFORM_LAND>(company, tile, false, tile, slope, dir_up);
+		const CommandCost cost = CostOf(result);
+		if (cost.Failed()) {
+			reply.cost = spent;
+			reply.tiles = changed;
+			return FailFromCommand(reply, cost, "COMMAND_FAILED", "Terrassement interrompu.");
+		}
+		spent += cost.GetCost();
+		changed++;
+	}
+	reply.cost = spent;
+	reply.tiles = changed;
+	return Succeed(reply, fmt::format("Terrassement : {} tuile(s) {}.", changed, dir_up ? "surélevée(s)" : "abaissée(s)"));
+}
+
+bool BuildTree(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const JsonValue *options = root.Find("options");
+	if (!has_to) {
+		const int size = std::max(1, std::min(4, OptionInt(options, "size", 1)));
+		to_x = std::min<int>(static_cast<int>(Map::SizeX()) - 1, from_x + size - 1);
+		to_y = std::min<int>(static_cast<int>(Map::SizeY()) - 1, from_y + size - 1);
+	}
+	const int min_x = std::min(from_x, to_x);
+	const int max_x = std::max(from_x, to_x);
+	const int min_y = std::min(from_y, to_y);
+	const int max_y = std::max(from_y, to_y);
+	const int64_t area = static_cast<int64_t>(max_x - min_x + 1) * (max_y - min_y + 1);
+	if (area > 256) {
+		return FailWith(reply, "TOO_MANY_TILES", "Zone trop grande : 256 tuiles maximum par plantation.");
+	}
+	const int raw_tree = OptionInt(options, "tree", -1);
+	if (raw_tree > 255) {
+		return FailWith(reply, "INVALID_PARAMETER", "« options.tree » doit être compris entre 0 et 255.");
+	}
+	const uint8_t tree = raw_tree < 0 ? TREE_INVALID : static_cast<uint8_t>(raw_tree);
+
+	std::vector<TileIndex> tiles;
+	tiles.reserve(static_cast<size_t>(area));
+	for (int y = min_y; y <= max_y; y++) {
+		for (int x = min_x; x <= max_x; x++) tiles.push_back(TileXY(x, y));
+	}
+
+	for (const TileIndex tile : tiles) {
+		CommandCost test = RunCompanyCommand<CMD_PLANT_TREE>(company, tile, true, tile, tile, tree, false);
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Plantation refusée : aucune tuile modifiée.");
+	}
+
+	Money spent = 0;
+	int planted = 0;
+	for (const TileIndex tile : tiles) {
+		CommandCost result = RunCompanyCommand<CMD_PLANT_TREE>(company, tile, false, tile, tile, tree, false);
+		if (result.Failed()) {
+			reply.cost = spent;
+			reply.tiles = planted;
+			return FailFromCommand(reply, result, "COMMAND_FAILED", "Plantation interrompue.");
+		}
+		spent += result.GetCost();
+		planted++;
+	}
+	reply.cost = spent;
+	reply.tiles = planted;
+	return Succeed(reply, fmt::format("{} tuile(s) plantée(s) en arbres.", planted));
+}
+
+bool BuildCanal(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const JsonValue *options = root.Find("options");
+	std::string order = LowerAscii(OptionString(options, "order", OptionString(options, "axis", "horizontal")));
+	bool vertical_first = false;
+	if (order == "vertical" || order == "y") {
+		vertical_first = true;
+	} else if (order != "horizontal" && order != "x") {
+		return FailWith(reply, "INVALID_PARAMETER", "« options.order » doit valoir « horizontal » ou « vertical ».");
+	}
+
+	std::vector<TileIndex> path;
+	MakeLPath(from_x, from_y, to_x, to_y, vertical_first, path);
+	if (path.size() == 1) {
+		CommandCost test = RunCompanyCommand<CMD_BUILD_CANAL>(company, path.front(), true, path.front(), path.front(), WaterClass::Canal, false);
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction de canal refusée.");
+		CommandCost result = RunCompanyCommand<CMD_BUILD_CANAL>(company, path.front(), false, path.front(), path.front(), WaterClass::Canal, false);
+		if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction de canal refusée.");
+		reply.cost = result.GetCost();
+		reply.tiles = 1;
+		return Succeed(reply, "Canal construit sur 1 tuile.");
+	}
+
+	for (size_t i = 1; i < path.size(); i++) {
+		CommandCost test = RunCompanyCommand<CMD_BUILD_CANAL>(company, path[i], true, path[i], path[i - 1], WaterClass::Canal, false);
+		if (test.Failed()) {
+			return FailFromCommand(reply, test, "COMMAND_FAILED", "Tronçon de canal refusé : aucune tuile construite.");
+		}
+	}
+	Money spent = 0;
+	for (size_t i = 1; i < path.size(); i++) {
+		CommandCost result = RunCompanyCommand<CMD_BUILD_CANAL>(company, path[i], false, path[i], path[i - 1], WaterClass::Canal, false);
+		if (result.Failed()) {
+			reply.cost = spent;
+			reply.tiles = static_cast<int>(i);
+			return FailFromCommand(reply, result, "COMMAND_FAILED", "Tronçon de canal interrompu.");
+		}
+		spent += result.GetCost();
+	}
+	reply.cost = spent;
+	reply.tiles = static_cast<int>(path.size());
+	return Succeed(reply, fmt::format("Canal construit sur {} tuiles.", path.size()));
+}
+
+bool BuildLock(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const TileIndex tile = TileXY(from_x, from_y);
+	CommandCost test = RunCompanyCommand<CMD_BUILD_LOCK>(company, tile, true, tile);
+	if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction d'écluse refusée.");
+	CommandCost result = RunCompanyCommand<CMD_BUILD_LOCK>(company, tile, false, tile);
+	if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction d'écluse refusée.");
+	reply.cost = result.GetCost();
+	reply.tiles = 1;
+	return Succeed(reply, "Écluse construite.");
+}
+
+bool BuildAqueduct(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	if (!has_to || (from_x != to_x && from_y != to_y)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Un aqueduc doit relier deux tuiles alignées sur x ou y.");
+	}
+	const TileIndex start = TileXY(from_x, from_y);
+	const TileIndex end = TileXY(to_x, to_y);
+	CommandCost test = RunCompanyCommand<CMD_BUILD_BRIDGE>(
+			company, end, true, end, start, TRANSPORT_WATER, static_cast<BridgeType>(0), 0);
+	if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction d'aqueduc refusée.");
+	CommandCost result = RunCompanyCommand<CMD_BUILD_BRIDGE>(
+			company, end, false, end, start, TRANSPORT_WATER, static_cast<BridgeType>(0), 0);
+	if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction d'aqueduc refusée.");
+	reply.cost = result.GetCost();
+	reply.tiles = std::abs(to_x - from_x) + std::abs(to_y - from_y) + 1;
+	return Succeed(reply, fmt::format("Aqueduc construit sur {} tuiles.", reply.tiles));
+}
+
+bool BuildCrossing(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const TileIndex tile = TileXY(from_x, from_y);
+
+	/* OpenTTD 15.3 n'a pas de commande dédiée : le passage à niveau est créé
+	 * en posant la route sur la voie (ou la voie sur la route). */
+	if (IsPlainRailTile(tile)) {
+		const TrackBits bits = GetTrackBits(tile);
+		if (bits != TRACK_BIT_X && bits != TRACK_BIT_Y) {
+			return FailWith(reply, "INVALID_PARAMETER", "Le passage à niveau exige une voie ferrée droite.");
+		}
+		const RoadType road_type = SelectRoadType(company);
+		if (road_type == INVALID_ROADTYPE) {
+			return FailWith(reply, "NO_ROAD_TYPE", "Aucun type de route disponible pour cette entreprise.");
+		}
+		const RoadBits road_bits = bits == TRACK_BIT_X ? ROAD_Y : ROAD_X;
+		CommandCost test = RunCompanyCommand<CMD_BUILD_ROAD>(
+				company, tile, true, tile, road_bits, road_type, DRD_NONE, TownID::Invalid());
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Passage à niveau refusé.");
+		CommandCost result = RunCompanyCommand<CMD_BUILD_ROAD>(
+				company, tile, false, tile, road_bits, road_type, DRD_NONE, TownID::Invalid());
+		if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Passage à niveau refusé.");
+		reply.cost = result.GetCost();
+		reply.tiles = 1;
+		return Succeed(reply, "Passage à niveau construit.");
+	}
+
+	if (IsNormalRoadTile(tile)) {
+		const RoadBits road_bits = GetRoadBits(tile, RTT_ROAD);
+		if (road_bits != ROAD_X && road_bits != ROAD_Y) {
+			return FailWith(reply, "INVALID_PARAMETER", "Le passage à niveau exige une route droite.");
+		}
+		const RailType rail_type = SelectRailType(company);
+		if (rail_type == INVALID_RAILTYPE) {
+			return FailWith(reply, "NO_RAIL_TYPE", "Aucun type de voie disponible pour cette entreprise.");
+		}
+		const Track track = road_bits == ROAD_X ? TRACK_Y : TRACK_X;
+		CommandCost test = RunCompanyCommand<CMD_BUILD_SINGLE_RAIL>(
+				company, tile, true, tile, rail_type, track, false);
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Passage à niveau refusé.");
+		CommandCost result = RunCompanyCommand<CMD_BUILD_SINGLE_RAIL>(
+				company, tile, false, tile, rail_type, track, false);
+		if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Passage à niveau refusé.");
+		reply.cost = result.GetCost();
+		reply.tiles = 1;
+		return Succeed(reply, "Passage à niveau construit.");
+	}
+
+	return FailWith(reply, "INVALID_PARAMETER", "Un passage à niveau se pose sur une voie ferrée ou une route.");
+}
+
 bool DispatchBuild(CompanyID company, const JsonValue &root, CommandReply &reply)
 {
 	std::string tool;
@@ -2748,6 +3021,12 @@ bool DispatchBuild(CompanyID company, const JsonValue &root, CommandReply &reply
 	if (tool == "depot" || tool == "depot_road" || tool == "depot_rail") return BuildDepot(company, root, reply);
 	if (tool == "signal" || tool == "signaux") return BuildSignal(company, root, reply);
 	if (tool == "clear" || tool == "demolish" || tool == "demolition") return BuildClear(company, root, reply);
+	if (tool == "terraform" || tool == "terrassement" || tool == "land") return BuildTerraform(company, root, reply);
+	if (tool == "tree" || tool == "trees" || tool == "arbre" || tool == "arbres") return BuildTree(company, root, reply);
+	if (tool == "canal" || tool == "canaux") return BuildCanal(company, root, reply);
+	if (tool == "lock" || tool == "ecluse" || tool == "écluse") return BuildLock(company, root, reply);
+	if (tool == "aqueduct" || tool == "aqueduc" || tool == "aqueducs") return BuildAqueduct(company, root, reply);
+	if (tool == "crossing" || tool == "level_crossing" || tool == "passage_a_niveau") return BuildCrossing(company, root, reply);
 	if (tool == "bridge" || tool == "tunnel" || tool == "pont") {
 		return FailWith(reply, "NOT_SUPPORTED",
 				"Les ponts et tunnels ne sont pas supportés par le pont pour l'instant (#11).");

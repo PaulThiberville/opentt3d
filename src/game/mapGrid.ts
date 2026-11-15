@@ -26,7 +26,7 @@ export function tileKindFromIndex(index: number): TileKind {
 }
 
 export function isWaterKind(kind: TileKind): boolean {
-  return kind === 'water' || kind === 'river' || kind === 'canal';
+  return kind === 'water' || kind === 'river' || kind === 'canal' || kind === 'lock';
 }
 
 /** Index linéaire d'une tuile, sans validation (hot path). */
