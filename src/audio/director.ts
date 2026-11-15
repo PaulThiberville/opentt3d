@@ -98,9 +98,10 @@ export class AudioDirector {
     map: MapSnapshot | null,
     listener: ListenerState,
     quality: QualityLevel = this.quality,
+    nightOverride?: number,
   ): void {
     this.quality = quality;
-    this.sink.setAmbience(ambienceFromSnapshot(snapshot, map, listener, quality));
+    this.sink.setAmbience(ambienceFromSnapshot(snapshot, map, listener, quality, nightOverride));
     if (!snapshot) return;
     const now = this.now();
     if (now - this.lastGlobalPassAt < GLOBAL_PASS_COOLDOWN_MS) return;

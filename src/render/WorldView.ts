@@ -23,11 +23,12 @@ import { TrackLayer } from './TrackLayer';
 import { VegetationLayer } from './VegetationLayer';
 import { VehicleLayer } from './VehicleLayer';
 import { phaseFromEconomy, sunState } from './dayNight';
+import { DEFAULT_DAY_NIGHT_CYCLE_SECONDS, DayNightCycle } from './dayNightCycle';
 import { qualitySettings, type QualityLevel } from './quality';
 
 /** Surface minimale du renderer pour piloter le cycle jour/nuit. */
 export interface TimeOfDaySink {
-  setTimeOfDay(fraction: number): void;
+  setTimeOfDay(fraction: number, immediate?: boolean): void;
   readonly nightAmount: number;
 }
 
@@ -43,6 +44,8 @@ export interface WorldViewOptions {
   quality: QualityLevel;
   /** Receveur du cycle jour/nuit (le `Renderer`). */
   timeOfDay?: TimeOfDaySink;
+  /** Cycle visuel : activation et durée d'une journée complète. */
+  dayNight?: { enabled: boolean; cycleSeconds: number };
   onSelect?: (target: WorldTarget | null) => void;
   onHover?: (target: WorldTarget | null) => void;
   onNotice?: (text: string) => void;
@@ -76,6 +79,8 @@ export class WorldView {
   private selectedVehicle: number | null = null;
   private currentMap: MapSnapshot | null = null;
   private timeOfDay?: TimeOfDaySink;
+  private dayNight: DayNightCycle;
+  private phaseInitialized = false;
   private night = 0;
   private onSelect?: (target: WorldTarget | null) => void;
   private onHover?: (target: WorldTarget | null) => void;
@@ -95,6 +100,10 @@ export class WorldView {
     this.camera = options.camera;
     this.quality = options.quality;
     this.timeOfDay = options.timeOfDay;
+    this.dayNight = new DayNightCycle({
+      enabled: options.dayNight?.enabled ?? true,
+      cycleSeconds: options.dayNight?.cycleSeconds ?? DEFAULT_DAY_NIGHT_CYCLE_SECONDS,
+    });
     this.onSelect = options.onSelect;
     this.onHover = options.onHover;
     this.onNotice = options.onNotice;
@@ -164,10 +173,14 @@ export class WorldView {
     // hauteur du sol (la dernière carte connue est conservée).
     this.depots.setDepots(snapshot.depots, this.currentMap);
     this.cityLayer.setStations(snapshot.stations, this.currentMap);
-    const phase = phaseFromEconomy(snapshot.economy);
-    this.night = sunState(phase).night;
-    this.timeOfDay?.setTimeOfDay(phase);
-    this.applyNight(this.night);
+    // L'heure visuelle ne suit le calendrier moteur qu'une fois : ensuite elle
+    // avance au temps réel, indépendamment de la vitesse de jeu.
+    if (!this.phaseInitialized) {
+      this.phaseInitialized = true;
+      this.dayNight.setPhase(phaseFromEconomy(snapshot.economy));
+      this.applyDayNightPhase(true);
+      this.applyNight(this.night);
+    }
     this.signals.update(snapshot.meta.tick);
   }
 
@@ -179,6 +192,35 @@ export class WorldView {
     this.cityLayer.setNight(amount);
     this.industries.setNight(amount);
     this.depots.setNight(amount);
+  }
+
+  /** Phase visuelle courante (0 = minuit, 0,5 = midi). */
+  get dayNightPhase(): number {
+    return this.dayNight.phase;
+  }
+
+  /** 0 = jour, 1 = nuit profonde, selon l'heure visuelle. */
+  get dayNightAmount(): number {
+    return sunState(this.dayNight.phase).night;
+  }
+
+  /** Applique immédiatement l'activation et la durée du cycle visuel. */
+  setDayNightCycle(enabled: boolean, cycleSeconds: number): void {
+    this.dayNight.setCycleSeconds(cycleSeconds);
+    this.dayNight.setEnabled(enabled);
+    this.applyDayNightPhase(true);
+    this.applyNight(this.timeOfDay?.nightAmount ?? this.night);
+  }
+
+  /** Fige l'heure avec le jeu (pause, menu). */
+  setDayNightPaused(paused: boolean): void {
+    this.dayNight.setPaused(paused);
+  }
+
+  private applyDayNightPhase(immediate = false): void {
+    const phase = this.dayNight.phase;
+    this.night = sunState(phase).night;
+    this.timeOfDay?.setTimeOfDay(phase, immediate);
   }
 
   /** Frame : interpolation, entités, caméra, picking au survol. */
@@ -196,6 +238,8 @@ export class WorldView {
     this.vegetation.update(deltaSeconds);
     this.cityLayer.update(this.camera.position);
     this.industries.update(deltaSeconds, this.camera.position);
+    this.dayNight.advance(deltaSeconds);
+    this.applyDayNightPhase();
     this.applyNight(this.timeOfDay?.nightAmount ?? this.night);
     if (this.buildMode) this.updateBuildHover();
     else this.updateHover();

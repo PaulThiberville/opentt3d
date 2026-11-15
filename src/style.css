@@ -638,6 +638,43 @@ select.input {
   color: var(--hud-muted);
 }
 
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+}
+
+.settings-toggle-row input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--hud-accent);
+  cursor: pointer;
+}
+
+.settings-toggle-row .field-label {
+  margin: 0;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.settings-cycle-row {
+  margin-top: 4px;
+}
+
+.settings-cycle-row .range:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.settings-cycle-value {
+  min-width: 46px;
+}
+
 .settings-status {
   margin: 14px 0 0;
   color: var(--hud-accent);

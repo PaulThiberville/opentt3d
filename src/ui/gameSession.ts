@@ -741,6 +741,10 @@ export class GameSession {
       canvas: this.canvas,
       quality: this.quality,
       timeOfDay: renderer,
+      dayNight: {
+        enabled: this.settings.dayNightCycle,
+        cycleSeconds: this.settings.dayNightCycleSeconds,
+      },
       onSelect: (target) => this.applySelection(target),
       onHover: () => undefined,
       onNotice: (text) => this.hud?.notify('info', text),
@@ -929,6 +933,8 @@ export class GameSession {
       game.advance(delta);
       world.update(delta, game.getInterpolation());
     }
+    world.setDayNightPaused(game.isPaused());
+    this.audio?.setDayNight(world.dayNightAmount);
 
     const pose = world.getCameraController().getPose();
     this.audio?.setListener({ x: pose.target.x, z: pose.target.z, yaw: pose.yaw });
@@ -1585,6 +1591,7 @@ export class GameSession {
   applySettings(settings: GameSettings): void {
     this.settings = settings;
     this.setQuality(settings.quality);
+    this.world?.setDayNightCycle(settings.dayNightCycle, settings.dayNightCycleSeconds);
     this.audio?.setSettings(settings);
   }
 
