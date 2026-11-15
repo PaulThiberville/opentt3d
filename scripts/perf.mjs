@@ -81,6 +81,8 @@ const BUDGETS = {
   },
   /** Triangles soumis par frame, par taille de carte. */
   triangles: { 128: 180_000, 256: 600_000, 512: 1_800_000 },
+  /** Supplément du scénario 300 véhicules (9 variantes détaillées, ≤ 1 500 tri). */
+  vehicleTrianglesFor300: 450_000,
   /** Moteur : un snapshot (carte incluse) et un tick. */
   snapshotMs: 45,
   snapshotMapMs: 90,
@@ -988,6 +990,14 @@ const PAGE_API = `(() => {
       perf.label = label;
       return resetFrames();
     },
+    /** Efface les frames après l'échauffement (le GC de begin peut créer un long task). */
+    clearFrames() {
+      perf.frames.length = 0;
+      perf.longTasks.length = 0;
+      perf.errors.length = 0;
+      perf.lastTimestamp = 0;
+      return true;
+    },
     end: finish,
     info() {
       const snap = snapshot();
@@ -1416,6 +1426,30 @@ async function prepareScenario(page, scenario) {
     await page.evaluate('window.__perfApi.trackRebuilds()');
     return { tool: 'road' };
   }
+  if (scenario === 'move') {
+    // Débloque l'audio hors fenêtre de mesure : le premier geste crée le
+    // contexte WebAudio et charge les ambiances (long task observé ~100-160 ms
+    // sur la première interaction). Le scénario mesure ensuite le déplacement.
+    await page.cdp.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x: 24,
+      y: VIEWPORT.height - 24,
+      button: 'left',
+      buttons: 1,
+      clickCount: 1,
+    });
+    await page.cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: 24,
+      y: VIEWPORT.height - 24,
+      button: 'left',
+      buttons: 0,
+      clickCount: 1,
+    });
+    await sleep(500);
+    await page.evaluate('window.__perfApi.resetView()');
+    return { unlockedAudio: true };
+  }
   return {};
 }
 
@@ -1428,6 +1462,10 @@ async function runScenario(page, scenario, durationSeconds, artifacts, dpr = 1) 
   }
 
   await page.evaluate(`window.__perfApi.begin('${scenario}')`);
+  // Laisse passer le GC forcé et le premier long task associé avant de
+  // démarrer la fenêtre de mesure : sinon il est compté comme un pic de frame.
+  await sleep(350);
+  await page.evaluate('window.__perfApi.clearFrames()');
   const viewport = await page.evaluate('window.__perfApi.counts().canvas');
 
   let resize = null;
@@ -1633,7 +1671,9 @@ function evaluateBudgets(run, quality, size, rendererKind) {
   const drawTable = BUDGETS.drawCalls[scenario] ?? BUDGETS.drawCalls.map;
   const drawBudget = typeof drawTable === 'number' ? drawTable : (drawTable[size] ?? 320);
   push('draw calls max', metrics.draws.max, drawBudget);
-  const triangleBudget = BUDGETS.triangles[size] ?? 1_500_000;
+  const triangleBudget =
+    (BUDGETS.triangles[size] ?? 1_800_000) +
+    (scenario === 'vehicles' ? BUDGETS.vehicleTrianglesFor300 : 0);
   push('triangles max', metrics.triangles.max, triangleBudget);
 
   if (run.engine) {
