@@ -97,9 +97,15 @@ import {
   type LockstepGameDriver,
 } from './networkRunner';
 import { describeSelection } from './selection';
+import {
+  describePlacePanel,
+  industryAtTile,
+  isPlaceSelection,
+  placeTargetExists,
+} from './placeView';
 import { describeDepotPanel, describeVehiclePanel } from './vehicleView';
 import type { GameSettings } from './settings';
-import type { GameOverSummary, NetworkStatusView, SessionOverview } from './types';
+import type { GameOverSummary, NetworkStatusView, PlaceTarget, SessionOverview } from './types';
 
 export interface LoadToken {
   cancelled: boolean;
@@ -1126,6 +1132,9 @@ export class GameSession {
       onRemoveOrder: (vehicleId, index) => this.removeOrder(vehicleId, index),
       onMoveOrder: (vehicleId, index, delta) => this.moveOrder(vehicleId, index, delta),
       onCloseVehicle: () => this.clearSelection(),
+      onPlaceFocus: (x, y) => this.focusPlace(x, y),
+      onPlaceSelect: (target) => this.selectPlaceTarget(target),
+      onClosePlace: () => this.clearSelection(),
       onToggleAudio: () => this.toggleAudioMute(),
       onPhotoMode: () => this.togglePhotoMode(),
     });
@@ -1211,6 +1220,11 @@ export class GameSession {
         return;
       }
       if (this.hud?.closePanels()) return;
+      // Échap ferme le panneau ville/industrie/gare avant de mettre en pause.
+      if (isPlaceSelection(this.game?.getSelection() ?? null)) {
+        this.clearSelection();
+        return;
+      }
       if (this.world?.isFollowing()) {
         this.world.stopFollowing();
         this.clearSelection();
@@ -1494,6 +1508,7 @@ export class GameSession {
       }
     }
     if (vehicle) depot = null;
+    const place = vehicle || depot ? null : describePlacePanel(snapshot, selection);
     hud.update({
       snapshot,
       fps: game.getFps(),
@@ -1502,6 +1517,7 @@ export class GameSession {
       selection: describeSelection(snapshot, selection, this.lastTarget, map),
       depot,
       vehicle,
+      place,
       quality: this.quality,
       following: world.isFollowing(),
       drawCalls: world.getDrawCalls(),
@@ -1533,6 +1549,13 @@ export class GameSession {
           this.refreshHud();
           return;
         }
+        const industry = industryAtTile(snapshot, target.x, target.y);
+        if (industry) {
+          this.world?.setSelection(target);
+          this.game?.select({ kind: 'industry', id: industry.id });
+          this.refreshHud();
+          return;
+        }
       }
     }
 
@@ -1549,6 +1572,45 @@ export class GameSession {
     return { kind: 'tile', id: target.y * width + target.x };
   }
 
+  /** Recentre la caméra sur le lieu ouvert sans fermer son panneau. */
+  private focusPlace(x: number, y: number): void {
+    this.world?.stopFollowing();
+    this.world?.getCameraController().focusOn(x, y);
+    this.updateCameraFrame();
+  }
+
+  /**
+   * Ouvre le panneau d'une gare, d'une industrie ou d'un véhicule listé dans un
+   * panneau lieu. La cible est revalidée contre le snapshot : un lieu disparu
+   * n'ouvre rien.
+   */
+  private selectPlaceTarget(target: PlaceTarget): void {
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    if (!placeTargetExists(snapshot, target)) return;
+    if (target.kind === 'vehicle') {
+      this.selectVehicle(target.id);
+      return;
+    }
+    if (!snapshot) return;
+    const place =
+      target.kind === 'station'
+        ? snapshot.stations.find((station) => station.id === target.id)
+        : snapshot.industries.find((industry) => industry.id === target.id);
+    if (!place) return;
+    this.openDepot = null;
+    this.orderPickingFor = null;
+    const worldTarget: WorldTarget = {
+      kind: 'tile',
+      x: Math.floor(place.x),
+      y: Math.floor(place.y),
+    };
+    this.lastTarget = worldTarget;
+    this.world?.setSelection(worldTarget);
+    this.game?.select({ kind: target.kind, id: target.id });
+    this.focusPlace(place.x, place.y);
+    this.refreshHud();
+  }
+
   /** Sélectionne un véhicule sans passer par le picking. */
   private selectVehicle(vehicleId: number): void {
     this.openDepot = null;
@@ -1561,12 +1623,16 @@ export class GameSession {
   }
 
   clearSelection(): void {
+    const active = document.activeElement;
     this.lastTarget = null;
     this.openDepot = null;
     this.orderPickingFor = null;
     this.world?.setSelection(null);
     this.game?.select(null);
     this.refreshHud();
+    // Le panneau lieu est démonté visuellement : le clavier revient au canvas
+    // au lieu de rester sur un contrôle devenu invisible.
+    if (active instanceof HTMLElement && active.closest('.hud-place')) this.canvas.focus();
   }
 
   /** Ferme le panneau dépôt sans toucher à la sélection de tuile. */

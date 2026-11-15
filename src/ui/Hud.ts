@@ -16,7 +16,7 @@ import { onLanguageChange, t } from './i18n';
 import { formatShortGameDate, type GameDateLike } from './format';
 import { NewsQueue, type NewsKind } from './news';
 import type { NetworkAlertView } from './netlobby';
-import type { CameraView, HudState, SelectionSummary } from './types';
+import type { CameraView, HudState, PlaceTarget, SelectionSummary } from './types';
 import { BuildHint } from './hud/BuildHint';
 import { BuildOptions } from './hud/BuildOptions';
 import { DepotPanel } from './hud/DepotPanel';
@@ -24,6 +24,7 @@ import { HelpPanel } from './hud/HelpPanel';
 import { Minimap } from './hud/Minimap';
 import { NetworkAlert } from './hud/NetworkAlert';
 import { NewsFeed } from './hud/NewsFeed';
+import { PlacePanel } from './hud/PlacePanel';
 import { SelectionPanel } from './hud/SelectionPanel';
 import { Toasts } from './hud/Toasts';
 import { Toolbar, type BuildToolId } from './hud/Toolbar';
@@ -53,6 +54,10 @@ export interface HudCallbacks {
   onRemoveOrder: (vehicleId: number, index: number) => void;
   onMoveOrder: (vehicleId: number, index: number, delta: -1 | 1) => void;
   onCloseVehicle: () => void;
+  /** Panneau ville/industrie/gare : recentrage et navigation entre lieux. */
+  onPlaceFocus: (x: number, y: number) => void;
+  onPlaceSelect: (target: PlaceTarget) => void;
+  onClosePlace: () => void;
   /** Coupe ou rétablit le son (bouton minimal de la barre supérieure). */
   onToggleAudio?: () => void;
   /** Ouvre/ferme le mode photo (bouton appareil). */
@@ -81,6 +86,7 @@ export class Hud {
   private selectionPanel: SelectionPanel;
   private depotPanel: DepotPanel;
   private vehiclePanel: VehiclePanel;
+  private placePanel: PlacePanel;
   private minimap: Minimap;
   private newsFeed: NewsFeed;
   private toolbar: Toolbar;
@@ -164,6 +170,12 @@ export class Hud {
       onMoveOrder: (vehicleId, index, delta) => this.callbacks.onMoveOrder(vehicleId, index, delta),
     });
 
+    this.placePanel = new PlacePanel({
+      onClose: () => this.callbacks.onClosePlace(),
+      onFocus: (x, y) => this.callbacks.onPlaceFocus(x, y),
+      onSelect: (target) => this.callbacks.onPlaceSelect(target),
+    });
+
     this.minimap = new Minimap({
       onRecenter: (x, y) => this.callbacks.onRecenterCamera(x, y),
     });
@@ -228,6 +240,7 @@ export class Hud {
       this.selectionPanel.element,
       this.depotPanel.element,
       this.vehiclePanel.element,
+      this.placePanel.element,
       this.minimap.element,
       this.newsFeed.element,
       this.toolbar.element,
@@ -281,12 +294,14 @@ export class Hud {
     this.topBar.update(state);
     this.updateNetworkStatus(state);
     // Le panneau véhicule est prioritaire sur le dépôt, lui-même prioritaire
-    // sur le panneau de sélection générique.
+    // sur le panneau lieu, lui-même prioritaire sur la sélection générique.
     const vehicle = state.vehicle ?? null;
     const depot = vehicle ? null : (state.depot ?? null);
+    const place = vehicle || depot ? null : (state.place ?? null);
     this.depotPanel.update(depot);
     this.vehiclePanel.update(vehicle);
-    const panelsOpen = vehicle !== null || depot !== null;
+    this.placePanel.update(place);
+    const panelsOpen = vehicle !== null || depot !== null || place !== null;
     this.selectionPanel.update(
       panelsOpen ? null : state.selection,
       panelsOpen ? false : state.following,

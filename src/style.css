@@ -2097,7 +2097,8 @@ select.input {
 /* ---------------------------------------------- dépôt et véhicule (vague 4) */
 
 .hud-depot,
-.hud-vehicle {
+.hud-vehicle,
+.hud-place {
   position: absolute;
   left: 12px;
   bottom: 12px;
@@ -2327,6 +2328,130 @@ select.input {
   border-color: var(--hud-accent);
   background: var(--hud-accent-soft);
   color: var(--hud-text);
+}
+
+/* -------------------------------------------------- ville / industrie / gare */
+
+.hud-place {
+  max-height: min(72vh, calc(100vh - 96px));
+  /* Laisse la pastille moteur (bas gauche) lisible sous le panneau. */
+  padding-bottom: 30px;
+}
+
+.hud-place-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.hud-place-title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-place-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.hud-place-section {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.hud-place-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hud-place-item {
+  min-width: 0;
+}
+
+.hud-place-item-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.hud-place-item > .hud-place-item-content {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.hud-place-link {
+  display: flex;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--hud-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--fast) ease,
+    border-color var(--fast) ease;
+}
+
+.hud-place-link:hover {
+  border-color: var(--hud-border-strong);
+  background: rgba(255, 255, 255, 0.075);
+}
+
+.hud-place-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.hud-place-item-detail {
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.hud-place-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hud-border);
+}
+
+.hud-place-action-group {
+  display: flex;
+  flex: 1 1 100%;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.hud-place-action {
+  width: 100%;
+  padding: 5px 9px;
+  font-size: 11px;
+}
+
+.hud-place-note {
+  margin: 0;
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  line-height: 1.4;
 }
 
 .hud-orders {
@@ -3225,7 +3350,8 @@ select.input {
   }
   .hud-selection,
   .hud-depot,
-  .hud-vehicle {
+  .hud-vehicle,
+  .hud-place {
     left: 8px;
     bottom: 8px;
     width: min(290px, calc(100vw - 16px));
@@ -3294,7 +3420,8 @@ select.input {
   }
   .hud-selection,
   .hud-depot,
-  .hud-vehicle {
+  .hud-vehicle,
+  .hud-place {
     left: 8px;
     right: 8px;
     bottom: 64px;
