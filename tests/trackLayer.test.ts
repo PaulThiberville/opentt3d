@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { Mesh } from 'three';
 import { TILE_KIND_INDEX, type MapSnapshot, type StationSnapshot } from '../src/engine/protocol';
 import { cornerHeightWorld, sampleHeightWorld } from '../src/game/mapGrid';
-import { TrackLayer, TRACK_CHUNK_SIZE, trackGroundHeight } from '../src/render/TrackLayer';
+import {
+  TrackLayer,
+  TRACK_CHUNK_SIZE,
+  trackGroundHeight,
+  roadTileLayout,
+  roadMarkingPaths,
+} from '../src/render/TrackLayer';
 import {
   TRACK_CONNECT,
   TRACK_CORNER,
@@ -397,5 +403,267 @@ describe('TrackLayer', () => {
     expect(layer.drawCallCount).toBeLessThanOrEqual(64);
     expect(layer.triangleCount).toBeLessThan(400_000);
     layer.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #181 — carrefours routiers : chaussée pleine tuile, trottoirs sur les seuls
+// bords non connectés, marquages arrêtés avant la place centrale.
+// ---------------------------------------------------------------------------
+
+type Shape = 'straight' | 'curve' | 'tee' | 'cross' | 'dead-end' | 'isolated';
+
+function shapeMap(shape: Shape): MapSnapshot {
+  const map = makeMap(9, 9);
+  switch (shape) {
+    case 'straight':
+      for (let x = 2; x <= 6; x += 1) road(map, x, 4);
+      break;
+    case 'curve':
+      road(map, 4, 4);
+      road(map, 5, 4);
+      road(map, 4, 3);
+      break;
+    case 'tee':
+      road(map, 4, 4);
+      road(map, 3, 4);
+      road(map, 5, 4);
+      road(map, 4, 3);
+      break;
+    case 'cross':
+      road(map, 4, 4);
+      road(map, 3, 4);
+      road(map, 5, 4);
+      road(map, 4, 3);
+      road(map, 4, 5);
+      break;
+    case 'dead-end':
+      road(map, 4, 4);
+      road(map, 5, 4);
+      break;
+    case 'isolated':
+      road(map, 4, 4);
+      break;
+  }
+  return map;
+}
+
+function unconnectedBits(connections: number): number[] {
+  const bits: number[] = [];
+  if (!(connections & TRACK_CONNECT.north)) bits.push(TRACK_CONNECT.north);
+  if (!(connections & TRACK_CONNECT.east)) bits.push(TRACK_CONNECT.east);
+  if (!(connections & TRACK_CONNECT.south)) bits.push(TRACK_CONNECT.south);
+  if (!(connections & TRACK_CONNECT.west)) bits.push(TRACK_CONNECT.west);
+  return bits;
+}
+
+interface TestTriangle {
+  a: [number, number, number];
+  b: [number, number, number];
+  c: [number, number, number];
+}
+
+/** Triangles bruts d'un maillage de chunk (base ou détaillé). */
+function chunkTriangles(layer: TrackLayer, prefix: 'track-base' | 'track-detail'): TestTriangle[] {
+  const triangles: TestTriangle[] = [];
+  for (const child of layer.group.children) {
+    const mesh = child as Mesh;
+    if (!mesh.isMesh || !mesh.name.startsWith(prefix)) continue;
+    const position = mesh.geometry.getAttribute('position');
+    for (let i = 0; i + 2 < position.count; i += 3) {
+      triangles.push({
+        a: [position.getX(i), position.getY(i), position.getZ(i)],
+        b: [position.getX(i + 1), position.getY(i + 1), position.getZ(i + 1)],
+        c: [position.getX(i + 2), position.getY(i + 2), position.getZ(i + 2)],
+      });
+    }
+  }
+  return triangles;
+}
+
+/** Hauteurs des surfaces horizontales couvrant (x, z), projections XZ. */
+function surfaceHeights(triangles: readonly TestTriangle[], x: number, z: number): number[] {
+  const heights: number[] = [];
+  for (const triangle of triangles) {
+    const [ax, ay, az] = triangle.a;
+    const [bx, by, bz] = triangle.b;
+    const [cx, cy, cz] = triangle.c;
+    const denominator = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+    if (Math.abs(denominator) < 1e-9) continue;
+    const l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / denominator;
+    const l2 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / denominator;
+    const l3 = 1 - l1 - l2;
+    if (l1 < -1e-6 || l2 < -1e-6 || l3 < -1e-6) continue;
+    heights.push(l1 * ay + l2 * by + l3 * cy);
+  }
+  return heights;
+}
+
+describe('géométrie des carrefours routiers (#181)', () => {
+  it('découpe chaque tuile en chaussée pleine + trottoirs sur les bords libres', () => {
+    for (const shape of ['straight', 'curve', 'tee', 'cross', 'dead-end', 'isolated'] as const) {
+      const map = shapeMap(shape);
+      const plan = planAt(map, 4, 4);
+      expect(plan, shape).not.toBeNull();
+      if (!plan) continue;
+      const layout = roadTileLayout(plan);
+      // Chaussée continue sur toute la tuile, sans trou central ni aux angles.
+      expect(layout.asphalt).toEqual({ x0: 4, z0: 4, x1: 5, z1: 5 });
+      // Un trottoir et un seul par bord non connecté.
+      const expected = unconnectedBits(plan.connections).sort();
+      const actual = layout.sidewalks.map((strip) => strip.bit).sort();
+      expect(actual, shape).toEqual(expected);
+      // Aucun trottoir ne recouvre un bord relié, donc aucun trottoir au
+      // milieu d'un carrefour.
+      for (const bit of layout.arms) {
+        expect(actual).not.toContain(bit);
+      }
+      // Les trottoirs restent dans la tuile et ne se chevauchent jamais.
+      for (const strip of layout.sidewalks) {
+        expect(strip.rect.x0).toBeGreaterThanOrEqual(4);
+        expect(strip.rect.z0).toBeGreaterThanOrEqual(4);
+        expect(strip.rect.x1).toBeLessThanOrEqual(5);
+        expect(strip.rect.z1).toBeLessThanOrEqual(5);
+      }
+      for (let i = 0; i < layout.sidewalks.length; i += 1) {
+        for (let j = i + 1; j < layout.sidewalks.length; j += 1) {
+          const first = layout.sidewalks[i]?.rect;
+          const second = layout.sidewalks[j]?.rect;
+          if (!first || !second) continue;
+          const overlapX = Math.min(first.x1, second.x1) - Math.max(first.x0, second.x0);
+          const overlapZ = Math.min(first.z1, second.z1) - Math.max(first.z0, second.z0);
+          expect(Math.min(overlapX, overlapZ), `${shape} ${i}/${j}`).toBeLessThanOrEqual(0);
+        }
+      }
+      // Le centre de la tuile est toujours de la chaussée, jamais un trottoir.
+      for (const strip of layout.sidewalks) {
+        const inside =
+          4.5 > strip.rect.x0 && 4.5 < strip.rect.x1 && 4.5 > strip.rect.z0 && 4.5 < strip.rect.z1;
+        expect(inside, shape).toBe(false);
+      }
+    }
+  });
+
+  it('couvre chaque tuile route sans trou, en LOD proche comme éloigné', () => {
+    for (const shape of ['straight', 'curve', 'tee', 'cross', 'dead-end', 'isolated'] as const) {
+      const map = shapeMap(shape);
+      const layer = new TrackLayer();
+      layer.setMap(map);
+      layer.setQuality('high');
+      try {
+        const base = chunkTriangles(layer, 'track-base');
+        const detail = chunkTriangles(layer, 'track-detail');
+        expect(base.length, shape).toBeGreaterThan(0);
+        expect(detail.length, shape).toBeGreaterThan(base.length);
+        for (const triangles of [base, detail]) {
+          for (let y = 0; y < map.height; y += 1) {
+            for (let x = 0; x < map.width; x += 1) {
+              const index = y * map.width + x;
+              if (map.kind[index] !== TILE_KIND_INDEX.road) continue;
+              for (const fx of [0.07, 0.2, 0.5, 0.8, 0.93]) {
+                for (const fz of [0.07, 0.2, 0.5, 0.8, 0.93]) {
+                  const sampleX = x + fx;
+                  const sampleZ = y + fz;
+                  const ground = trackGroundHeight(map, sampleX, sampleZ);
+                  const heights = surfaceHeights(triangles, sampleX, sampleZ);
+                  const covered = heights.some(
+                    (height) => height >= ground + 0.03 - 1e-4 && height <= ground + 0.075 + 1e-4,
+                  );
+                  expect(covered, `${shape} tuile ${x},${y} échantillon ${fx},${fz}`).toBe(true);
+                }
+              }
+            }
+          }
+        }
+      } finally {
+        layer.dispose();
+      }
+    }
+  });
+
+  it('ne marque jamais la place d’un carrefour', () => {
+    for (const shape of ['tee', 'cross', 'dead-end', 'isolated'] as const) {
+      const map = shapeMap(shape);
+      const plan = planAt(map, 4, 4);
+      expect(plan).not.toBeNull();
+      expect(plan ? roadMarkingPaths(plan) : []).toHaveLength(0);
+    }
+
+    // Droite : les tirets restent dans la tuile et suivent l'axe central.
+    const straight = planAt(shapeMap('straight'), 4, 4);
+    expect(straight).not.toBeNull();
+    const straightPaths = straight ? roadMarkingPaths(straight) : [];
+    expect(straightPaths.length).toBeGreaterThan(0);
+    for (const path of straightPaths) {
+      for (const point of path) {
+        expect(point.z).toBeCloseTo(4.5, 6);
+        expect(point.x).toBeGreaterThanOrEqual(4 - 1e-9);
+        expect(point.x).toBeLessThanOrEqual(5 + 1e-9);
+      }
+    }
+
+    // Virage : une ligne continue qui traverse la tuile.
+    const curve = planAt(shapeMap('curve'), 4, 4);
+    expect(curve).not.toBeNull();
+    const curvePaths = curve ? roadMarkingPaths(curve) : [];
+    expect(curvePaths).toHaveLength(1);
+    expect(curvePaths[0]?.length).toBeGreaterThan(2);
+    for (const point of curvePaths[0] ?? []) {
+      expect(point.x).toBeGreaterThanOrEqual(4 - 1e-9);
+      expect(point.z).toBeGreaterThanOrEqual(4 - 1e-9);
+      expect(point.x).toBeLessThanOrEqual(5 + 1e-9);
+      expect(point.z).toBeLessThanOrEqual(5 + 1e-9);
+    }
+  });
+
+  it('raccorde les portails de tunnel sans bordure parasite', () => {
+    const map = makeMap(9, 9);
+    road(map, 3, 4);
+    setKind(map, 4, 4, TILE_KIND_INDEX.tunnel);
+    setKind(map, 5, 4, TILE_KIND_INDEX.tunnel);
+    road(map, 6, 4);
+
+    const masks = buildTrackMasks(map);
+    expect(masks.road[4 * 9 + 4]).toBe(1);
+    expect(masks.road[4 * 9 + 5]).toBe(1);
+    expect(masks.rail[4 * 9 + 4]).toBe(0);
+
+    const plan = inferTilePlan(map, masks, 3, 4, 'road');
+    expect(plan.connections).toBe(TRACK_CONNECT.east);
+    const layout = roadTileLayout(plan);
+    expect(layout.sidewalks.map((strip) => strip.bit)).not.toContain(TRACK_CONNECT.east);
+
+    // Les tuiles tunnel ne reçoivent aucune géométrie de surface.
+    const plans = buildTrackPlans(map);
+    expect(
+      plans.some((candidate) => candidate.y === 4 && (candidate.x === 4 || candidate.x === 5)),
+    ).toBe(false);
+  });
+
+  it('reste sous le budget de triangles d’un réseau de carrefours', () => {
+    const size = 64;
+    const map = makeMap(size, size);
+    // Une route tous les 4 tiles dans les deux axes : beaucoup de T et de
+    // croisements, le pire cas pour la géométrie.
+    for (let y = 4; y < size - 4; y += 4) {
+      for (let x = 4; x < size - 4; x += 1) road(map, x, y);
+    }
+    for (let x = 4; x < size - 4; x += 4) {
+      for (let y = 4; y < size - 4; y += 1) road(map, x, y);
+    }
+    const layer = new TrackLayer();
+    layer.setMap(map);
+    layer.setQuality('high');
+    layer.update({ x: 32, y: 0, z: 32 });
+    try {
+      const tiles = layer.trackTileCount;
+      expect(tiles).toBeGreaterThan(1000);
+      expect(layer.drawCallCount).toBe(layer.chunkCount);
+      // Avant #181 : ~45 triangles/tuile en détail, ~14 en base. La chaussée
+      // pleine tuile supprime les places et bras redondants.
+      expect(layer.triangleCount / tiles).toBeLessThan(32);
+    } finally {
+      layer.dispose();
+    }
   });
 });

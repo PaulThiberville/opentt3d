@@ -2,11 +2,11 @@
  * Géométrie 3D des routes et voies ferrées.
  *
  * `TrackLayer` construit un maillage fusionné par chunk à partir des plans de
- * `trackPlan.ts` : chaussée surélevée et bordures pour les routes, ballast,
- * traverses et deux files de rails pour les voies. Tout est fusionné dans UNE
- * géométrie à couleurs de sommets par chunk (un seul draw call), avec un
- * second maillage plus détaillé pour le LOD proche (jamais dessiné en même
- * temps que le premier).
+ * `trackPlan.ts` : chaussée pleine tuile et trottoirs sur les seuls bords non
+ * connectés pour les routes, ballast, traverses et deux files de rails pour les
+ * voies. Tout est fusionné dans UNE géométrie à couleurs de sommets par chunk
+ * (un seul draw call), avec un second maillage plus détaillé pour le LOD proche
+ * (jamais dessiné en même temps que le premier).
  *
  * Les sommets sont posés exactement sur la triangulation du terrain (même
  * découpage diagonal que `TerrainLayer`) puis surélevés de quelques
@@ -34,11 +34,14 @@ import {
 
 export const TRACK_CHUNK_SIZE = 32;
 
-const ROAD_HALF_WIDTH = 0.34;
+/**
+ * Largeur du trottoir posé à l'intérieur des bords non connectés. La chaussée,
+ * elle, couvre toute la tuile : deux tuiles voisines partagent donc exactement
+ * la même arête, sans trou ni couture aux carrefours.
+ */
+const SIDEWALK_WIDTH = 0.11;
+const SIDEWALK_LIFT = 0.07;
 const ROAD_LIFT = 0.032;
-const CURB_WIDTH = 0.05;
-const CURB_HALF = CURB_WIDTH / 2;
-const CURB_TOP_LIFT = 0.07;
 const MARK_WIDTH = 0.03;
 const MARK_LIFT = ROAD_LIFT + 0.008;
 const MARK_PERIOD = 0.62;
@@ -140,7 +143,7 @@ const RAIL_PALETTES: Record<RailType, RailPalette> = {
 
 type Rgb = readonly [number, number, number];
 
-interface Pt2 {
+export interface Pt2 {
   x: number;
   z: number;
 }
@@ -404,37 +407,6 @@ function addRibbon(
   }
 }
 
-/** Bordure isolée le long d'un côté de place de carrefour. */
-function addCurbStrip(
-  writer: GeometryWriter,
-  map: MapSnapshot,
-  a: Pt2,
-  b: Pt2,
-  outward: Pt2,
-  width: number,
-): void {
-  const gap = 0.002;
-  const innerA = { x: a.x + outward.x * gap, z: a.z + outward.z * gap };
-  const innerB = { x: b.x + outward.x * gap, z: b.z + outward.z * gap };
-  const outerA = { x: innerA.x + outward.x * width, z: innerA.z + outward.z * width };
-  const outerB = { x: innerB.x + outward.x * width, z: innerB.z + outward.z * width };
-  const innerTopA = pointAt(map, innerA.x, innerA.z, CURB_TOP_LIFT);
-  const innerTopB = pointAt(map, innerB.x, innerB.z, CURB_TOP_LIFT);
-  const outerTopA = pointAt(map, outerA.x, outerA.z, CURB_TOP_LIFT);
-  const outerTopB = pointAt(map, outerB.x, outerB.z, CURB_TOP_LIFT);
-  const innerBottomA = pointAt(map, innerA.x, innerA.z, 0);
-  const innerBottomB = pointAt(map, innerB.x, innerB.z, 0);
-  const outerBottomA = pointAt(map, outerA.x, outerA.z, 0);
-  const outerBottomB = pointAt(map, outerB.x, outerB.z, 0);
-  const colour = tint(CURB_COLOUR, 0);
-  const side = tint(CURB_COLOUR, 0.3, 0.85);
-  addQuad(writer, innerTopA, outerTopA, outerTopB, innerTopB, colour, CURB_NIGHT);
-  addWall(writer, innerTopA, innerTopB, innerBottomB, innerBottomA, side, CURB_NIGHT);
-  addWall(writer, outerTopA, outerTopB, outerBottomB, outerBottomA, side, CURB_NIGHT);
-  addQuad(writer, innerTopA, outerTopA, outerBottomA, innerBottomA, side, CURB_NIGHT);
-  addQuad(writer, innerTopB, outerTopB, outerBottomB, innerBottomB, side, CURB_NIGHT);
-}
-
 function edgePoint(plan: TrackTilePlan, bit: number): Pt2 {
   const x = plan.x;
   const y = plan.y;
@@ -514,45 +486,167 @@ function padBoundary(plan: TrackTilePlan, bit: number, half: number): Pt2 {
 // Routes
 // ---------------------------------------------------------------------------
 
-function emitRoadRibbon(
+interface Rect2 {
+  x0: number;
+  z0: number;
+  x1: number;
+  z1: number;
+}
+
+export interface RoadSidewalkStrip {
+  /** Bord de tuile portant le trottoir. */
+  bit: number;
+  rect: Rect2;
+  /** Joues verticales du trottoir (jusqu'au sol). */
+  walls: { north: boolean; east: boolean; south: boolean; west: boolean };
+}
+
+export interface RoadTileLayout {
+  /** Chaussée pleine tuile, quel que soit le nombre de branches. */
+  asphalt: Rect2;
+  /** Trottoirs, uniquement sur les bords sans connexion. */
+  sidewalks: RoadSidewalkStrip[];
+  /** Bords connectés au réseau. */
+  arms: number[];
+}
+
+/**
+ * Découpe d'une tuile route : chaussée pleine tuile + trottoirs sur les seuls
+ * bords non connectés.
+ *
+ * La chaussée couvre exactement `[x, x+1] × [y, y+1]`, comme dans OpenTTD :
+ * deux tuiles voisines partagent la même arête, donc aucun trou ni couture aux
+ * carrefours en T, aux croisements, aux virages et aux impasses.
+ *
+ * Les angles sont attribués dans l'ordre nord → est → sud → ouest : deux
+ * trottoirs voisins ne se recouvrent jamais, ce qui évite tout z-fighting au
+ * milieu d'un virage ou d'un carrefour.
+ */
+export function roadTileLayout(plan: TrackTilePlan): RoadTileLayout {
+  const x0 = plan.x;
+  const z0 = plan.y;
+  const x1 = x0 + 1;
+  const z1 = z0 + 1;
+  const w = SIDEWALK_WIDTH;
+  const north = (plan.connections & TRACK_CONNECT.north) === 0;
+  const east = (plan.connections & TRACK_CONNECT.east) === 0;
+  const south = (plan.connections & TRACK_CONNECT.south) === 0;
+  const west = (plan.connections & TRACK_CONNECT.west) === 0;
+  const sidewalks: RoadSidewalkStrip[] = [];
+
+  if (north) {
+    sidewalks.push({
+      bit: TRACK_CONNECT.north,
+      rect: { x0, z0, x1, z1: z0 + w },
+      walls: { north: true, east: true, south: true, west: true },
+    });
+  }
+  if (east) {
+    sidewalks.push({
+      bit: TRACK_CONNECT.east,
+      rect: { x0: x1 - w, z0: z0 + (north ? w : 0), x1, z1 },
+      walls: { north: !north, east: true, south: true, west: true },
+    });
+  }
+  if (south) {
+    sidewalks.push({
+      bit: TRACK_CONNECT.south,
+      rect: { x0, z0: z1 - w, x1: east ? x1 - w : x1, z1 },
+      walls: { north: true, east: !east, south: true, west: true },
+    });
+  }
+  if (west) {
+    sidewalks.push({
+      bit: TRACK_CONNECT.west,
+      rect: { x0, z0: z0 + (north ? w : 0), x1: x0 + w, z1: z1 - (south ? w : 0) },
+      walls: { north: !north, east: true, south: !south, west: true },
+    });
+  }
+
+  return { asphalt: { x0, z0, x1, z1 }, sidewalks, arms: connectionBits(plan.connections) };
+}
+
+/** Joue verticale de la chaussée (version allégée, sans trottoir). */
+function addRoadEdgeWall(
   writer: GeometryWriter,
   map: MapSnapshot,
-  path: readonly Pt2[],
-  variant: number,
-  withCurbs: boolean,
+  a: Pt2,
+  b: Pt2,
+  colour: Rgb,
 ): void {
-  const asphalt = tint(ROAD_COLOUR, variant);
-  addRibbon(writer, map, path, {
-    halfWidth: ROAD_HALF_WIDTH,
-    topLift: ROAD_LIFT,
-    bottomLift: 0,
-    topColour: asphalt,
-    sideColour: tint(ROAD_SIDE_COLOUR, variant),
-    topGlow: ROAD_NIGHT,
-  });
+  const topA = pointAt(map, a.x, a.z, ROAD_LIFT);
+  const topB = pointAt(map, b.x, b.z, ROAD_LIFT);
+  const bottomA = pointAt(map, a.x, a.z, 0);
+  const bottomB = pointAt(map, b.x, b.z, 0);
+  addWall(writer, topA, topB, bottomB, bottomA, colour, ROAD_NIGHT);
+}
 
-  if (!withCurbs) return;
-  for (const side of [-1, 1]) {
-    addRibbon(writer, map, path, {
-      // Léger retrait de 2 mm : la joue intérieure de la bordure n'est pas
-      // coplanaire avec la joue de la chaussée (pas de z-fighting).
-      lateral: side * (ROAD_HALF_WIDTH + 0.002 + CURB_HALF),
-      halfWidth: CURB_HALF,
-      topLift: CURB_TOP_LIFT,
-      bottomLift: 0,
-      walls: 'both',
-      topColour: tint(CURB_COLOUR, variant),
-      sideColour: tint(CURB_COLOUR, variant, 0.8),
-      topGlow: CURB_NIGHT,
-    });
+/** Trottoir surélevé d'un bord non connecté, avec ses joues et ses bouts. */
+function emitSidewalk(
+  writer: GeometryWriter,
+  map: MapSnapshot,
+  strip: RoadSidewalkStrip,
+  variant: number,
+): void {
+  const { x0, z0, x1, z1 } = strip.rect;
+  const topNw = pointAt(map, x0, z0, SIDEWALK_LIFT);
+  const topNe = pointAt(map, x1, z0, SIDEWALK_LIFT);
+  const topSe = pointAt(map, x1, z1, SIDEWALK_LIFT);
+  const topSw = pointAt(map, x0, z1, SIDEWALK_LIFT);
+  addQuad(writer, topNw, topNe, topSe, topSw, tint(CURB_COLOUR, variant), CURB_NIGHT);
+
+  const side = tint(CURB_COLOUR, variant, 0.86);
+  const bottomNw = pointAt(map, x0, z0, 0);
+  const bottomNe = pointAt(map, x1, z0, 0);
+  const bottomSe = pointAt(map, x1, z1, 0);
+  const bottomSw = pointAt(map, x0, z1, 0);
+  if (strip.walls.north) addWall(writer, topNw, topNe, bottomNe, bottomNw, side, CURB_NIGHT);
+  if (strip.walls.east) addWall(writer, topNe, topSe, bottomSe, bottomNe, side, CURB_NIGHT);
+  if (strip.walls.south) addWall(writer, topSe, topSw, bottomSw, bottomSe, side, CURB_NIGHT);
+  if (strip.walls.west) addWall(writer, topSw, topNw, bottomNw, bottomSw, side, CURB_NIGHT);
+}
+
+function emitRoadSurface(
+  writer: GeometryWriter,
+  map: MapSnapshot,
+  plan: TrackTilePlan,
+  detail: number,
+): void {
+  const variant = plan.variation;
+  const layout = roadTileLayout(plan);
+  const { x0, z0, x1, z1 } = layout.asphalt;
+  const a = pointAt(map, x0, z0, ROAD_LIFT);
+  const b = pointAt(map, x1, z0, ROAD_LIFT);
+  const c = pointAt(map, x1, z1, ROAD_LIFT);
+  const d = pointAt(map, x0, z1, ROAD_LIFT);
+  addQuad(writer, a, b, c, d, tint(ROAD_COLOUR, variant), ROAD_NIGHT);
+
+  if (detail >= 1) {
+    for (const strip of layout.sidewalks) emitSidewalk(writer, map, strip, variant);
+    return;
+  }
+
+  // LOD éloigné : une simple joue sur chaque bord libre suffit à refermer la
+  // dalle. Les trottoirs (3,8 cm) sont invisibles à cette distance.
+  const sideColour = tint(ROAD_SIDE_COLOUR, variant);
+  if (!(plan.connections & TRACK_CONNECT.north)) {
+    addRoadEdgeWall(writer, map, { x: x0, z: z0 }, { x: x1, z: z0 }, sideColour);
+  }
+  if (!(plan.connections & TRACK_CONNECT.east)) {
+    addRoadEdgeWall(writer, map, { x: x1, z: z0 }, { x: x1, z: z1 }, sideColour);
+  }
+  if (!(plan.connections & TRACK_CONNECT.south)) {
+    addRoadEdgeWall(writer, map, { x: x1, z: z1 }, { x: x0, z: z1 }, sideColour);
+  }
+  if (!(plan.connections & TRACK_CONNECT.west)) {
+    addRoadEdgeWall(writer, map, { x: x0, z: z1 }, { x: x0, z: z0 }, sideColour);
   }
 }
 
-function addCentreMarkings(writer: GeometryWriter, map: MapSnapshot, plan: TrackTilePlan): void {
-  const axis = plan.axis ?? 'x';
-  const start = axis === 'x' ? plan.x : plan.y;
-  const end = start + 1;
-  const line = axis === 'x' ? plan.y + 0.5 : plan.x + 0.5;
+/** Tirets alignés sur une grille mondiale : continus d'une tuile à l'autre. */
+function axisDashPaths(axis: 'x' | 'y', line: number, start: number, end: number): Pt2[][] {
+  if (end - start < 0.02) return [];
+  const paths: Pt2[][] = [];
   const first = Math.floor(start / MARK_PERIOD);
   const last = Math.ceil(end / MARK_PERIOD);
   for (let k = first; k <= last; k += 1) {
@@ -560,70 +654,77 @@ function addCentreMarkings(writer: GeometryWriter, map: MapSnapshot, plan: Track
     const dashEnd = Math.min(end, k * MARK_PERIOD + MARK_DASH);
     if (dashEnd - dashStart < 0.02) continue;
     if (axis === 'x') {
-      const a = pointAt(map, dashStart, line - MARK_WIDTH / 2, MARK_LIFT);
-      const b = pointAt(map, dashStart, line + MARK_WIDTH / 2, MARK_LIFT);
-      const c = pointAt(map, dashEnd, line + MARK_WIDTH / 2, MARK_LIFT);
-      const d = pointAt(map, dashEnd, line - MARK_WIDTH / 2, MARK_LIFT);
-      addQuad(writer, a, b, c, d, tint(MARK_COLOUR, 0.5, 1.04), MARK_NIGHT);
+      paths.push([
+        { x: dashStart, z: line },
+        { x: dashEnd, z: line },
+      ]);
     } else {
-      const a = pointAt(map, line - MARK_WIDTH / 2, dashStart, MARK_LIFT);
-      const b = pointAt(map, line + MARK_WIDTH / 2, dashStart, MARK_LIFT);
-      const c = pointAt(map, line + MARK_WIDTH / 2, dashEnd, MARK_LIFT);
-      const d = pointAt(map, line - MARK_WIDTH / 2, dashEnd, MARK_LIFT);
-      addQuad(writer, a, b, c, d, tint(MARK_COLOUR, 0.5, 1.04), MARK_NIGHT);
+      paths.push([
+        { x: line, z: dashStart },
+        { x: line, z: dashEnd },
+      ]);
     }
   }
+  return paths;
 }
 
-function emitRoadPad(
-  writer: GeometryWriter,
-  map: MapSnapshot,
-  plan: TrackTilePlan,
-  connections: number,
-  variant: number,
-  detail: number,
-): void {
-  const c = centre(plan);
-  const h = ROAD_HALF_WIDTH;
-  const nw = { x: c.x - h, z: c.z - h };
-  const ne = { x: c.x + h, z: c.z - h };
-  const se = { x: c.x + h, z: c.z + h };
-  const sw = { x: c.x - h, z: c.z + h };
-  const corners = [nw, ne, se, sw].map((point) => pointAt(map, point.x, point.z, ROAD_LIFT));
-  const a = corners[0];
-  const b = corners[1];
-  const cc = corners[2];
-  const d = corners[3];
-  if (!a || !b || !cc || !d) return;
-  addQuad(writer, a, b, cc, d, tint(ROAD_COLOUR, variant), ROAD_NIGHT);
+/**
+ * Axes des marquages d'une tuile route (purement descriptif, pour les tests).
+ *
+ * - droite : tirets alignés sur la grille mondiale, donc continus entre tuiles ;
+ * - virage : ligne continue le long de l'arc ;
+ * - about, T, croisement et tuile isolée : aucun marquage, la place du
+ *   carrefour reste vierge et les tirets des tuiles droites voisines s'arrêtent
+ *   naturellement à son arête.
+ */
+export function roadMarkingPaths(plan: TrackTilePlan): Pt2[][] {
+  if (plan.shape === 'curve') {
+    const bits = connectionBits(plan.connections);
+    const first = bits[0];
+    const second = bits[1];
+    if (first === undefined || second === undefined) return [];
+    return [quadraticPath(edgePoint(plan, first), centre(plan), edgePoint(plan, second), 8)];
+  }
 
-  const sides: Array<{ bit: number; from: Pt2; to: Pt2; outward: Pt2 }> = [
-    { bit: TRACK_CONNECT.north, from: nw, to: ne, outward: { x: 0, z: -1 } },
-    { bit: TRACK_CONNECT.east, from: ne, to: se, outward: { x: 1, z: 0 } },
-    { bit: TRACK_CONNECT.south, from: se, to: sw, outward: { x: 0, z: 1 } },
-    { bit: TRACK_CONNECT.west, from: sw, to: nw, outward: { x: -1, z: 0 } },
-  ];
-  for (const side of sides) {
-    if (connections & side.bit) continue;
-    const topA = pointAt(map, side.from.x, side.from.z, ROAD_LIFT);
-    const topB = pointAt(map, side.to.x, side.to.z, ROAD_LIFT);
-    const bottomA = pointAt(map, side.from.x, side.from.z, 0);
-    const bottomB = pointAt(map, side.to.x, side.to.z, 0);
-    addWall(writer, topA, topB, bottomB, bottomA, tint(ROAD_SIDE_COLOUR, variant), ROAD_NIGHT);
-    if (detail >= 1) addCurbStrip(writer, map, side.from, side.to, side.outward, CURB_WIDTH);
+  if (plan.shape !== 'straight') return [];
+
+  const axis = plan.axis ?? 'x';
+  if (axis === 'x') return axisDashPaths('x', plan.y + 0.5, plan.x, plan.x + 1);
+  return axisDashPaths('y', plan.x + 0.5, plan.y, plan.y + 1);
+}
+
+/** Marquage continu qui suit une polyligne (axe d'un virage ou tiret). */
+function addMarkingRibbon(writer: GeometryWriter, map: MapSnapshot, path: readonly Pt2[]): void {
+  if (path.length < 2) return;
+  const normals = pathNormals(path);
+  const half = MARK_WIDTH / 2;
+  const colour = tint(MARK_COLOUR, 0.5, 1.04);
+  for (let i = 0; i + 1 < path.length; i += 1) {
+    const pointA = path[i];
+    const pointB = path[i + 1];
+    const normalA = normals[i];
+    const normalB = normals[i + 1];
+    if (!pointA || !pointB || !normalA || !normalB) continue;
+    const minusA = pointAt(
+      map,
+      pointA.x - normalA.x * half,
+      pointA.z - normalA.z * half,
+      MARK_LIFT,
+    );
+    const plusA = pointAt(map, pointA.x + normalA.x * half, pointA.z + normalA.z * half, MARK_LIFT);
+    const plusB = pointAt(map, pointB.x + normalB.x * half, pointB.z + normalB.z * half, MARK_LIFT);
+    const minusB = pointAt(
+      map,
+      pointB.x - normalB.x * half,
+      pointB.z - normalB.z * half,
+      MARK_LIFT,
+    );
+    addQuad(writer, minusA, plusA, plusB, minusB, colour, MARK_NIGHT);
   }
 }
 
-function emitRoadArm(
-  writer: GeometryWriter,
-  map: MapSnapshot,
-  plan: TrackTilePlan,
-  bit: number,
-  variant: number,
-  detail: number,
-): void {
-  const path = [padBoundary(plan, bit, ROAD_HALF_WIDTH), edgePoint(plan, bit)];
-  emitRoadRibbon(writer, map, path, variant, detail >= 1);
+function emitRoadMarkings(writer: GeometryWriter, map: MapSnapshot, plan: TrackTilePlan): void {
+  for (const path of roadMarkingPaths(plan)) addMarkingRibbon(writer, map, path);
 }
 
 function emitRoadTile(
@@ -632,40 +733,8 @@ function emitRoadTile(
   plan: TrackTilePlan,
   detail: number,
 ): void {
-  const variant = plan.variation;
-  if (plan.shape === 'straight' || plan.shape === 'isolated') {
-    const axis = plan.axis ?? 'x';
-    const start = edgePoint(plan, axis === 'x' ? TRACK_CONNECT.west : TRACK_CONNECT.north);
-    const end = edgePoint(plan, axis === 'x' ? TRACK_CONNECT.east : TRACK_CONNECT.south);
-    emitRoadRibbon(writer, map, [start, centre(plan), end], variant, detail >= 1);
-    if (detail >= 1) addCentreMarkings(writer, map, plan);
-    return;
-  }
-  if (plan.shape === 'curve') {
-    const bits = connectionBits(plan.connections);
-    const first = bits[0];
-    const second = bits[1];
-    if (first === undefined || second === undefined) return;
-    const path = quadraticPath(
-      edgePoint(plan, first),
-      centre(plan),
-      edgePoint(plan, second),
-      detail >= 1 ? 8 : 4,
-    );
-    emitRoadRibbon(writer, map, path, variant, detail >= 1);
-    return;
-  }
-  if (plan.shape === 'dead-end') {
-    emitRoadPad(writer, map, plan, plan.connections, variant, detail);
-    const bit = connectionBits(plan.connections)[0];
-    if (bit !== undefined) emitRoadArm(writer, map, plan, bit, variant, detail);
-    return;
-  }
-  // T et croisement routier.
-  emitRoadPad(writer, map, plan, plan.connections, variant, detail);
-  for (const bit of connectionBits(plan.connections)) {
-    emitRoadArm(writer, map, plan, bit, variant, detail);
-  }
+  emitRoadSurface(writer, map, plan, detail);
+  if (detail >= 1) emitRoadMarkings(writer, map, plan);
 }
 
 // ---------------------------------------------------------------------------

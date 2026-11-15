@@ -12,6 +12,8 @@
  *   réseau ;
  * - les rails gèrent en plus les diagonales (voisins aux quatre coins) ;
  * - les gares et les ponts sont classés route/rail grâce aux snapshots ;
+ * - les tunnels sont classés comme les ponts : leurs portails transmettent la
+ *   connexion au réseau qui les borde, sans géométrie de surface ;
  * - les tuiles isolées retombent sur une voie droite est-ouest, convention
  *   d'OpenTTD pour un tronçon d'une tuile.
  *
@@ -83,6 +85,12 @@ const ROAD_INDEX = TILE_KIND_INDEX.road;
 const RAIL_INDEX = TILE_KIND_INDEX.rail;
 const STATION_INDEX = TILE_KIND_INDEX.station;
 const BRIDGE_INDEX = TILE_KIND_INDEX.bridge;
+const TUNNEL_INDEX = TILE_KIND_INDEX.tunnel;
+
+/** Vrai pour une tuile dont le tablier/le souterrain est rendu ailleurs. */
+export function isHiddenTrackKind(kind: number): boolean {
+  return kind === BRIDGE_INDEX || kind === TUNNEL_INDEX;
+}
 
 export function oppositeConnections(bits: number): number {
   let result = 0;
@@ -165,9 +173,10 @@ export function cornersAt(
 /**
  * Construit les masques route/rail de toute la carte.
  *
- * Les ponts sont classés par proximité (route ou rail) car leur type de
- * transport n'est pas exposé. Les tunnels sont volontairement ignorés : la
- * géométrie de surface s'arrêterait à la bouche sans traverser le relief.
+ * Les ponts et tunnels sont classés par proximité (route ou rail) car leur
+ * type de transport n'est pas exposé. Les tunnels ne produisent aucune
+ * géométrie de surface dans `TrackLayer`, mais leur masque permet aux tuiles
+ * voisines de raccorder leur chaussée au portail sans bordure parasite.
  */
 export function buildTrackMasks(
   map: MapSnapshot,
@@ -177,13 +186,13 @@ export function buildTrackMasks(
   const road = new Uint8Array(size);
   const rail = new Uint8Array(size);
   const stationAxis = new Uint8Array(size);
-  const bridges: number[] = [];
+  const hidden: number[] = [];
 
   for (let index = 0; index < size; index += 1) {
     const kind = map.kind[index] ?? 0;
     if (kind === ROAD_INDEX) road[index] = 1;
     else if (kind === RAIL_INDEX) rail[index] = 1;
-    else if (kind === BRIDGE_INDEX) bridges.push(index);
+    else if (kind === BRIDGE_INDEX || kind === TUNNEL_INDEX) hidden.push(index);
     else if (kind === STATION_INDEX) {
       // Rempli par le snapshot des gares ci-dessous.
     }
@@ -208,22 +217,24 @@ export function buildTrackMasks(
     }
   }
 
-  // Classification des ponts : les tuiles d'un même tablier forment une
-  // composante connexe. On compte les routes/rails rencontrés sur son
+  // Classification des ponts et tunnels : les tuiles d'un même ouvrage forment
+  // une composante connexe. On compte les routes/rails rencontrés sur son
   // pourtour (et non seulement autour de chaque tuile) pour classer les ponts
   // longs dont le milieu n'a aucun voisin routier immédiat.
   const visited = new Uint8Array(size);
-  for (const start of bridges) {
+  for (const start of hidden) {
     if (visited[start]) continue;
     const component: number[] = [];
     const stack = [start];
     visited[start] = 1;
     let roadHits = 0;
     let railHits = 0;
+    let hasBridge = false;
     while (stack.length > 0) {
       const index = stack.pop();
       if (index === undefined) continue;
       component.push(index);
+      if ((map.kind[index] ?? 0) === BRIDGE_INDEX) hasBridge = true;
       const x = index % map.width;
       const y = Math.floor(index / map.width);
       const neighbours = [
@@ -237,12 +248,16 @@ export function buildTrackMasks(
         const neighbour = ny * map.width + nx;
         if (road[neighbour]) roadHits += 1;
         if (rail[neighbour]) railHits += 1;
-        if ((map.kind[neighbour] ?? 0) === BRIDGE_INDEX && !visited[neighbour]) {
+        if (isHiddenTrackKind(map.kind[neighbour] ?? 0) && !visited[neighbour]) {
           visited[neighbour] = 1;
           stack.push(neighbour);
         }
       }
     }
+    // Un tunnel sans raccordement n'a pas de réseau identifiable : on ne lui
+    // invente pas une chaussée. Les ponts gardent l'ancienne convention
+    // (tablier routier par défaut) pour ne rien changer à leur rendu.
+    if (roadHits === 0 && railHits === 0 && !hasBridge) continue;
     const isRail = railHits > roadHits;
     for (const index of component) {
       if (isRail) rail[index] = 1;
@@ -333,6 +348,9 @@ export function buildTrackPlans(
   for (let y = 0; y < map.height; y += 1) {
     for (let x = 0; x < map.width; x += 1) {
       const index = y * map.width + x;
+      // Les tunnels ne reçoivent aucune géométrie de surface : leurs tuiles
+      // servent uniquement à raccorder leurs portails.
+      if ((map.kind[index] ?? 0) === TUNNEL_INDEX) continue;
       if (masks.rail[index]) plans.push(inferTilePlan(map, masks, x, y, 'rail'));
       else if (masks.road[index]) plans.push(inferTilePlan(map, masks, x, y, 'road'));
     }
