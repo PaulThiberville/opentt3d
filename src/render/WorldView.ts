@@ -177,6 +177,8 @@ export class WorldView {
     this.tracks.setNight(amount);
     this.vehicles.setNight(amount);
     this.cityLayer.setNight(amount);
+    this.industries.setNight(amount);
+    this.depots.setNight(amount);
   }
 
   /** Frame : interpolation, entités, caméra, picking au survol. */

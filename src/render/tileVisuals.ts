@@ -63,7 +63,8 @@ export function hexToRgb(hex: number, out: Rgb = { r: 0, g: 0, b: 0 }): Rgb {
   return out;
 }
 
-function mixHex(a: number, b: number, amount: number): number {
+/** Mélange linéaire de deux couleurs hex sRGB (0 = `a`, 1 = `b`). */
+export function mixColour(a: number, b: number, amount: number): number {
   const ar = (a >> 16) & 0xff;
   const ag = (a >> 8) & 0xff;
   const ab = a & 0xff;
@@ -71,6 +72,30 @@ function mixHex(a: number, b: number, amount: number): number {
   const bg = (b >> 8) & 0xff;
   const bb = b & 0xff;
   return rgbToHex(ar + (br - ar) * amount, ag + (bg - ag) * amount, ab + (bb - ab) * amount);
+}
+
+/** Éclaircit (`amount > 0`) ou assombrit (`amount < 0`) une couleur hex. */
+export function shadeColour(hex: number, amount: number): number {
+  const factor = 1 + amount;
+  const channel = (value: number): number => Math.max(0, Math.min(255, Math.round(value * factor)));
+  return (
+    (channel((hex >> 16) & 0xff) << 16) | (channel((hex >> 8) & 0xff) << 8) | channel(hex & 0xff)
+  );
+}
+
+/**
+ * Variation procédurale déterministe d'une teinte de surface.
+ *
+ * Une petite dérive de luminosité et un voile de poussière chaude cassent
+ * l'uniformité des toits et des façades sans texture. Le résultat ne dépend que
+ * de la couleur de base et de la graine : deux rendus identiques restent
+ * identiques.
+ */
+export function weatherColour(hex: number, seed: number, amount = 0.07): number {
+  const brightness = hashUnit2d(seed, 0x51, 0x9d) - 0.5;
+  const dust = hashUnit2d(seed, 0x27, 0x3b);
+  const dusty = mixColour(hex, 0xb9a887, dust * Math.min(0.18, Math.max(0, amount)));
+  return shadeColour(dusty, brightness * amount);
 }
 
 /**
@@ -89,24 +114,62 @@ export function tileColour(
 ): number {
   const base = TILE_COLOURS[kind] ?? TILE_COLOURS.void;
   const variation = 0.9 + hashUnit2d(seed, heightLevel, steepness) * 0.16;
-  let colour = mixHex(0x000000, base, Math.min(1, variation));
+  let colour = mixColour(0x000000, base, Math.min(1, variation));
+  // Ballast, voirie et dalles : deux passages de teinte déterministes pour
+  // casser l'aplat sans texture (l'asphalte et le ballast ne sont jamais unis).
+  switch (kind) {
+    case 'rail':
+      colour = mixColour(
+        colour,
+        0x6d5f4c,
+        0.14 + hashUnit2d(seed, heightLevel + 5, steepness + 9) * 0.18,
+      );
+      break;
+    case 'road':
+    case 'airport':
+      colour = mixColour(
+        colour,
+        0x2f3236,
+        0.08 + hashUnit2d(seed, heightLevel + 2, steepness + 7) * 0.12,
+      );
+      break;
+    case 'station':
+      colour = mixColour(colour, 0xb4b1aa, hashUnit2d(seed, heightLevel + 11, steepness + 3) * 0.1);
+      break;
+    case 'industry':
+      colour = mixColour(
+        colour,
+        0x5c5044,
+        hashUnit2d(seed, heightLevel + 13, steepness + 1) * 0.12,
+      );
+      break;
+    case 'dock':
+      colour = mixColour(
+        colour,
+        0x7a6a4c,
+        hashUnit2d(seed, heightLevel + 17, steepness + 6) * 0.14,
+      );
+      break;
+    default:
+      break;
+  }
   // Altitude : les sommets tirent vers la roche claire.
   if (kind === 'grass' || kind === 'clear' || kind === 'trees' || kind === 'rough') {
     const altitude = Math.max(0, Math.min(1, (heightLevel - 8) / 6));
-    if (altitude > 0) colour = mixHex(colour, 0x8d8676, altitude * 0.5);
-    if (steepness >= 3) colour = mixHex(colour, 0x5f584a, 0.32);
+    if (altitude > 0) colour = mixColour(colour, 0x8d8676, altitude * 0.5);
+    if (steepness >= 3) colour = mixColour(colour, 0x5f584a, 0.32);
   }
   return colour;
 }
 
 /** Variation appliquée aux eaux peu profondes (proches d'une côte). */
 export function shallowWaterColour(seed: number): number {
-  return mixHex(TILE_COLOURS.water, 0x4a93b4, 0.2 + hashUnit2d(seed, 7, 3) * 0.08);
+  return mixColour(TILE_COLOURS.water, 0x4a93b4, 0.2 + hashUnit2d(seed, 7, 3) * 0.08);
 }
 
 /** Couleur d'un bâtiment de ville, selon le quartier et la graine. */
 export function buildingColour(seed: number, index: number, cityTint: number): number {
   const palette = [0xd8cdb8, 0xc4b49a, 0xbfa98c, 0xd2d4cc, 0xa8b0b4, 0xc9b9a4, 0xb59b7f];
   const base = palette[Math.abs(seed + index * 7) % palette.length] ?? 0xc9b9a4;
-  return mixHex(base, cityTint, 0.16);
+  return mixColour(base, cityTint, 0.16);
 }

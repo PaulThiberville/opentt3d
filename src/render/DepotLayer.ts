@@ -17,6 +17,7 @@ import type { DepotSnapshot, MapSnapshot } from '../engine/protocol';
 import { COMPANY_NONE } from '../engine/protocol';
 import { sampleHeightWorld } from '../game/mapGrid';
 import { companyColour, hexToRgb } from './tileVisuals';
+import { createModelMaterial } from './models/materials';
 import {
   createDepotBodyGeometry,
   createDepotLiveryGeometry,
@@ -44,8 +45,10 @@ export class DepotLayer {
   private roadLiveries: THREE.InstancedMesh;
   private railBodies: THREE.InstancedMesh;
   private railLiveries: THREE.InstancedMesh;
-  private bodyMaterial: THREE.MeshLambertMaterial;
-  private liveryMaterial: THREE.MeshLambertMaterial;
+  private bodyMaterial: THREE.MeshStandardMaterial;
+  private liveryMaterial: THREE.MeshStandardMaterial;
+  private nightUniform: { value: number } = { value: 0 };
+  private nightAmount = 0;
   private geometries: THREE.BufferGeometry[] = [];
   private placements: DepotPlacement[] = [];
   private matrix = new THREE.Matrix4();
@@ -57,8 +60,21 @@ export class DepotLayer {
 
   constructor() {
     this.group.name = 'depots';
-    this.bodyMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
-    this.liveryMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    this.bodyMaterial = createModelMaterial({
+      night: this.nightUniform,
+      glowStrength: 1.0,
+      nightAmbient: 0.02,
+      roughness: 0.76,
+      metalness: 0.04,
+      name: 'depot-bodies-surface',
+    });
+    this.liveryMaterial = createModelMaterial({
+      night: this.nightUniform,
+      glowStrength: 1.0,
+      roughness: 0.55,
+      metalness: 0.08,
+      name: 'depot-liveries-surface',
+    });
     const roadBody = createDepotBodyGeometry('road', 1);
     const roadLivery = createDepotLiveryGeometry('road');
     const railBody = createDepotBodyGeometry('rail', 1);
@@ -145,6 +161,21 @@ export class DepotLayer {
 
   get count(): number {
     return this.placements.length;
+  }
+
+  /** Matériau de surface du corps des dépôts (diagnostic et tests). */
+  get surfaceMaterial(): THREE.MeshStandardMaterial {
+    return this.bodyMaterial;
+  }
+
+  /** 0 = jour, 1 = nuit profonde : allume les petits vitrages des dépôts. */
+  setNight(amount: number): void {
+    this.nightAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
+    this.nightUniform.value = this.nightAmount;
+  }
+
+  get night(): number {
+    return this.nightAmount;
   }
 
   /** Ids rendus, dans l'ordre du snapshot (diagnostic et tests). */

@@ -7,11 +7,18 @@
  * pour le corps : `InstancedMesh.setColorAt()` les multiplie par la couleur
  * d'entreprise. Les parties sombres (vitres, châssis, roues) restent sombres
  * dans toutes les livrées.
+ *
+ * Chaque sommet porte aussi `aFinish` (peinture, verre, métal, accent, etc.)
+ * et `aGlow` (fenêtre, phare, feu) : le matériau partagé de `materials.ts`
+ * module la rugosité, le métal et l'émission nocturne sans draw call en plus.
+ * La couleur de base subit une usure déterministe (grain et salissure basse).
  */
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { hashUnit2d } from '../../game/prng';
 import { hexToRgb } from '../tileVisuals';
+import { MODEL_FINISH, MODEL_GLOW, type ModelFinish, type ModelGlow } from './materials';
 
 /** Palette des parties de modèles (hex sRGB, multipliée par la couleur d'instance). */
 export const MODEL_COLOURS = {
@@ -43,6 +50,12 @@ export const MODEL_COLOURS = {
   tailLight: 0x7a2323,
   /** Cheminée, échappement. */
   stack: 0x3a3d42,
+  /** Filet de livrée clair, indépendant de la couleur d'entreprise. */
+  accent: 0xf2efe6,
+  /** Laiton, cuivre, ornements de machines à vapeur. */
+  brass: 0xb08a4a,
+  /** Œuvre vive / ligne de flottaison des navires, indépendante de la livrée. */
+  hullRed: 0x7a2f28,
 } as const;
 
 export type ModelColour = number;
@@ -56,12 +69,57 @@ export interface PartOptions {
   rotateX?: number;
   rotateY?: number;
   rotateZ?: number;
+  /** Finition imposée ; sinon déduite de la couleur de la pièce. */
+  finish?: ModelFinish;
+  /** Émission nocturne imposée ; sinon déduite de la couleur. */
+  glow?: ModelGlow;
+}
+
+const FINISH_BY_COLOUR = new Map<number, ModelFinish>([
+  [MODEL_COLOURS.body, MODEL_FINISH.paint],
+  [MODEL_COLOURS.bodyShade, MODEL_FINISH.paint],
+  [MODEL_COLOURS.trim, MODEL_FINISH.paint],
+  [MODEL_COLOURS.roof, MODEL_FINISH.satin],
+  [MODEL_COLOURS.glass, MODEL_FINISH.glass],
+  [MODEL_COLOURS.glassLight, MODEL_FINISH.glass],
+  [MODEL_COLOURS.chassis, MODEL_FINISH.metal],
+  [MODEL_COLOURS.wheel, MODEL_FINISH.rubber],
+  [MODEL_COLOURS.metal, MODEL_FINISH.metal],
+  [MODEL_COLOURS.stack, MODEL_FINISH.metal],
+  [MODEL_COLOURS.wood, MODEL_FINISH.accent],
+  [MODEL_COLOURS.cargo, MODEL_FINISH.accent],
+  [MODEL_COLOURS.lamp, MODEL_FINISH.accent],
+  [MODEL_COLOURS.tailLight, MODEL_FINISH.accent],
+  [MODEL_COLOURS.accent, MODEL_FINISH.accent],
+  [MODEL_COLOURS.brass, MODEL_FINISH.metal],
+  [MODEL_COLOURS.hullRed, MODEL_FINISH.accent],
+]);
+
+const GLOW_BY_COLOUR = new Map<number, ModelGlow>([
+  [MODEL_COLOURS.lamp, MODEL_GLOW.headlight],
+  [MODEL_COLOURS.tailLight, MODEL_GLOW.taillight],
+  [MODEL_COLOURS.glass, MODEL_GLOW.windowDim],
+  [MODEL_COLOURS.glassLight, MODEL_GLOW.window],
+]);
+
+/** Couleurs qui ne reçoivent ni grain ni salissure (phares, feux). */
+const UNWEATHERED = new Set<number>([MODEL_COLOURS.lamp, MODEL_COLOURS.tailLight]);
+
+/** Finition par défaut d'une couleur de pièce. */
+export function finishForModelColour(colour: ModelColour): ModelFinish {
+  return FINISH_BY_COLOUR.get(colour) ?? MODEL_FINISH.paint;
+}
+
+/** Émission nocturne par défaut d'une couleur de pièce. */
+export function glowForModelColour(colour: ModelColour): ModelGlow {
+  return GLOW_BY_COLOUR.get(colour) ?? MODEL_GLOW.none;
 }
 
 /**
  * Transforme une géométrie, la dé-indexe (pour que toutes les pièces d'un
- * modèle partagent les mêmes attributs) et lui applique une couleur uniforme.
- * La géométrie d'origine est libérée si `toNonIndexed()` en crée une copie.
+ * modèle partagent les mêmes attributs) et lui applique une couleur uniforme
+ * nuancée par une usure déterministe. La géométrie d'origine est libérée si
+ * `toNonIndexed()` en crée une copie.
  */
 export function paintPart(
   geometry: THREE.BufferGeometry,
@@ -79,15 +137,39 @@ export function paintPart(
     geometry.dispose();
   }
 
-  const count = flat.getAttribute('position')?.count ?? 0;
+  const position = flat.getAttribute('position');
+  const count = position?.count ?? 0;
   const colours = new Float32Array(count * 3);
+  const finishes = new Float32Array(count);
+  const glows = new Float32Array(count);
   const rgb = hexToRgb(colour);
+  const finish = options.finish ?? finishForModelColour(colour);
+  const glow = options.glow ?? glowForModelColour(colour);
+  const weathered = !UNWEATHERED.has(colour);
+  finishes.fill(finish);
+  glows.fill(glow);
   for (let i = 0; i < count; i += 1) {
-    colours[i * 3] = rgb.r;
-    colours[i * 3 + 1] = rgb.g;
-    colours[i * 3 + 2] = rgb.b;
+    let factor = 1;
+    if (weathered && position) {
+      const x = position.getX(i);
+      const y = position.getY(i);
+      const z = position.getZ(i);
+      // Voile de salissure près du sol, grain léger sur toute la pièce.
+      const grime = Math.max(0, Math.min(1, 1 - y / 0.2));
+      const grain = hashUnit2d(
+        colour & 0xffffff,
+        Math.round(x * 211 + z * 97),
+        Math.round(y * 431),
+      );
+      factor = 1 - grime * 0.12 + (grain - 0.5) * 0.055;
+    }
+    colours[i * 3] = Math.max(0, Math.min(1, rgb.r * factor));
+    colours[i * 3 + 1] = Math.max(0, Math.min(1, rgb.g * factor));
+    colours[i * 3 + 2] = Math.max(0, Math.min(1, rgb.b * factor));
   }
   flat.setAttribute('color', new THREE.BufferAttribute(colours, 3));
+  flat.setAttribute('aFinish', new THREE.BufferAttribute(finishes, 1));
+  flat.setAttribute('aGlow', new THREE.BufferAttribute(glows, 1));
   return flat;
 }
 

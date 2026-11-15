@@ -12,6 +12,7 @@
 import * as THREE from 'three';
 import type { RenderVehicle } from '../game/vehicleInterpolation';
 import { companyColour, hexToRgb } from './tileVisuals';
+import { createModelMaterial } from './models/materials';
 import {
   createVehicleModelLibrary,
   variantFor,
@@ -45,7 +46,7 @@ export class VehicleLayer {
   readonly group = new THREE.Group();
 
   private library: VehicleModelLibrary;
-  private material: THREE.MeshLambertMaterial;
+  private material: THREE.MeshStandardMaterial;
   private nightUniform: { value: number } = { value: 0 };
   private nightAmount = 0;
   private slots = new Map<VehicleVariant, ModelSlot>();
@@ -67,18 +68,14 @@ export class VehicleLayer {
   constructor() {
     this.group.name = 'vehicles';
     this.library = createVehicleModelLibrary();
-    this.material = new THREE.MeshLambertMaterial({ vertexColors: true });
-    this.material.onBeforeCompile = (shader) => {
-      shader.uniforms.uNight = this.nightUniform;
-      shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', '#include <common>\nuniform float uNight;')
-        .replace(
-          '#include <emissivemap_fragment>',
-          `#include <emissivemap_fragment>
-           totalEmissiveRadiance += ( vColor.rgb * 0.5 + vec3( 0.06, 0.045, 0.02 ) ) * uNight;`,
-        );
-    };
-    this.material.customProgramCacheKey = () => 'opentt3d-vehicles-night-v1';
+    this.material = createModelMaterial({
+      night: this.nightUniform,
+      glowStrength: 1.25,
+      nightAmbient: 0.18,
+      roughness: 0.66,
+      metalness: 0.05,
+      name: 'vehicles-surface',
+    });
 
     const haloGeometry = new THREE.RingGeometry(0.52, 0.78, 28);
     haloGeometry.rotateX(-Math.PI / 2);
@@ -190,6 +187,11 @@ export class VehicleLayer {
   setShadows(enabled: boolean): void {
     this.shadows = enabled;
     for (const slot of this.slots.values()) slot.mesh.castShadow = enabled;
+  }
+
+  /** Matériau de surface partagé (diagnostic et tests). */
+  get surfaceMaterial(): THREE.MeshStandardMaterial {
+    return this.material;
   }
 
   /** 0 = jour, 1 = nuit : léger halo émissif pour rester lisible en carte. */
