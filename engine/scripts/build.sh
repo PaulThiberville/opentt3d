@@ -132,7 +132,9 @@ else
   # Le Python embarqué par emsdk sur macOS arm64 est parfois compilé sans
   # module _lzma, ce qui casse l'extraction des ports (.tar.xz). On bascule
   # alors sur le Python système, qui fournit lzma.
-  EMSDK_PY="$(find "${EMSDK_ROOT}/python" -path '*/bin/python3' -type f 2>/dev/null | head -n 1)"
+  # `python3` est souvent un lien symbolique : `-type f` seul le manquait et
+  # laissait le Python emsdk sans module `lzma` casser l'extraction des ports.
+  EMSDK_PY="$(find "${EMSDK_ROOT}/python" -path '*/bin/python3' \( -type f -o -type l \) 2>/dev/null | head -n 1)"
   if [[ -n "${EMSDK_PY}" && -x "${EMSDK_PY}" ]] && ! "${EMSDK_PY}" -c 'import lzma' >/dev/null 2>&1; then
     export EMSDK_PYTHON="${EMSDK_PYTHON:-$(command -v python3)}"
     log "Python emsdk sans lzma : EMSDK_PYTHON=${EMSDK_PYTHON}"
