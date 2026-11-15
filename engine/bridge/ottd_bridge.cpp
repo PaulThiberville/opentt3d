@@ -573,7 +573,10 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 {
 	const uint32_t tick = static_cast<uint32_t>(TimerGameTick::counter);
 	const uint64_t hash = ComputeStateHash();
-	const uint32_t sequence = ++_ottd_json_sequence;
+	/* La séquence n'est validée qu'après une écriture réussie : un appel de
+	 * dimensionnement (`out == nullptr`) et l'écriture qui suit produisent
+	 * ainsi exactement la même longueur de JSON. */
+	const uint32_t sequence = _ottd_json_sequence + 1;
 
 	const TimerGameCalendar::YearMonthDay ymd = TimerGameCalendar::ConvertDateToYMD(TimerGameCalendar::date);
 	const uint32_t day_fraction = static_cast<uint32_t>(TimerGameTick::counter % Ticks::DAY_TICKS);
@@ -1072,6 +1075,7 @@ EMSCRIPTEN_KEEPALIVE int ottd_snapshot_json(char *out, int capacity)
 
 	std::copy(json.begin(), json.end(), out);
 	out[json.size()] = '\0';
+	if (_ottd_in_game) _ottd_json_sequence++;
 	return required;
 }
 
