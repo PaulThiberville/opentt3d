@@ -1,8 +1,9 @@
 /**
  * Public surface of the OpenTT3D network layer.
  *
- * The transport is UI-agnostic and testable in memory; the lockstep session is
- * owned by the lobby and handed the transport once the room is ready.
+ * The transport is UI-agnostic and testable in memory; the lobby owns the room
+ * state and the public directory; the lockstep session is handed the transport
+ * and the frozen start information once the room is ready.
  */
 
 export type {
@@ -66,3 +67,86 @@ export {
   isTurnMessage,
   validateChannelMessage,
 } from './types.js';
+
+export type { CreateLobbyOptions, InviteLink, Lobby, LobbyDiagnostics } from './lobby.js';
+export { buildInviteLink, createLobby, parseInviteLink } from './lobby.js';
+
+export type {
+  AIDifficulty,
+  Climate,
+  LobbyChatEvent,
+  LobbyChatWireMessage,
+  LobbyClosedMessage,
+  LobbyErrorMessage,
+  LobbyJoinMessage,
+  LobbyKickMessage,
+  LobbyMessage,
+  LobbySettings,
+  LobbySlotMessage,
+  LobbyStartMessage,
+  LobbyState,
+  LobbyStateMessage,
+  MapSize,
+  Slot,
+  StartInfo,
+  StartPayload,
+  StartPeers,
+  StartPlayer,
+} from './lobby-types.js';
+export {
+  AI_DIFFICULTIES,
+  CLIMATES,
+  DEFAULT_LOBBY_SETTINGS,
+  LOBBY_CHANNELS,
+  LOBBY_COLOURS,
+  LOBBY_PROTOCOL_VERSION,
+  MAP_SIZES,
+  MAX_CHAT_CHARS,
+  MAX_COMPANY_NAME,
+  MAX_LOBBY_NAME,
+  MAX_LOBBY_PLAYERS,
+  MAX_SLOT_NAME,
+  MIN_LOBBY_PLAYERS,
+  cleanText,
+  freeColour,
+  isLobbyChatMessage,
+  isLobbyClosedMessage,
+  isLobbyErrorMessage,
+  isLobbyJoinMessage,
+  isLobbyKickMessage,
+  isLobbySettings,
+  isLobbySlotMessage,
+  isLobbyStartMessage,
+  isLobbyState,
+  isLobbyStateMessage,
+  isRoomId,
+  isSlot,
+  sanitizeChat,
+  sanitizeName,
+  validateLobbyMessage,
+} from './lobby-types.js';
+
+export type {
+  Directory,
+  DirectoryDiagnostics,
+  DirectoryOptions,
+  LobbyInfo,
+  LobbyStatus,
+  MemoryDirectoryStore,
+  QuickMatchOptions,
+  QuickMatchResult,
+} from './directory.js';
+export {
+  DEFAULT_DIRECTORY_RELAYS,
+  DIRECTORY_HEARTBEAT_MS,
+  DIRECTORY_TTL_MS,
+  LOBBY_DIRECTORY_KIND,
+  LOBBY_DIRECTORY_TAG,
+  LOBBY_DIRECTORY_VERSION,
+  buildLobbyTags,
+  createDirectory,
+  createMemoryDirectoryStore,
+  isLobbyInfo,
+  newRoomId,
+  quickMatch,
+} from './directory.js';
