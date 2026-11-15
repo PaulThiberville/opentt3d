@@ -1,12 +1,15 @@
 /**
- * Rendu des dépôts route/rail.
+ * Rendu des dépôts route et rail.
  *
  * La source est `WorldSnapshot.depots` (#90) : chaque entrée porte un id de
- * pool stable, sa tuile, son entreprise, son type et sa direction. La couche
- * pose un petit auvent instancié par dépôt, orienté selon l'entrée, sans
- * modifier le terrain ni ajouter de draw call par dépôt. La tuile route/rail
- * reste dessinée par `TerrainLayer` : aucun doublon n'est créé ici (les ids
- * dupliqués sont ignorés).
+ * pool stable, sa tuile, son entreprise, son type et sa direction. Chaque
+ * dépôt reçoit un petit bâtiment (corps + ouverture) et une livrée colorée
+ * (toit, auvent, enseigne) posés par deux `InstancedMesh` : deux draw calls
+ * pour toute la carte, quelle que soit la quantité de dépôts.
+ *
+ * L'empreinte du modèle reste sous 0,9 tuile : aucun dépassement sur les
+ * routes, rails ou bâtiments voisins. La tuile route/rail reste dessinée par
+ * `TerrainLayer` (les ids dupliqués sont ignorés pour éviter un doublon).
  */
 
 import * as THREE from 'three';
@@ -14,9 +17,13 @@ import type { DepotSnapshot, MapSnapshot } from '../engine/protocol';
 import { COMPANY_NONE } from '../engine/protocol';
 import { sampleHeightWorld } from '../game/mapGrid';
 import { companyColour, hexToRgb } from './tileVisuals';
+import {
+  createDepotBodyGeometry,
+  createDepotLiveryGeometry,
+  type DepotKind,
+} from './models/buildings';
 
 const MAX_DEPOTS = 512;
-const ROOF_HEIGHT = 0.3;
 const UP = new THREE.Vector3(0, 1, 0);
 
 interface DepotPlacement {
@@ -25,15 +32,21 @@ interface DepotPlacement {
   z: number;
   ground: number;
   owner: number;
-  /** Rotation cosmétique de l'auvent : 0..3 × 90°. */
+  kind: DepotKind;
+  /** Rotation de l'auvent : 0..3 × 90°. */
   rotation: number;
 }
 
 export class DepotLayer {
   readonly group = new THREE.Group();
 
-  private roofs: THREE.InstancedMesh;
-  private material: THREE.MeshLambertMaterial;
+  private roadBodies: THREE.InstancedMesh;
+  private roadLiveries: THREE.InstancedMesh;
+  private railBodies: THREE.InstancedMesh;
+  private railLiveries: THREE.InstancedMesh;
+  private bodyMaterial: THREE.MeshLambertMaterial;
+  private liveryMaterial: THREE.MeshLambertMaterial;
+  private geometries: THREE.BufferGeometry[] = [];
   private placements: DepotPlacement[] = [];
   private matrix = new THREE.Matrix4();
   private position = new THREE.Vector3();
@@ -44,20 +57,40 @@ export class DepotLayer {
 
   constructor() {
     this.group.name = 'depots';
-    this.material = new THREE.MeshLambertMaterial({ color: 0xffffff });
-    const geometry = new THREE.BoxGeometry(0.72, ROOF_HEIGHT, 0.72);
-    this.roofs = new THREE.InstancedMesh(geometry, this.material, MAX_DEPOTS);
-    this.roofs.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.roofs.count = 0;
-    this.roofs.frustumCulled = false;
-    this.roofs.castShadow = false;
-    this.roofs.receiveShadow = false;
-    this.roofs.renderOrder = 6;
-    this.group.add(this.roofs);
+    this.bodyMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+    this.liveryMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    const roadBody = createDepotBodyGeometry('road', 1);
+    const roadLivery = createDepotLiveryGeometry('road');
+    const railBody = createDepotBodyGeometry('rail', 1);
+    const railLivery = createDepotLiveryGeometry('rail');
+    this.geometries.push(roadBody, roadLivery, railBody, railLivery);
+    this.roadBodies = this.createMesh(roadBody, this.bodyMaterial, 'depot-road-bodies');
+    this.roadLiveries = this.createMesh(roadLivery, this.liveryMaterial, 'depot-road-liveries');
+    this.railBodies = this.createMesh(railBody, this.bodyMaterial, 'depot-rail-bodies');
+    this.railLiveries = this.createMesh(railLivery, this.liveryMaterial, 'depot-rail-liveries');
+    for (const mesh of [this.roadBodies, this.roadLiveries, this.railBodies, this.railLiveries]) {
+      this.group.add(mesh);
+    }
     this.group.visible = false;
   }
 
-  /** Reconstruit les auvents à partir de `snapshot.depots`. */
+  private createMesh(
+    geometry: THREE.BufferGeometry,
+    material: THREE.Material,
+    name: string,
+  ): THREE.InstancedMesh {
+    const mesh = new THREE.InstancedMesh(geometry, material, MAX_DEPOTS);
+    mesh.name = name;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.count = 0;
+    mesh.frustumCulled = false;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    mesh.renderOrder = 6;
+    return mesh;
+  }
+
+  /** Reconstruit les bâtiments à partir de `snapshot.depots`. */
   setDepots(depots: readonly DepotSnapshot[], map: MapSnapshot | null): void {
     this.placements = [];
     const seen = new Set<number>();
@@ -73,26 +106,40 @@ export class DepotLayer {
         z,
         ground: map ? sampleHeightWorld(map, x, z) : 0,
         owner: depot.company,
+        kind: depot.kind,
         rotation: (((depot.direction % 4) + 4) % 4) * (Math.PI / 2),
       });
     }
 
-    for (let i = 0; i < this.placements.length; i += 1) {
-      const placement = this.placements[i];
-      if (!placement) continue;
-      this.position.set(placement.x, placement.ground + ROOF_HEIGHT / 2 + 0.02, placement.z);
+    let roadIndex = 0;
+    let railIndex = 0;
+    for (const placement of this.placements) {
+      const rail = placement.kind === 'rail';
+      const bodies = rail ? this.railBodies : this.roadBodies;
+      const liveries = rail ? this.railLiveries : this.roadLiveries;
+      const index = rail ? railIndex : roadIndex;
+      if (rail) railIndex += 1;
+      else roadIndex += 1;
+      this.position.set(placement.x, placement.ground, placement.z);
       this.quaternion.setFromAxisAngle(UP, placement.rotation);
       this.matrix.compose(this.position, this.quaternion, this.scale);
-      this.roofs.setMatrixAt(i, this.matrix);
+      bodies.setMatrixAt(index, this.matrix);
+      liveries.setMatrixAt(index, this.matrix);
       const base = placement.owner === COMPANY_NONE ? 0x8a7a62 : companyColour(placement.owner);
       const rgb = hexToRgb(base, this.rgb);
-      this.colour.setRGB(rgb.r, rgb.g, rgb.b).multiplyScalar(0.85);
-      this.roofs.setColorAt(i, this.colour);
+      // Livrée légèrement assombrie pour ne pas brûler au soleil.
+      this.colour.setRGB(rgb.r, rgb.g, rgb.b).multiplyScalar(0.92);
+      liveries.setColorAt(index, this.colour);
     }
-    this.roofs.count = this.placements.length;
-    this.roofs.instanceMatrix.needsUpdate = true;
-    if (this.roofs.instanceColor) this.roofs.instanceColor.needsUpdate = true;
-    this.roofs.computeBoundingSphere();
+    this.roadBodies.count = roadIndex;
+    this.roadLiveries.count = roadIndex;
+    this.railBodies.count = railIndex;
+    this.railLiveries.count = railIndex;
+    for (const mesh of [this.roadBodies, this.roadLiveries, this.railBodies, this.railLiveries]) {
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.computeBoundingSphere();
+    }
     this.group.visible = this.placements.length > 0;
   }
 
@@ -110,9 +157,29 @@ export class DepotLayer {
     return this.placements.map((placement) => placement.rotation);
   }
 
+  /** Types rendus, pour distinguer dépôt route et rail. */
+  get kinds(): DepotKind[] {
+    return this.placements.map((placement) => placement.kind);
+  }
+
+  get drawCallCount(): number {
+    let count = 0;
+    for (const child of this.group.children) {
+      const mesh = child as THREE.InstancedMesh;
+      if (mesh.isInstancedMesh && mesh.count > 0) count += 1;
+    }
+    return count;
+  }
+
   dispose(): void {
-    this.roofs.geometry.dispose();
-    this.material.dispose();
+    for (const geometry of this.geometries) geometry.dispose();
+    this.geometries = [];
+    this.bodyMaterial.dispose();
+    this.liveryMaterial.dispose();
+    for (const child of this.group.children) {
+      const mesh = child as THREE.InstancedMesh;
+      if (mesh.isInstancedMesh) mesh.dispose();
+    }
     this.group.clear();
     this.placements = [];
   }

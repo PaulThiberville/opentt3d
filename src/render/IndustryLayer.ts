@@ -14,7 +14,6 @@
 import * as THREE from 'three';
 import type { IndustrySnapshot, MapSnapshot } from '../engine/protocol';
 import { TILE_KIND_INDEX } from '../engine/protocol';
-import { hexToRgb } from './tileVisuals';
 import { qualitySettings, type QualityLevel } from './quality';
 import {
   collectIndustryFootprint,
@@ -22,9 +21,9 @@ import {
   planIndustry,
   type IndustryArchetype,
   type IndustryDetail,
-  type IndustryPart,
   type IndustryPlan,
 } from './industryPlan';
+import { buildIndustryGeometry } from './models/industries';
 
 const SMOKE_PUFFS_PER_STACK = 3;
 const FNV_OFFSET = 0x811c9dc5;
@@ -38,16 +37,28 @@ interface SmokeSource {
   phase: number;
 }
 
+interface ArchetypeMesh {
+  archetype: IndustryArchetype;
+  mesh: THREE.Mesh;
+  detailed: THREE.BufferGeometry;
+  coarse: THREE.BufferGeometry;
+  /** Distance minimale caméra → industrie de ce lot. */
+  centre: THREE.Vector3;
+  detailedStats: { triangles: number; windows: number; parts: number };
+  lod: boolean;
+}
+
 export class IndustryLayer {
   readonly group = new THREE.Group();
 
   private material: THREE.MeshLambertMaterial;
-  private meshes: THREE.Mesh[] = [];
+  private meshes: ArchetypeMesh[] = [];
   private plans: IndustryPlan[] = [];
   private smoke: THREE.InstancedMesh | null = null;
   private smokeSources: SmokeSource[] = [];
   private smokeEnabled = true;
   private smokeDistance = 140;
+  private lodDistance = 70;
   private elapsed = 0;
   private shadows = false;
   private signature = 0;
@@ -55,14 +66,17 @@ export class IndustryLayer {
   private quality: QualityLevel = 'medium';
   private industries: readonly IndustrySnapshot[] = [];
   private map: MapSnapshot | null = null;
+  /** Dernière position caméra connue, pour appliquer le LOD après un rebuild. */
+  private cameraPosition: THREE.Vector3 | null = null;
   /** Nombre de reconstructions (diagnostic/tests). */
   builds = 0;
+  /** Nombre de lots affichés en silhouette simplifiée (diagnostic/tests). */
+  coarseLods = 0;
 
   private matrix = new THREE.Matrix4();
   private position = new THREE.Vector3();
   private quaternion = new THREE.Quaternion();
   private scale = new THREE.Vector3();
-  private euler = new THREE.Euler();
 
   constructor() {
     this.group.name = 'industries';
@@ -99,60 +113,62 @@ export class IndustryLayer {
     this.plans = plans;
 
     for (const [archetype, group] of byArchetype) {
-      const geometry = this.mergePlans(group);
-      const mesh = new THREE.Mesh(geometry, this.material);
+      const detailed = buildIndustryGeometry(group, this.detail);
+      const coarse = buildIndustryGeometry(group, 0);
+      const mesh = new THREE.Mesh(detailed.geometry, this.material);
       mesh.name = `industry-${archetype}`;
       mesh.castShadow = this.shadows;
       mesh.receiveShadow = true;
       mesh.frustumCulled = true;
       this.group.add(mesh);
-      this.meshes.push(mesh);
+      const centre = new THREE.Vector3();
+      for (const plan of group) {
+        centre.x +=
+          plan.footprint.reduce((sum, tile) => sum + tile.x + 0.5, 0) /
+          Math.max(1, plan.footprint.length);
+        centre.z +=
+          plan.footprint.reduce((sum, tile) => sum + tile.y + 0.5, 0) /
+          Math.max(1, plan.footprint.length);
+        centre.y +=
+          plan.footprint.reduce((sum, tile) => sum + tile.height, 0) /
+          Math.max(1, plan.footprint.length);
+      }
+      centre.multiplyScalar(1 / Math.max(1, group.length));
+      this.meshes.push({
+        archetype,
+        mesh,
+        detailed: detailed.geometry,
+        coarse: coarse.geometry,
+        centre,
+        detailedStats: detailed.stats,
+        lod: false,
+      });
     }
 
     this.buildSmoke();
+    this.applyLod(this.cameraPosition);
   }
 
-  private mergePlans(plans: readonly IndustryPlan[]): THREE.BufferGeometry {
-    const positions: number[] = [];
-    const normals: number[] = [];
-    const colours: number[] = [];
-    const rgb = { r: 0, g: 0, b: 0 };
-    const up = new THREE.Vector3(0, 1, 0);
-
-    for (const plan of plans) {
-      for (const part of plan.parts) {
-        const geometry = createPartGeometry(part);
-        this.euler.set(part.tiltX, part.rotation, part.tiltZ, 'YXZ');
-        this.quaternion.setFromEuler(this.euler);
-        this.position.set(part.x, part.ground + part.base, part.z);
-        this.scale.set(part.width, part.height, part.depth);
-        this.matrix.compose(this.position, this.quaternion, this.scale);
-        geometry.applyMatrix4(this.matrix);
-        const flat = geometry.index ? geometry.toNonIndexed() : geometry;
-        const position = flat.getAttribute('position');
-        const normal = flat.getAttribute('normal');
-        hexToRgb(part.colour, rgb);
-        const count = position.count;
-        for (let i = 0; i < count; i += 1) {
-          positions.push(position.getX(i), position.getY(i), position.getZ(i));
-          normals.push(
-            normal ? normal.getX(i) : up.x,
-            normal ? normal.getY(i) : up.y,
-            normal ? normal.getZ(i) : up.z,
-          );
-          colours.push(rgb.r, rgb.g, rgb.b);
-        }
-        if (flat !== geometry) flat.dispose();
-        geometry.dispose();
-      }
+  /**
+   * Bascule chaque archétype entre silhouette détaillée et volumes simples
+   * selon la distance caméra → la plus proche industrie du lot.
+   */
+  applyLod(cameraPosition: THREE.Vector3 | null): void {
+    if (!cameraPosition) return;
+    let coarse = 0;
+    for (const entry of this.meshes) {
+      const distance = Math.hypot(
+        entry.centre.x - cameraPosition.x,
+        entry.centre.z - cameraPosition.z,
+      );
+      const useCoarse = distance > this.lodDistance;
+      if (useCoarse) coarse += 1;
+      if (useCoarse === entry.lod) continue;
+      entry.lod = useCoarse;
+      entry.mesh.geometry = useCoarse ? entry.coarse : entry.detailed;
+      entry.mesh.geometry.computeBoundingSphere();
     }
-
-    const merged = new THREE.BufferGeometry();
-    merged.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    merged.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-    merged.setAttribute('color', new THREE.Float32BufferAttribute(colours, 3));
-    merged.computeBoundingSphere();
-    return merged;
+    this.coarseLods = coarse;
   }
 
   private buildSmoke(): void {
@@ -232,6 +248,8 @@ export class IndustryLayer {
 
   /** Animation de fumée, avec LOD par distance à la caméra. */
   update(deltaSeconds: number, cameraPosition?: THREE.Vector3): void {
+    this.cameraPosition = cameraPosition ?? null;
+    this.applyLod(this.cameraPosition);
     if (!this.smokeEnabled || !this.smoke) return;
     this.elapsed += deltaSeconds;
     this.writeSmokeMatrices(cameraPosition ?? null);
@@ -252,12 +270,13 @@ export class IndustryLayer {
     const settings = qualitySettings(this.quality);
     this.smokeEnabled = settings.industrySmoke;
     this.smokeDistance = this.quality === 'high' ? 210 : 140;
+    this.lodDistance = this.quality === 'high' ? 110 : this.quality === 'low' ? 48 : 78;
     if (this.smoke) this.smoke.visible = this.smokeEnabled;
   }
 
   setShadows(enabled: boolean): void {
     this.shadows = enabled;
-    for (const mesh of this.meshes) mesh.castShadow = enabled;
+    for (const entry of this.meshes) entry.mesh.castShadow = enabled;
   }
 
   get industryCount(): number {
@@ -278,16 +297,32 @@ export class IndustryLayer {
     return this.meshes.length + (this.smoke && this.smoke.visible ? 1 : 0);
   }
 
+  /** Triangles de la silhouette détaillée, tous archétypes confondus. */
+  get triangleCount(): number {
+    let total = 0;
+    for (const entry of this.meshes) total += entry.detailedStats.triangles;
+    return total;
+  }
+
+  /** Détail par archétype, pour vérifier le budget de modélisation. */
+  get archetypeStats(): Record<string, { triangles: number; windows: number; parts: number }> {
+    const stats: Record<string, { triangles: number; windows: number; parts: number }> = {};
+    for (const entry of this.meshes) stats[entry.archetype] = { ...entry.detailedStats };
+    return stats;
+  }
+
   get detailLevel(): IndustryDetail {
     return this.detail;
   }
 
   private clearMeshes(): void {
-    for (const mesh of this.meshes) {
-      this.group.remove(mesh);
-      mesh.geometry.dispose();
+    for (const entry of this.meshes) {
+      this.group.remove(entry.mesh);
+      entry.detailed.dispose();
+      entry.coarse.dispose();
     }
     this.meshes = [];
+    this.coarseLods = 0;
     if (this.smoke) {
       this.group.remove(this.smoke);
       this.smoke.geometry.dispose();
@@ -310,6 +345,7 @@ export class IndustryLayer {
     this.material.dispose();
     this.industries = [];
     this.map = null;
+    this.cameraPosition = null;
     this.signature = 0;
     this.builds = 0;
   }
@@ -341,52 +377,4 @@ function computeSignature(
     }
   }
   return hash >>> 0;
-}
-
-/** Géométrie unitaire d'une partie : base à y = 0, ou centrée pour les grumes. */
-function createPartGeometry(part: IndustryPart): THREE.BufferGeometry {
-  let geometry: THREE.BufferGeometry;
-  switch (part.shape) {
-    case 'cylinder':
-      geometry = new THREE.CylinderGeometry(
-        Math.max(0.02, part.topScale) * 0.5,
-        0.5,
-        1,
-        8,
-        1,
-        false,
-      );
-      break;
-    case 'cone':
-      geometry = new THREE.ConeGeometry(0.5, 1, 8);
-      break;
-    case 'prism':
-      geometry = createPrismGeometry();
-      break;
-    case 'ico':
-      geometry = new THREE.IcosahedronGeometry(0.5, 0);
-      break;
-    case 'box':
-    default:
-      geometry = new THREE.BoxGeometry(1, 1, 1);
-      break;
-  }
-  if (!part.centre) geometry.translate(0, 0.5, 0);
-  return geometry;
-}
-
-/** Prisme à toit à deux pans, base 1×1, hauteur 1, faîtage sur Z. */
-function createPrismGeometry(): THREE.BufferGeometry {
-  const vertices = new Float32Array([
-    // Pan gauche
-    -0.5, 0, -0.5, 0, 1, 0.5, 0, 1, -0.5, -0.5, 0, -0.5, -0.5, 0, 0.5, 0, 1, 0.5,
-    // Pan droit
-    0.5, 0, -0.5, 0, 1, -0.5, 0, 1, 0.5, 0.5, 0, -0.5, 0, 1, 0.5, 0.5, 0, 0.5,
-    // Pignons avant et arrière
-    -0.5, 0, -0.5, 0, 1, -0.5, 0.5, 0, -0.5, -0.5, 0, 0.5, 0.5, 0, 0.5, 0, 1, 0.5,
-  ]);
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
-  geometry.computeVertexNormals();
-  return geometry;
 }

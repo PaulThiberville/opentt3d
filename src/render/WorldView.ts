@@ -155,6 +155,7 @@ export class WorldView {
     // Les dépôts sont complets à chaque snapshot ; la carte ne sert qu'à la
     // hauteur du sol (la dernière carte connue est conservée).
     this.depots.setDepots(snapshot.depots, this.currentMap);
+    this.cityLayer.setStations(snapshot.stations, this.currentMap);
     const phase = phaseFromEconomy(snapshot.economy);
     this.night = sunState(phase).night;
     this.timeOfDay?.setTimeOfDay(phase);
@@ -181,6 +182,7 @@ export class WorldView {
     this.controller.update(deltaSeconds);
     this.terrain.update(deltaSeconds);
     this.vegetation.update(deltaSeconds);
+    this.cityLayer.update(this.camera.position);
     this.industries.update(deltaSeconds, this.camera.position);
     this.applyNight(this.timeOfDay?.nightAmount ?? this.night);
     if (this.buildMode) this.updateBuildHover();
@@ -337,6 +339,7 @@ export class WorldView {
 
   private applyQuality(level: QualityLevel): void {
     this.terrain.setQuality(level);
+    this.cityLayer.setQuality(level);
     this.cityLayer.setShadows(level === 'high');
     this.cityLayer.setNightLights(qualitySettings(level).nightWindows);
     this.vehicles.setShadows(level === 'high');
@@ -361,6 +364,10 @@ export class WorldView {
 
   getBuildingCount(): number {
     return this.cityLayer.buildingCount;
+  }
+
+  getStationCount(): number {
+    return this.cityLayer.stationCountValue;
   }
 
   getIndustryCount(): number {
@@ -388,7 +395,8 @@ export class WorldView {
       this.vehicles.drawCallCount +
       this.cityLayer.drawCallCount +
       this.vegetation.drawCallCount +
-      this.industries.drawCallCount
+      this.industries.drawCallCount +
+      this.depots.drawCallCount
     );
   }
 
