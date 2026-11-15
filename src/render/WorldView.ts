@@ -15,6 +15,7 @@ import { AtmosphereLayer } from './AtmosphereLayer';
 import { BuildOverlay } from './BuildOverlay';
 import { CameraController } from './CameraController';
 import { CityLayer } from './CityLayer';
+import { CatenaryLayer } from './CatenaryLayer';
 import { DepotLayer } from './DepotLayer';
 import { IndustryLayer } from './IndustryLayer';
 import { InfrastructureLayer } from './InfrastructureLayer';
@@ -73,6 +74,7 @@ export class WorldView {
   readonly vegetation = new VegetationLayer();
   readonly vehicles = new VehicleLayer();
   readonly signals = new SignalLayer();
+  readonly catenary = new CatenaryLayer();
   readonly depots = new DepotLayer();
   readonly infrastructure = new InfrastructureLayer();
   readonly atmosphere = new AtmosphereLayer();
@@ -136,6 +138,7 @@ export class WorldView {
     this.scene.add(this.vegetation.group);
     this.scene.add(this.vehicles.group);
     this.scene.add(this.signals.group);
+    this.scene.add(this.catenary.group);
     this.scene.add(this.depots.group);
     this.scene.add(this.infrastructure.group);
     this.scene.add(this.atmosphere.group);
@@ -183,7 +186,7 @@ export class WorldView {
       this.cityLayer.build(snapshot.towns, map);
       this.industries.build(snapshot.industries, map, this.quality);
       this.vegetation.build(map, this.quality);
-      this.signals.setMap(map);
+      this.catenary.setMap(map);
       this.mapApplied = true;
       if (first) {
         this.controller.setBounds({ minX: 0, maxX: map.width, minZ: 0, maxZ: map.height });
@@ -192,6 +195,7 @@ export class WorldView {
     }
     // Les dépôts sont complets à chaque snapshot ; la carte ne sert qu'à la
     // hauteur du sol (la dernière carte connue est conservée).
+    this.signals.setSignals(snapshot.signals, this.currentMap);
     this.depots.setDepots(snapshot.depots, this.currentMap);
     this.cityLayer.setStations(snapshot.stations, this.currentMap);
     this.atmosphere.applyWorld(this.currentMap, snapshot.towns, snapshot.stations);
@@ -210,6 +214,7 @@ export class WorldView {
   private applyNight(amount: number): void {
     this.terrain.setNight(amount);
     this.tracks.setNight(amount);
+    this.catenary.setNight(amount);
     this.vehicles.setNight(amount);
     this.cityLayer.setNight(amount);
     this.industries.setNight(amount);
@@ -559,6 +564,7 @@ export class WorldView {
     this.vegetation.dispose();
     this.vehicles.dispose();
     this.signals.dispose();
+    this.catenary.dispose();
     this.depots.dispose();
     this.infrastructure.dispose();
     this.atmosphere.dispose();

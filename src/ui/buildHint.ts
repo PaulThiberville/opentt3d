@@ -21,6 +21,8 @@ const TOOL_LABEL_KEYS: Record<BuildTool, TranslationKey> = {
   station: 'toolbar.station.label',
   depot: 'toolbar.depot.label',
   signal: 'toolbar.signal.label',
+  unsignal: 'toolbar.unsignal.label',
+  convert: 'toolbar.convert.label',
   terraform: 'toolbar.terraform.label',
   tree: 'toolbar.tree.label',
   canal: 'toolbar.canal.label',
@@ -36,6 +38,8 @@ const TOOL_HINT_KEYS: Record<BuildTool, TranslationKey> = {
   station: 'build.hint.station',
   depot: 'build.hint.depot',
   signal: 'build.hint.signal',
+  unsignal: 'build.hint.unsignal',
+  convert: 'build.hint.convert',
   terraform: 'build.hint.terraform',
   tree: 'build.hint.tree',
   canal: 'build.hint.canal',
@@ -47,7 +51,7 @@ const TOOL_HINT_KEYS: Record<BuildTool, TranslationKey> = {
 function countLabel(plan: BuildPlan): string {
   const count = plan.tiles.length;
   const formatted = formatInt(count);
-  if (plan.tool === 'signal') {
+  if (plan.tool === 'signal' || plan.tool === 'unsignal') {
     return t(count > 1 ? 'build.count.signal.other' : 'build.count.signal.one', {
       count: formatted,
     });

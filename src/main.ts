@@ -1172,6 +1172,8 @@ function exposeDebug(current: GameSession): void {
         | 'station'
         | 'depot'
         | 'signal'
+        | 'unsignal'
+        | 'convert'
         | 'terraform'
         | 'tree'
         | 'canal'

@@ -240,6 +240,8 @@ const BUILD_TOOL_INTROS: Record<BuildTool, string> = {
   station: 'Gares : réglez la taille et l’orientation, puis cliquez pour poser',
   depot: 'Dépôts : cliquez à côté d’une voie, R oriente l’entrée',
   signal: 'Signaux : cliquez ou glissez le long d’une voie ferrée',
+  unsignal: 'Retrait de signaux : cliquez ou glissez le long d’une voie ferrée',
+  convert: 'Type de rail : choisissez le type puis cliquez ou glissez sur une voie',
   terraform: 'Terrassement : choisissez monter/descendre, puis cliquez ou glissez',
   tree: 'Arbres : cliquez ou glissez pour boiser une zone',
   canal: 'Canaux : cliquez ou glissez pour creuser un bief',
@@ -2096,7 +2098,9 @@ export class GameSession {
     if (this.isNetwork) {
       // Le lockstep appliquera la commande au prochain tour : on ne peut pas
       // encore vérifier la carte, mais l'annulation reste une commande valide.
-      if (plan.tool !== 'signal') this.lastBuild = plan;
+      if (plan.tool !== 'signal' && plan.tool !== 'unsignal' && plan.tool !== 'convert') {
+        this.lastBuild = plan;
+      }
       this.hud?.notify(
         'info',
         'Commande de construction envoyée : elle sera appliquée au prochain tour.',
@@ -2109,7 +2113,14 @@ export class GameSession {
     this.refreshHud();
     // Un signal ne se retire pas avec la démolition (elle arracherait la voie) :
     // il n'entre pas dans la pile Ctrl+Z.
-    if (plan.tool !== 'signal' && this.buildConfirmed(plan, company)) this.lastBuild = plan;
+    if (
+      plan.tool !== 'signal' &&
+      plan.tool !== 'unsignal' &&
+      plan.tool !== 'convert' &&
+      this.buildConfirmed(plan, company)
+    ) {
+      this.lastBuild = plan;
+    }
   }
 
   /** Vérifie sur la carte que toutes les tuiles du plan ont bien été posées. */
@@ -2124,6 +2135,7 @@ export class GameSession {
           ((map.flags[tile.index] ?? 0) & TILE_FLAG.SIGNAL) !== 0,
       );
     }
+    if (plan.tool === 'unsignal') return false;
     if (plan.tool === 'terraform') {
       const delta = plan.terraform?.direction === 'down' ? -1 : 1;
       return plan.tiles.every((tile) => {

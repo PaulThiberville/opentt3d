@@ -14,6 +14,7 @@ import {
   orderTargetLabel,
   ordersFromSnapshot,
 } from '../game/vehicleRules';
+import { RAIL_TYPE_LABELS } from '../game/railRules';
 import { cargoLabel, vehicleLabel, vehicleStatusLabel } from './labels';
 import { formatInt, formatMoney } from './format';
 import { describeSelection } from './selection';
@@ -34,7 +35,7 @@ export function describeDepotPanel(
   const company = snapshot.companies.find((item) => item.id === companyId) ?? null;
   const money = company?.money ?? 0;
   const kindLabel = depotKindLabel(depot.kind);
-  const models = modelsForDepot(depot.kind).map((model) => ({
+  const models = modelsForDepot(depot.kind, depot.railType).map((model) => ({
     id: model.id,
     name: model.name,
     cargo: cargoLabel(model.cargo),
@@ -75,7 +76,7 @@ export function describeDepotPanel(
     y: depot.y,
     kindLabel,
     title: `${kindLabel} (${depot.x}, ${depot.y})`,
-    detail: `${models.length} modèle(s) · ${vehicles.length} véhicule(s) sur place`,
+    detail: `${depot.railType ? `${RAIL_TYPE_LABELS[depot.railType]} · ` : ''}${models.length} modèle(s) · ${vehicles.length} véhicule(s) sur place`,
     money: company ? formatMoney(company.money) : '—',
     models,
     vehicles,
