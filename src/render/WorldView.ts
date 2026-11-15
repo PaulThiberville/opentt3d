@@ -14,6 +14,7 @@ import type { BuildPlan, BuildPoint } from '../game/buildRules';
 import { BuildOverlay } from './BuildOverlay';
 import { CameraController } from './CameraController';
 import { CityLayer } from './CityLayer';
+import { DepotLayer } from './DepotLayer';
 import { IndustryLayer } from './IndustryLayer';
 import { Picking, type PickResult } from './Picking';
 import { SignalLayer } from './SignalLayer';
@@ -59,6 +60,7 @@ export class WorldView {
   readonly vegetation = new VegetationLayer();
   readonly vehicles = new VehicleLayer();
   readonly signals = new SignalLayer();
+  readonly depots = new DepotLayer();
 
   private scene: THREE.Scene;
   private canvas: HTMLCanvasElement;
@@ -106,6 +108,7 @@ export class WorldView {
     this.scene.add(this.vegetation.group);
     this.scene.add(this.vehicles.group);
     this.scene.add(this.signals.group);
+    this.scene.add(this.depots.group);
     this.scene.add(this.buildOverlay.group);
 
     this.picking = new Picking(
@@ -143,6 +146,7 @@ export class WorldView {
       this.industries.build(snapshot.industries, map, this.quality);
       this.vegetation.build(map, this.quality);
       this.signals.setMap(map);
+      this.depots.setMap(map);
       this.mapApplied = true;
       if (first) {
         this.controller.setBounds({ minX: 0, maxX: map.width, minZ: 0, maxZ: map.height });
@@ -373,6 +377,10 @@ export class WorldView {
     return this.signals.count;
   }
 
+  getDepotCount(): number {
+    return this.depots.count;
+  }
+
   getDrawCalls(): number {
     return (
       this.vehicles.drawCallCount +
@@ -396,6 +404,7 @@ export class WorldView {
     this.scene.remove(this.vegetation.group);
     this.scene.remove(this.vehicles.group);
     this.scene.remove(this.signals.group);
+    this.scene.remove(this.depots.group);
     this.scene.remove(this.buildOverlay.group);
     this.terrain.dispose();
     this.cityLayer.dispose();
@@ -403,6 +412,7 @@ export class WorldView {
     this.vegetation.dispose();
     this.vehicles.dispose();
     this.signals.dispose();
+    this.depots.dispose();
     this.buildOverlay.dispose();
     this.renderVehicles = [];
     this.currentMap = null;
