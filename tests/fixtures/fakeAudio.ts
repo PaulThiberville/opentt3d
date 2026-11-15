@@ -140,6 +140,7 @@ export class FakeAudioContext implements AudioContextLike {
   readonly sources: FakeBufferSource[] = [];
   readonly filters: FakeFilterNode[] = [];
   readonly panners: FakePannerNode[] = [];
+  buffersCreated = 0;
   resumeCalls = 0;
   suspendCalls = 0;
   closeCalls = 0;
@@ -175,6 +176,7 @@ export class FakeAudioContext implements AudioContextLike {
   }
 
   createBuffer(_channels: number, length: number, sampleRate: number): AudioBufferLike {
+    this.buffersCreated += 1;
     return new FakeAudioBuffer(length, sampleRate);
   }
 
