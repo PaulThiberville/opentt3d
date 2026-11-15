@@ -3,6 +3,9 @@ import {
   DEFAULT_SETTINGS,
   SETTINGS_STORAGE_KEY,
   loadSettings,
+  p2pRelayUrls,
+  parseRelayUrls,
+  sanitizeP2pRelay,
   sanitizeSettings,
   saveSettings,
   updateSettings,
@@ -95,5 +98,20 @@ describe('réglages persistants', () => {
     const storage = new MemoryStorage();
     storage.failWrites = true;
     expect(saveSettings(storage, DEFAULT_SETTINGS)).toBe(false);
+  });
+
+  it('normalise une liste de relais Nostr configurable (#39)', () => {
+    expect(parseRelayUrls('wss://relay.example/, wss://b.example ; http://nope')).toEqual([
+      'wss://relay.example',
+      'wss://b.example',
+    ]);
+    expect(sanitizeP2pRelay('wss://relay.example')).toBe('wss://relay.example');
+    expect(sanitizeP2pRelay('pas une url')).toBe(DEFAULT_SETTINGS.p2pRelay);
+    expect(p2pRelayUrls(DEFAULT_SETTINGS.p2pRelay)).toEqual([]);
+    expect(p2pRelayUrls('wss://a.example,wss://b.example')).toEqual([
+      'wss://a.example',
+      'wss://b.example',
+    ]);
+    expect(sanitizeSettings({ p2pRelay: 'wss://a.example' }).p2pRelay).toBe('wss://a.example');
   });
 });

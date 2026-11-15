@@ -32,6 +32,45 @@ export const SETTINGS_STORAGE_KEY = 'opentt3d.settings.v1';
 
 export const DEFAULT_P2P_RELAY = 'Automatique (Trystero)';
 
+/** Upper bound on configured signalling relays (keeps the UI and config sane). */
+export const MAX_P2P_RELAYS = 8;
+
+const RELAY_URL_PATTERN = /^wss?:\/\/[^\s,;]+$/i;
+
+/** Extracts validated relay URLs from an array or a comma/space-separated string. */
+export function parseRelayUrls(value: unknown): string[] {
+  const source =
+    typeof value === 'string'
+      ? value.split(/[\s,;]+/)
+      : Array.isArray(value)
+        ? value.filter((item): item is string => typeof item === 'string')
+        : [];
+  const seen = new Set<string>();
+  for (const item of source) {
+    const url = item.trim().replace(/\/+$/, '');
+    if (!RELAY_URL_PATTERN.test(url)) continue;
+    seen.add(url);
+    if (seen.size >= MAX_P2P_RELAYS) break;
+  }
+  return [...seen];
+}
+
+/** Normalises the persisted relay setting: a validated list or "Automatic". */
+export function sanitizeP2pRelay(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_P2P_RELAY;
+  const trimmed = value.trim();
+  if (!trimmed || /^(automatique|automatic)/i.test(trimmed)) return DEFAULT_P2P_RELAY;
+  const relays = parseRelayUrls(trimmed);
+  return relays.length > 0 ? relays.join(', ') : DEFAULT_P2P_RELAY;
+}
+
+/** Relay URLs to pass to the transport; empty means "use Trystero defaults". */
+export function p2pRelayUrls(value: unknown): string[] {
+  if (typeof value !== 'string') return [];
+  if (/^(automatique|automatic)/i.test(value.trim())) return [];
+  return parseRelayUrls(value);
+}
+
 export const DEFAULT_SETTINGS: GameSettings = {
   quality: 'medium',
   language: 'fr',
@@ -73,7 +112,7 @@ export function sanitizeSettings(raw: unknown): GameSettings {
     masterVolume: clampVolume(record.masterVolume, DEFAULT_SETTINGS.masterVolume),
     effectsVolume: clampVolume(record.effectsVolume, DEFAULT_SETTINGS.effectsVolume),
     musicVolume: clampVolume(record.musicVolume, DEFAULT_SETTINGS.musicVolume),
-    p2pRelay: DEFAULT_P2P_RELAY,
+    p2pRelay: sanitizeP2pRelay(record.p2pRelay),
     dayNightCycle:
       typeof record.dayNightCycle === 'boolean'
         ? record.dayNightCycle

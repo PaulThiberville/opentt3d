@@ -66,6 +66,7 @@ import {
 import {
   SETTINGS_STORAGE_KEY,
   loadSettings,
+  p2pRelayUrls,
   saveSettings,
   updateSettings,
   type GameSettings,
@@ -181,6 +182,11 @@ const networkBoot = readNetworkParams(window.location.search);
 const networkKind = networkBoot.kind;
 const transportKind: TransportKind = transportKindFor(networkKind);
 
+/** `?relays=` prend le pas sur le réglage persistant (#39). */
+function configuredRelays(): string[] {
+  return networkBoot.relays.length > 0 ? networkBoot.relays : p2pRelayUrls(settings.p2pRelay);
+}
+
 if (networkBoot.warning) {
   console.warn(`[OpenTT3D] ${networkBoot.warning}`);
 }
@@ -243,8 +249,14 @@ function rememberPlayerName(name: string): void {
 function ensureNetworkDirectory(): Directory | null {
   if (networkDirectory) return networkDirectory;
   try {
+    const relays = configuredRelays();
     networkDirectory =
-      networkKind === 'local' ? createLocalDirectory() : createDirectory({ kind: 'nostr' });
+      networkKind === 'local'
+        ? createLocalDirectory()
+        : createDirectory({
+            kind: 'nostr',
+            ...(relays.length > 0 ? { relays } : {}),
+          });
   } catch (error) {
     console.warn('[OpenTT3D] Annuaire multijoueur indisponible', error);
     networkDirectory = null;
@@ -399,7 +411,12 @@ function createRoom(request: CreateRoomRequest): void {
   const roomId = newRoomId();
   let handle: DetachableTransport | null = null;
   try {
-    const transport = createTransport({ kind: transportKind, roomId });
+    const relays = configuredRelays();
+    const transport = createTransport({
+      kind: transportKind,
+      roomId,
+      ...(relays.length > 0 ? { relays } : {}),
+    });
     handle = detachableTransport(transport);
     const directory = ensureNetworkDirectory();
     const lobby = createLobby({
@@ -432,7 +449,12 @@ function createRoom(request: CreateRoomRequest): void {
 function joinRoom(target: JoinTarget, name: string): void {
   let handle: DetachableTransport | null = null;
   try {
-    const transport = createTransport({ kind: transportKind, roomId: target.roomId });
+    const relays = configuredRelays();
+    const transport = createTransport({
+      kind: transportKind,
+      roomId: target.roomId,
+      ...(relays.length > 0 ? { relays } : {}),
+    });
     handle = detachableTransport(transport);
     const lobby = createLobby({
       transport: handle.transport,
