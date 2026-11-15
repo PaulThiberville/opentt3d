@@ -14,6 +14,7 @@ const CONTROLS: [string, string][] = [
   ['Clic', 'Sélectionner'],
   ['Double-clic', 'Centrer et suivre'],
   ['Routes / Rails + glisser', 'Construire un tronçon'],
+  ['Ctrl + Z', 'Démolir le dernier tronçon'],
   ['Clic droit (construction)', 'Annuler le tracé'],
   ['Échap', 'Quitter l’outil / pause'],
   ['Espace', 'Pause'],

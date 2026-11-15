@@ -16,7 +16,8 @@ import { MockEngine } from '../engine/MockEngine';
 import { WasmEngine } from '../engine/WasmEngine';
 import { resolveEngineModuleUrl, type EngineMode } from '../engine/loadEngine';
 import { Game, type GameSpeed, type Selection } from '../game/Game';
-import { commandFromPlan, type BuildPlan, type BuildTool } from '../game/buildRules';
+import { commandFromPlan, planBuild, type BuildPlan, type BuildTool } from '../game/buildRules';
+import { tileKindAt } from '../game/mapGrid';
 import type { StartInfo } from '../net/lobby-types';
 import { NET_TICK_MS, createNetSession, type NetSession, type NetUpdate } from '../net/session';
 import { Renderer } from '../render/Renderer';
@@ -110,6 +111,8 @@ export class GameSession {
   private hud: Hud | null = null;
   private buildController: BuildController | null = null;
   private buildTool: BuildToolId | null = null;
+  /** Dernier tronçon confirmé par le moteur, pour Ctrl+Z. */
+  private lastBuild: BuildPlan | null = null;
   private engineBadge: HTMLDivElement | null = null;
   private engineWarnings: string[] = [];
 
@@ -519,6 +522,11 @@ export class GameSession {
         return;
       }
     }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+      event.preventDefault();
+      this.undoLastBuild();
+      return;
+    }
     if (event.code === 'Space') {
       event.preventDefault();
       this.togglePause();
@@ -818,7 +826,11 @@ export class GameSession {
       return;
     }
     game.issueCommand(commandFromPlan(plan, company));
+    this.lastBuild = null;
     if (this.isNetwork) {
+      // Le lockstep appliquera la commande au prochain tour : on ne peut pas
+      // encore vérifier la carte, mais l'annulation reste une commande valide.
+      this.lastBuild = plan;
       this.hud?.notify(
         'info',
         'Commande de construction envoyée : elle sera appliquée au prochain tour.',
@@ -827,6 +839,61 @@ export class GameSession {
     }
     // Le mock applique la commande immédiatement : un snapshot forcé affiche
     // la route et les news d'erreur/succès sans attendre le prochain tick.
+    game.refresh();
+    this.refreshHud();
+    if (this.buildConfirmed(plan, company)) this.lastBuild = plan;
+  }
+
+  /** Vérifie sur la carte que toutes les tuiles du plan ont bien été posées. */
+  private buildConfirmed(plan: BuildPlan, company: number): boolean {
+    if (plan.tool === 'clear') return false;
+    const map = this.game?.getLatestSnapshot()?.map;
+    if (!map) return false;
+    return plan.tiles.every(
+      (tile) => tileKindAt(map, tile.x, tile.y) === plan.tool && map.owner[tile.index] === company,
+    );
+  }
+
+  /**
+   * Ctrl+Z : démolit le dernier tronçon construit (même tracé, outil `clear`).
+   * En réseau, la démolition est séquencée comme les autres commandes.
+   */
+  undoLastBuild(): void {
+    const last = this.lastBuild;
+    const game = this.game;
+    if (!game) return;
+    if (!last) {
+      this.hud?.notify('info', 'Aucune construction récente à annuler.');
+      return;
+    }
+    const map = this.world?.getMap();
+    const company = this.localCompanyId();
+    if (!map || company === null) {
+      this.hud?.notify('warning', 'Annulation impossible : carte ou entreprise indisponible.');
+      return;
+    }
+    const snapshot = game.getLatestSnapshot();
+    const money = snapshot?.companies.find((item) => item.id === company)?.money;
+    const clear = planBuild({
+      map,
+      tool: 'clear',
+      from: last.from,
+      to: last.to,
+      axis: last.axis,
+      company,
+      ...(money !== undefined ? { budget: money } : {}),
+    });
+    if (!clear.valid) {
+      this.hud?.notify('warning', `Démolition impossible : ${clear.reason ?? 'tracé refusé.'}`);
+      this.lastBuild = null;
+      return;
+    }
+    game.issueCommand(commandFromPlan(clear, company));
+    this.lastBuild = null;
+    if (this.isNetwork) {
+      this.hud?.notify('info', 'Annulation envoyée : démolition au prochain tour.');
+      return;
+    }
     game.refresh();
     this.refreshHud();
   }
@@ -929,6 +996,7 @@ export class GameSession {
     this.world = null;
     this.buildController = null;
     this.buildTool = null;
+    this.lastBuild = null;
     this.renderer = null;
     this.game = null;
     this.engine = null;
