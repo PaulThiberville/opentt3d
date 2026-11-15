@@ -25,6 +25,7 @@ import { createDirectory, newRoomId, type Directory } from './net/directory';
 import { createLobby, type Lobby } from './net/lobby';
 import type { StartInfo } from './net/lobby-types';
 import { createTransport, type Transport, type TransportKind } from './net/transport';
+import { startPwa } from './pwa';
 import { Renderer } from './render/Renderer';
 import { detectQuality } from './render/quality';
 import {
@@ -103,6 +104,13 @@ if (!canvas || !mount) {
 }
 const sceneCanvas: HTMLCanvasElement = canvas;
 const uiMount: HTMLElement = mount;
+
+/**
+ * PWA : service worker + invitation de mise à jour. Désactivé en développement
+ * (HMR) et avec `?pwa=off`. L'invitation n'apparaît que hors partie, via
+ * `notifyAppIdle()`.
+ */
+const pwa = startPwa();
 
 const screens = new ScreenManager(uiMount);
 screens.onScreenChange = (key) => {
@@ -313,6 +321,7 @@ function stopAttract(): void {
 }
 
 function showMainMenu(): void {
+  pwa.notifyAppIdle();
   disposeSession();
   ensureAttract();
   screens.show(
@@ -648,6 +657,7 @@ async function startGame(options: NewGameOptions): Promise<void> {
     showMainMenu();
     return;
   }
+  pwa.notifyAppBusy();
   replayOptions = options;
   pendingOptions = options;
   persistSettings(updateSettings(settings, { quality: options.quality }));
@@ -736,6 +746,7 @@ async function startLoadedGame(record: SaveRecord): Promise<void> {
     showMainMenu();
     return;
   }
+  pwa.notifyAppBusy();
   const options = loadedGameOptions(record);
   replayOptions = options;
   pendingOptions = options;
@@ -836,6 +847,7 @@ function networkCallbacks(
 async function startNetworkGame(info: StartInfo): Promise<void> {
   stopAttract();
   disposeSession();
+  pwa.notifyAppBusy();
   // Le transport vient du salon : il ne doit pas être fermé par le nettoyage
   // du menu. L'hôte répond aux retardataires via `LateJoinHost`, créé avant le
   // chargement pour qu'une demande pendant la génération ne reste pas muette.
@@ -908,6 +920,7 @@ async function startJoinedGame(prepared: LateJoinPrepared, screen: JoinScreen): 
   stopAttract();
   const start = prepared.start;
   disposeSession();
+  pwa.notifyAppBusy();
   const mapped = mapStartInfoToGameOptions(start, pendingOptions.quality);
   pendingOptions = { ...pendingOptions, quality: mapped.options.quality };
   const token: LoadToken = { cancelled: false };
@@ -976,7 +989,12 @@ function showSaveScreen(origin: 'menu' | 'pause'): void {
       ...(overview
         ? { currentLabel: `${overview.company} · ${overview.date} · ${overview.money}` }
         : {}),
-      onSaved: (slot) => current?.notifySave(`Partie sauvegardée : « ${slot.name} »`),
+      onSaved: (slot) => {
+        current?.notifySave(`Partie sauvegardée : « ${slot.name} »`);
+        // Une sauvegarde vient d'être écrite : c'est le bon moment pour
+        // proposer la mise à jour sans perdre de progression.
+        pwa.notifyAppIdle();
+      },
     }),
   );
 }
