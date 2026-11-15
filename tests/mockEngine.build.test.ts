@@ -120,9 +120,9 @@ describe('MockEngine : construction', () => {
   it('annonce les outils non encore branchés', async () => {
     const engine = await createEngine();
     mapOf(engine);
-    engine.send({ type: 'build', tool: 'station', company: 0, from: { x: 4, y: 4 } });
+    engine.send({ type: 'build', tool: 'bridge', company: 0, from: { x: 4, y: 4 } });
     const snapshot = engine.snapshot();
-    expect(snapshot.news.some((item) => item.kind === 'error' && item.text.includes('#28'))).toBe(
+    expect(snapshot.news.some((item) => item.kind === 'error' && item.text.includes('Ponts'))).toBe(
       true,
     );
   });

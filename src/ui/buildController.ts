@@ -2,17 +2,25 @@
  * Contrôleur du mode construction.
  *
  * Il transforme les événements souris du `WorldView` (survol, drag) en plan
- * d'aperçu via `buildRules.planBuild`, puis émet une commande moteur quand le
- * tracé est validé. Aucune règle de jeu n'est dupliquée ici : la validation et
- * le coût viennent du module partagé, le moteur reste l'autorité finale.
+ * d'aperçu via `buildRules` (routes/rails ou gares/dépôts/signaux), puis émet
+ * une commande moteur quand le tracé est validé. Aucune règle de jeu n'est
+ * dupliquée ici : la validation et le coût viennent du module partagé, le
+ * moteur reste l'autorité finale.
  */
 
 import type { MapSnapshot } from '../engine/protocol';
 import {
   axisForDrag,
+  cloneBuildSettings,
+  createBuildSettings,
+  nextDirection,
   planBuild,
+  planDepot,
+  planSignal,
+  planStation,
   type BuildPlan,
   type BuildPoint,
+  type BuildSettings,
   type BuildTool,
 } from '../game/buildRules';
 
@@ -41,6 +49,7 @@ function samePoint(a: BuildPoint | null, b: BuildPoint | null): boolean {
 export class BuildController {
   private options: BuildControllerOptions;
   private tool: BuildTool | null = null;
+  private settings: BuildSettings = createBuildSettings();
   private start: BuildPoint | null = null;
   private hover: BuildPoint | null = null;
   private dragging = false;
@@ -63,6 +72,10 @@ export class BuildController {
     return this.plan;
   }
 
+  get buildSettings(): BuildSettings {
+    return cloneBuildSettings(this.settings);
+  }
+
   setTool(tool: BuildTool | null): void {
     this.tool = tool;
     this.start = null;
@@ -71,6 +84,27 @@ export class BuildController {
     this.lastKey = '';
     this.hover = null;
     this.options.onPreview(null);
+  }
+
+  /** Met à jour les options de gare/dépôt/signal et rafraîchit le fantôme. */
+  setSettings(settings: BuildSettings): void {
+    this.settings = cloneBuildSettings(settings);
+    this.lastKey = '';
+    this.refresh();
+  }
+
+  /** Pivote l'infrastructure active (touche R ou bouton du HUD). */
+  rotate(): boolean {
+    if (this.tool === 'station') {
+      this.settings.station.direction = nextDirection(this.settings.station.direction);
+    } else if (this.tool === 'depot') {
+      this.settings.depot.direction = nextDirection(this.settings.depot.direction ?? 'se');
+    } else {
+      return false;
+    }
+    this.lastKey = '';
+    this.refresh();
+    return true;
   }
 
   /** Survol libre (hors drag) : aperçu d'une tuile. */
@@ -110,7 +144,7 @@ export class BuildController {
       const plan = this.plan;
       if (plan?.valid) {
         this.options.onCommit(plan);
-        // Le tronçon est construit : on efface le fantôme au lieu de le
+        // L'ouvrage est construit : on efface le fantôme au lieu de le
         // recolorer immédiatement en « voie déjà construite » sous le curseur.
         this.hover = null;
       } else if (plan?.reason) {
@@ -121,7 +155,7 @@ export class BuildController {
     }
     this.dragging = false;
     this.start = null;
-    // Revient à l'aperçu d'une tuile sous le curseur pour enchaîner les tronçons.
+    // Revient à l'aperçu d'une tuile sous le curseur pour enchaîner les poses.
     if (this.hover) this.refresh();
     else this.clearPreview();
   }
@@ -165,19 +199,38 @@ export class BuildController {
       map.width,
       map.height,
       this.options.getCompany()?.money ?? '',
+      JSON.stringify(this.settings),
     ].join(':');
     if (key === this.lastKey) return;
     this.lastKey = key;
 
     const company = this.options.getCompany();
-    const plan = planBuild({
+    const shared = {
       map,
-      tool: this.tool ?? 'road',
       from,
-      ...(to ? { to } : {}),
-      axis,
       ...(company ? { company: company.id, budget: company.money } : {}),
-    });
+    };
+    const tool = this.tool;
+    let plan: BuildPlan;
+    if (tool === 'station') {
+      plan = planStation({ ...shared, settings: this.settings.station });
+    } else if (tool === 'depot') {
+      plan = planDepot({ ...shared, settings: this.settings.depot });
+    } else if (tool === 'signal') {
+      plan = planSignal({
+        ...shared,
+        settings: this.settings.signal,
+        ...(to ? { to } : {}),
+        axis,
+      });
+    } else {
+      plan = planBuild({
+        ...shared,
+        tool: tool ?? 'road',
+        ...(to ? { to } : {}),
+        axis,
+      });
+    }
     this.plan = plan;
     this.options.onPreview(plan);
   }
