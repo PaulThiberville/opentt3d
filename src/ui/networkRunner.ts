@@ -70,6 +70,46 @@ function parseEnvelope(text: string): SaveEnvelope {
 }
 
 /**
+ * `MockEngine.load` appelle `updateVehiclesTransforms`, qui applique une étape
+ * de lissage supplémentaire à la direction des véhicules. Or `MockEngine.hash`
+ * inclut cette direction : un pair qui charge une sauvegarde diverge donc du
+ * hash de l'hôte alors que la simulation est identique. Comme le moteur est
+ * hors périmètre ici, le runner restaure les directions sérialisées juste
+ * après le chargement. Les positions (x/y/z) sont déjà recalculées à
+ * l'identique depuis le chemin : seule la direction dérive.
+ */
+function restoreAsyncEngineDirections(engine: EngineDriver, bytes: Uint8Array): void {
+  type DirectionVehicle = { id: number; direction: number };
+  const world = (
+    engine as unknown as {
+      world?: { vehicles?: DirectionVehicle[] };
+    }
+  ).world;
+  if (!world || !Array.isArray(world.vehicles)) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return;
+  }
+  const savedVehicles = (parsed as { world?: { vehicles?: unknown } } | null)?.world?.vehicles;
+  if (!Array.isArray(savedVehicles)) return;
+  const directions = new Map<number, number>();
+  for (const entry of savedVehicles) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const vehicle = entry as { id?: unknown; direction?: unknown };
+    if (typeof vehicle.id === 'number' && typeof vehicle.direction === 'number') {
+      directions.set(vehicle.id, vehicle.direction);
+    }
+  }
+  if (directions.size === 0) return;
+  for (const vehicle of world.vehicles) {
+    const direction = directions.get(vehicle.id);
+    if (direction !== undefined) vehicle.direction = direction;
+  }
+}
+
+/**
  * `Runner` adossé à un `EngineDriver`. Le moteur doit être en pause désactivée
  * et en vitesse 1 : les commandes pause/vitesse ne sont pas séquencées en
  * réseau (elles sont désactivées dans l'UI).
@@ -156,6 +196,7 @@ export function createEngineRunner(engine: EngineDriver): EngineRunner {
     void engine.load(bytes).catch((error: unknown) => {
       console.warn('[net:runner] chargement de sauvegarde impossible', error);
     });
+    restoreAsyncEngineDirections(engine, bytes);
     cached = envelope;
   }
 
