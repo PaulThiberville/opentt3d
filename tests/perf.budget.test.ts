@@ -12,7 +12,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type * as THREE from 'three';
+import * as THREE from 'three';
 import type { IndustrySnapshot, MapSnapshot } from '../src/engine/protocol';
 import { TILE_FLAG, TILE_KIND_INDEX } from '../src/engine/protocol';
 import { MockEngine } from '../src/engine/MockEngine';
@@ -23,6 +23,7 @@ import { IndustryLayer } from '../src/render/IndustryLayer';
 import { SignalLayer } from '../src/render/SignalLayer';
 import { CHUNK_SIZE, TerrainLayer } from '../src/render/TerrainLayer';
 import { VehicleLayer } from '../src/render/VehicleLayer';
+import { VEHICLE_VARIANTS } from '../src/render/vehicleModels';
 import { VegetationLayer } from '../src/render/VegetationLayer';
 import { QUALITY_LEVELS, qualitySettings } from '../src/render/quality';
 
@@ -33,18 +34,16 @@ const BUDGETS = {
   /** Un chunk de terrain = 2 triangles par tuile, aucun sommet superflu. */
   terrainTrianglesPerTile: 2,
   terrainVerticesPerTile: 6,
-  /** Bâtiment : corps (12 triangles) + toit (8) + marge. */
-  cityTrianglesPerBuilding: 24,
+  /** Bâtiment : modèles détaillés (moyenne observée ~103 triangles) + marge. */
+  cityTrianglesPerBuilding: 150,
+  /** Lots fusionnés par archétype × variante (deux villes tolérées). */
+  cityDrawCalls: 24,
   /** Arbre : tronc (20) + houppier (12) + marge. */
   vegetationTrianglesPerTree: 40,
-  /** Modèles de véhicules (triangles par instance). */
-  vehicleTriangles: {
-    train: 200,
-    truck: 100,
-    bus: 80,
-    ship: 120,
-    plane: 120,
-  } as Record<string, number>,
+  /** Modèles de véhicules détaillés (plafond de modélisation : 3 000). */
+  vehicleTrianglesPerModel: 1_500,
+  vehicleDrawCalls: 9,
+  vehicleTrianglesFor300: 450_000,
   /** Bâtiments : un seul draw call par archétype fusionné. */
   maxIndustryTrianglesPerIndustry: 4_000,
   maxIndustryPartsPerIndustry: 70,
@@ -252,7 +251,7 @@ describe('budgets TerrainLayer', () => {
 // Villes
 // ---------------------------------------------------------------------------
 describe('budgets CityLayer', () => {
-  it('instancie un corps + un toit par bâtiment, deux draw calls par ville', () => {
+  it('regroupe les bâtiments par archétype/variante, pas par tuile', () => {
     const map = makeMap(64, 64, (fixture) => {
       fillRect(fixture, 14, 14, 12, 12, TILE_KIND_INDEX.house);
     });
@@ -270,10 +269,13 @@ describe('budgets CityLayer', () => {
     layer.build([town], map);
     try {
       expect(layer.buildingCount).toBe(144);
-      expect(layer.drawCallCount).toBe(2);
+      // 12 lots (archétype × variante) pour 144 bâtiments : le budget ne doit
+      // jamais devenir proportionnel au nombre de tuiles.
+      expect(layer.drawCallCount).toBeGreaterThan(0);
+      expect(layer.drawCallCount).toBeLessThanOrEqual(BUDGETS.cityDrawCalls);
       const stats = groupStats(layer.group);
-      expect(stats.drawCalls).toBe(2);
-      expect(stats.instances).toBe(144 * 2);
+      expect(stats.drawCalls).toBe(layer.drawCallCount);
+      expect(stats.instances).toBe(144);
       expect(stats.triangles).toBeLessThanOrEqual(144 * BUDGETS.cityTrianglesPerBuilding);
       expect(stats.triangles).toBeGreaterThan(0);
     } finally {
@@ -281,7 +283,7 @@ describe('budgets CityLayer', () => {
     }
   });
 
-  it('deux villes = quatre draw calls, sans regroupement global', () => {
+  it('deux villes restent sous le plafond de lots fusionnés', () => {
     const map = makeMap(96, 96, (fixture) => {
       fillRect(fixture, 10, 10, 8, 8, TILE_KIND_INDEX.house);
       fillRect(fixture, 60, 60, 8, 8, TILE_KIND_INDEX.house);
@@ -313,8 +315,46 @@ describe('budgets CityLayer', () => {
       map,
     );
     try {
-      expect(layer.drawCallCount).toBe(4);
-      expect(groupStats(layer.group).drawCalls).toBe(4);
+      expect(layer.buildingCount).toBe(128);
+      expect(layer.drawCallCount).toBeGreaterThan(0);
+      expect(layer.drawCallCount).toBeLessThanOrEqual(BUDGETS.cityDrawCalls * 2);
+      expect(groupStats(layer.group).instances).toBe(128);
+    } finally {
+      layer.dispose();
+    }
+  });
+
+  it('bascule les villes lointaines en un seul lot simplifié', () => {
+    const map = makeMap(64, 64, (fixture) => {
+      fillRect(fixture, 14, 14, 12, 12, TILE_KIND_INDEX.house);
+    });
+    const layer = new CityLayer();
+    layer.build(
+      [
+        {
+          id: 0,
+          name: 'Test',
+          x: 20.5,
+          y: 20.5,
+          population: 500,
+          growthRate: 2,
+          buildings: 144,
+          rating: 60,
+        },
+      ],
+      map,
+    );
+    try {
+      const nearDraws = layer.drawCallCount;
+      layer.update(new THREE.Vector3(10_000, 0, 10_000));
+      expect(layer.distantTownCount).toBe(1);
+      expect(layer.drawCallCount).toBe(1);
+      expect(layer.drawCallCount).toBeLessThan(nearDraws);
+      expect(layer.buildingCount).toBe(144);
+
+      layer.update(new THREE.Vector3(20, 0, 20));
+      expect(layer.distantTownCount).toBe(0);
+      expect(layer.drawCallCount).toBe(nearDraws);
     } finally {
       layer.dispose();
     }
@@ -370,7 +410,7 @@ describe('budgets VegetationLayer', () => {
 // Véhicules
 // ---------------------------------------------------------------------------
 describe('budgets VehicleLayer', () => {
-  it('un draw call par modèle, quel que soit le nombre de véhicules', () => {
+  it('un draw call par variante, quel que soit le nombre de véhicules', () => {
     const layer = new VehicleLayer();
     const models = ['train', 'truck', 'bus', 'ship', 'plane'] as const;
     try {
@@ -388,42 +428,43 @@ describe('budgets VehicleLayer', () => {
       layer.update(large);
       expect(layer.instanceCount).toBe(300);
       expect(layer.drawCallCount).toBe(smallDraws);
-      expect(layer.drawCallCount).toBeLessThanOrEqual(models.length);
-      expect(groupStats(layer.group).drawCalls).toBeLessThanOrEqual(models.length + 1);
+      expect(layer.drawCallCount).toBeLessThanOrEqual(BUDGETS.vehicleDrawCalls);
+      expect(layer.drawCallCount).toBeLessThanOrEqual(VEHICLE_VARIANTS.length);
+      expect(groupStats(layer.group).drawCalls).toBeLessThanOrEqual(VEHICLE_VARIANTS.length);
 
       let triangles = 0;
       for (const child of layer.group.children) {
         const mesh = child as THREE.InstancedMesh;
         if (!mesh.isInstancedMesh || mesh.name.startsWith('vehicle-halo')) continue;
-        const budget = BUDGETS.vehicleTriangles[mesh.name.replace('vehicles-', '')] ?? 200;
         triangles += triangleCount(mesh.geometry) * mesh.count;
-        expect(triangleCount(mesh.geometry)).toBeLessThanOrEqual(budget);
+        expect(triangleCount(mesh.geometry)).toBeLessThanOrEqual(BUDGETS.vehicleTrianglesPerModel);
       }
-      expect(triangles).toBeLessThanOrEqual(
-        300 * Math.max(...Object.values(BUDGETS.vehicleTriangles)),
-      );
+      expect(triangles).toBeLessThanOrEqual(BUDGETS.vehicleTrianglesFor300);
       expect(triangles).toBeGreaterThan(0);
     } finally {
       layer.dispose();
     }
   });
 
-  it('les géométries de modèle restent sous les budgets par archétype', () => {
-    const geometries = (() => {
-      const layer = new VehicleLayer();
-      const result: Record<string, number> = {};
+  it('les géométries détaillées restent sous le budget par variante', () => {
+    const layer = new VehicleLayer();
+    const models = ['train', 'truck', 'bus', 'ship', 'plane'] as const;
+    try {
+      const vehicles: RenderVehicle[] = [];
+      for (let index = 0; index < 60; index += 1) {
+        vehicles.push(renderVehicle(index, models[index % models.length] ?? 'bus'));
+      }
+      layer.update(vehicles);
       for (const child of layer.group.children) {
         const mesh = child as THREE.InstancedMesh;
         if (!mesh.isInstancedMesh || mesh.name.startsWith('vehicle-halo')) continue;
-        const key = mesh.name.replace('vehicles-', '');
-        result[key] = triangleCount(mesh.geometry);
+        const triangles = triangleCount(mesh.geometry);
+        expect(triangles, `${mesh.name} : ${triangles} triangles`).toBeLessThanOrEqual(
+          BUDGETS.vehicleTrianglesPerModel,
+        );
       }
+    } finally {
       layer.dispose();
-      return result;
-    })();
-    for (const [model, triangles] of Object.entries(geometries)) {
-      const budget = BUDGETS.vehicleTriangles[model] ?? 200;
-      expect(triangles, `${model} : ${triangles} triangles`).toBeLessThanOrEqual(budget);
     }
   });
 });
@@ -475,6 +516,12 @@ describe('budgets IndustryLayer', () => {
           industries.length * BUDGETS.maxIndustryTrianglesPerIndustry,
         );
         expect(stats.triangles).toBeGreaterThan(0);
+        for (const [archetype, detail] of Object.entries(layer.archetypeStats)) {
+          expect(
+            detail.triangles,
+            `${archetype} : ${detail.triangles} triangles`,
+          ).toBeLessThanOrEqual(BUDGETS.maxIndustryTrianglesPerIndustry);
+        }
       } finally {
         layer.dispose();
       }
@@ -493,13 +540,28 @@ describe('budgets IndustryLayer', () => {
     expect(counts[0]).toBeLessThanOrEqual(counts[1] ?? 0);
     expect(counts[1]).toBeLessThanOrEqual(counts[2] ?? 0);
   });
+
+  it('bascule les lots lointains en géométrie simplifiée', () => {
+    const { map, industries } = industrialFixture();
+    const layer = new IndustryLayer();
+    layer.build(industries, map, 'high');
+    try {
+      layer.update(0.016, new THREE.Vector3(12, 40, 12));
+      expect(layer.coarseLods).toBe(0);
+      layer.update(0.016, new THREE.Vector3(100_000, 40, 100_000));
+      expect(layer.coarseLods).toBeGreaterThan(0);
+      expect(layer.industryCount).toBe(industries.length);
+    } finally {
+      layer.dispose();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
 // Dépôts et signaux : capes d'instances fixes
 // ---------------------------------------------------------------------------
 describe('budgets des couches instanciées', () => {
-  it('les dépôts tiennent dans un InstancedMesh plafonné à 512', () => {
+  it('les dépôts tiennent dans quatre InstancedMesh plafonnés à 512', () => {
     const layer = new DepotLayer();
     const map = makeMap(64, 64);
     const depots = Array.from({ length: 600 }, (_, id) => ({
@@ -515,11 +577,17 @@ describe('budgets des couches instanciées', () => {
     layer.setDepots(depots, map);
     try {
       expect(layer.count).toBe(512);
-      expect(layer.group.children.length).toBe(1);
-      const mesh = layer.group.children[0] as THREE.InstancedMesh;
-      expect(mesh.isInstancedMesh).toBe(true);
-      expect(mesh.count).toBe(512);
-      expect(mesh.instanceMatrix.count).toBe(512);
+      // Corps + livrée route, corps + livrée rail : quatre lots fixes.
+      expect(layer.group.children.length).toBe(4);
+      expect(
+        layer.group.children.every((child) => (child as THREE.InstancedMesh).isInstancedMesh),
+      ).toBe(true);
+      const used = layer.group.children
+        .map((child) => (child as THREE.InstancedMesh).count)
+        .reduce((total, count) => total + count, 0);
+      // Un dépôt route = un corps + une livrée.
+      expect(used).toBe(512 * 2);
+      expect(layer.drawCallCount).toBe(2);
     } finally {
       layer.dispose();
     }
