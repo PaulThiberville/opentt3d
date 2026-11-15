@@ -546,6 +546,9 @@ export class GameSession {
       peers: start.peers,
       engine: engineBuildId(this.engineMode),
       maxPlayers: start.settings.maxPlayers,
+      // Une sauvegarde WASM peut être volumineuse : garder la fenêtre ouverte
+      // plus longtemps que le défaut de 15 s, sans bloquer la partie au-delà.
+      joinTimeoutMs: 60_000,
       ...(playerName ? { playerName } : {}),
     });
     this.attachNetHandlers();

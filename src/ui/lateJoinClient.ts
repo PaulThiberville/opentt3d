@@ -38,9 +38,9 @@ import {
 } from './netjoin';
 
 const DEFAULT_QUERY_MS = 700;
-const DEFAULT_ADMISSION_MS = 30_000;
+const DEFAULT_ADMISSION_MS = 60_000;
 const JOIN_POLL_MS = 16;
-const JOIN_MAX_MS = 40_000;
+const JOIN_MAX_MS = 90_000;
 
 function nowMs(): number {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
@@ -266,7 +266,7 @@ export class LateJoinClient {
       peers: payload.peers,
       engine: payload.engineBuild,
       ...(this.options.playerName ? { playerName: this.options.playerName } : {}),
-      joinTimeoutMs: 30_000,
+      joinTimeoutMs: 60_000,
     });
     this.session = session;
     const offJoin = session.onJoin((event) => {
