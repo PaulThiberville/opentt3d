@@ -12,11 +12,19 @@ import { VehicleInterpolator, type RenderVehicle } from '../game/vehicleInterpol
 import type { InterpolationState } from '../game/Game';
 import { CameraController } from './CameraController';
 import { CityLayer } from './CityLayer';
+import { IndustryLayer } from './IndustryLayer';
 import { Picking, type PickResult } from './Picking';
 import { TerrainLayer } from './TerrainLayer';
 import { VegetationLayer } from './VegetationLayer';
 import { VehicleLayer } from './VehicleLayer';
-import type { QualityLevel } from './quality';
+import { phaseFromEconomy, sunState } from './dayNight';
+import { qualitySettings, type QualityLevel } from './quality';
+
+/** Surface minimale du renderer pour piloter le cycle jour/nuit. */
+export interface TimeOfDaySink {
+  setTimeOfDay(fraction: number): void;
+  readonly nightAmount: number;
+}
 
 export type WorldTarget =
   | { kind: 'vehicle'; id: number }
@@ -28,6 +36,8 @@ export interface WorldViewOptions {
   camera: THREE.PerspectiveCamera;
   canvas: HTMLCanvasElement;
   quality: QualityLevel;
+  /** Receveur du cycle jour/nuit (le `Renderer`). */
+  timeOfDay?: TimeOfDaySink;
   onSelect?: (target: WorldTarget | null) => void;
   onHover?: (target: WorldTarget | null) => void;
   onNotice?: (text: string) => void;
@@ -36,6 +46,7 @@ export interface WorldViewOptions {
 export class WorldView {
   readonly terrain = new TerrainLayer();
   readonly cityLayer = new CityLayer();
+  readonly industries = new IndustryLayer();
   readonly vegetation = new VegetationLayer();
   readonly vehicles = new VehicleLayer();
 
@@ -50,6 +61,8 @@ export class WorldView {
   private mapApplied = false;
   private selectedVehicle: number | null = null;
   private currentMap: MapSnapshot | null = null;
+  private timeOfDay?: TimeOfDaySink;
+  private night = 0;
   private onSelect?: (target: WorldTarget | null) => void;
   private onHover?: (target: WorldTarget | null) => void;
   private onNotice?: (text: string) => void;
@@ -60,12 +73,14 @@ export class WorldView {
     this.canvas = options.canvas;
     this.camera = options.camera;
     this.quality = options.quality;
+    this.timeOfDay = options.timeOfDay;
     this.onSelect = options.onSelect;
     this.onHover = options.onHover;
     this.onNotice = options.onNotice;
 
     this.scene.add(this.terrain.group);
     this.scene.add(this.cityLayer.group);
+    this.scene.add(this.industries.group);
     this.scene.add(this.vegetation.group);
     this.scene.add(this.vehicles.group);
 
@@ -101,6 +116,7 @@ export class WorldView {
       else this.terrain.applyDelta(map);
       this.currentMap = map;
       this.cityLayer.build(snapshot.towns, map);
+      this.industries.build(snapshot.industries, map, this.quality);
       this.vegetation.build(map, this.quality);
       this.mapApplied = true;
       if (first) {
@@ -108,6 +124,10 @@ export class WorldView {
         this.controller.reset();
       }
     }
+    const phase = phaseFromEconomy(snapshot.economy);
+    this.night = sunState(phase).night;
+    this.timeOfDay?.setTimeOfDay(phase);
+    this.cityLayer.setNight(this.timeOfDay?.nightAmount ?? this.night);
   }
 
   /** Frame : interpolation, entités, caméra, picking au survol. */
@@ -122,6 +142,8 @@ export class WorldView {
     this.controller.update(deltaSeconds);
     this.terrain.update(deltaSeconds);
     this.vegetation.update(deltaSeconds);
+    this.industries.update(deltaSeconds, this.camera.position);
+    this.cityLayer.setNight(this.timeOfDay?.nightAmount ?? this.night);
     this.updateHover();
   }
 
@@ -224,12 +246,15 @@ export class WorldView {
     this.quality = level;
     this.applyQuality(level);
     if (this.currentMap) this.vegetation.build(this.currentMap, level);
+    this.industries.setQuality(level);
   }
 
   private applyQuality(level: QualityLevel): void {
     this.terrain.setQuality(level);
     this.cityLayer.setShadows(level === 'high');
+    this.cityLayer.setNightLights(qualitySettings(level).nightWindows);
     this.vehicles.setShadows(level === 'high');
+    this.industries.setShadows(level === 'high');
   }
 
   getCameraController(): CameraController {
@@ -252,9 +277,24 @@ export class WorldView {
     return this.cityLayer.buildingCount;
   }
 
+  getIndustryCount(): number {
+    return this.industries.industryCount;
+  }
+
+  getIndustryPartCount(): number {
+    return this.industries.partCount;
+  }
+
+  getIndustryDrawCalls(): number {
+    return this.industries.drawCallCount;
+  }
+
   getDrawCalls(): number {
     return (
-      this.vehicles.drawCallCount + this.cityLayer.drawCallCount + this.vegetation.drawCallCount
+      this.vehicles.drawCallCount +
+      this.cityLayer.drawCallCount +
+      this.vegetation.drawCallCount +
+      this.industries.drawCallCount
     );
   }
 
@@ -268,10 +308,12 @@ export class WorldView {
     this.picking.dispose();
     this.scene.remove(this.terrain.group);
     this.scene.remove(this.cityLayer.group);
+    this.scene.remove(this.industries.group);
     this.scene.remove(this.vegetation.group);
     this.scene.remove(this.vehicles.group);
     this.terrain.dispose();
     this.cityLayer.dispose();
+    this.industries.dispose();
     this.vegetation.dispose();
     this.vehicles.dispose();
     this.renderVehicles = [];

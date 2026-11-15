@@ -35,6 +35,9 @@ export class CityLayer {
   private roofGeometry: THREE.ConeGeometry;
   private bodyMaterial: THREE.MeshLambertMaterial;
   private roofMaterial: THREE.MeshLambertMaterial;
+  private nightUniform: { value: number } = { value: 0 };
+  private nightAmount = 0;
+  private nightLights = true;
   private cities = new Map<number, CityInstances>();
   private map: MapSnapshot | null = null;
   private shadows = false;
@@ -48,6 +51,42 @@ export class CityLayer {
     this.roofGeometry.translate(0, 0.5, 0);
     this.bodyMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
     this.roofMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    // Fenêtres procédurales : aucun draw call ni géométrie supplémentaire.
+    this.bodyMaterial.onBeforeCompile = (shader) => {
+      shader.uniforms.uNight = this.nightUniform;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          '#include <common>\nvarying vec3 vBoxPosition;\nvarying vec3 vBoxNormal;',
+        )
+        .replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\n  vBoxPosition = position;\n  vBoxNormal = normal;',
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          '#include <common>\nuniform float uNight;\nvarying vec3 vBoxPosition;\nvarying vec3 vBoxNormal;',
+        )
+        .replace(
+          '#include <emissivemap_fragment>',
+          `#include <emissivemap_fragment>
+           if ( uNight > 0.001 ) {
+             float facade = 1.0 - step( 0.5, abs( vBoxNormal.y ) );
+             float u = abs( vBoxNormal.x ) > abs( vBoxNormal.z ) ? vBoxPosition.z : vBoxPosition.x;
+             vec2 grid = vec2( u * 3.0, vBoxPosition.y * 4.0 );
+             vec2 cell = fract( grid );
+             float frame = step( 0.3, cell.x ) * step( cell.x, 0.7 ) *
+                           step( 0.28, cell.y ) * step( cell.y, 0.72 );
+             float seed = fract( sin( dot(
+               vec3( floor( grid.x ), floor( grid.y ), dot( vColor.rgb, vec3( 31.0, 17.0, 7.0 ) ) ),
+               vec3( 12.9898, 78.233, 37.719 ) ) ) * 43758.5453 );
+             float lit = step( 0.42, seed );
+             totalEmissiveRadiance += vec3( 1.0, 0.58, 0.24 ) * facade * frame * lit * uNight * 1.1;
+           }`,
+        );
+    };
+    this.bodyMaterial.customProgramCacheKey = () => 'opentt3d-city-windows-v1';
   }
 
   /** Reconstruit les bâtiments de toutes les villes. */
@@ -154,6 +193,18 @@ export class CityLayer {
       this.group.add(roofs);
       this.cities.set(town.id, { townId: town.id, bodies, roofs, townIds });
     }
+  }
+
+  /** 0 = jour, 1 = nuit profonde : allume les fenêtres des bâtiments. */
+  setNight(amount: number): void {
+    this.nightAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
+    this.nightUniform.value = this.nightLights ? this.nightAmount : 0;
+  }
+
+  /** Active/désactive les fenêtres éclairées (preset basse qualité). */
+  setNightLights(enabled: boolean): void {
+    this.nightLights = enabled;
+    this.nightUniform.value = enabled ? this.nightAmount : 0;
   }
 
   setShadows(enabled: boolean): void {
