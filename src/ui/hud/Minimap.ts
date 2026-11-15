@@ -12,6 +12,7 @@ import type { Selection } from '../../game/Game';
 import { TILE_KINDS, tileIndex } from '../../game/mapGrid';
 import { companyColour } from '../../render/tileVisuals';
 import { el } from '../dom';
+import { bindAttr, bindText, t } from '../i18n';
 import {
   cameraFootprint,
   computeMapSignature,
@@ -118,30 +119,44 @@ export class Minimap {
   constructor(options: MinimapOptions) {
     this.element = el('aside', {
       className: 'hud-minimap',
-      attrs: { 'aria-label': 'Minimap' },
+      attrs: { 'aria-label': t('minimap.label') },
     });
+    bindAttr(this.element, 'aria-label', 'minimap.label');
     const header = el('div', { className: 'hud-minimap-header' });
-    header.append(el('h3', { text: 'Minimap' }));
+    header.append(bindText(el('h3'), 'minimap.title'));
     this.mapLabel = el('span', { className: 'hud-minimap-size', text: '—' });
     header.append(this.mapLabel);
 
     this.canvas = el('canvas', {
       className: 'hud-minimap-canvas',
       attrs: {
-        'aria-label': 'Carte du monde : cliquer pour recentrer la caméra',
+        'aria-label': t('minimap.aria'),
+        'aria-describedby': 'hud-minimap-hint',
         role: 'img',
-        title: 'Clic : recentrer la caméra',
+        tabindex: '0',
+        'aria-keyshortcuts': 'Enter Space',
+        title: t('minimap.titleAttr'),
       },
     });
     this.ctx = this.canvas.getContext('2d');
     this.base = document.createElement('canvas');
     this.layout = computeMinimapLayout(1, 1, 1, 1);
 
-    const hint = el('div', {
-      className: 'hud-minimap-hint',
-      text: 'Clic : recentrer · cadre = caméra',
-    });
+    bindAttr(this.canvas, 'aria-label', 'minimap.aria');
+    bindAttr(this.canvas, 'title', 'minimap.titleAttr');
+    const hint = bindText(
+      el('div', { className: 'hud-minimap-hint', attrs: { id: 'hud-minimap-hint' } }),
+      'minimap.hint',
+    );
     this.element.append(header, this.canvas, hint);
+
+    this.canvas.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      const map = this.map;
+      if (!map) return;
+      event.preventDefault();
+      options.onRecenter(map.width / 2, map.height / 2);
+    });
 
     this.canvas.addEventListener('click', (event) => {
       const map = this.map;

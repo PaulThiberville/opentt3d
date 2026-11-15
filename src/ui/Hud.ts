@@ -12,6 +12,7 @@ import { createBuildSettings } from '../game/buildRules';
 import type { QualityLevel } from '../render/quality';
 import type { BuildHintView } from './buildHint';
 import { el } from './dom';
+import { t } from './i18n';
 import { formatShortGameDate, type GameDateLike } from './format';
 import { NewsQueue, type NewsKind } from './news';
 import type { CameraView, HudState, SelectionSummary } from './types';
@@ -84,6 +85,7 @@ export class Hud {
   private errorOverlay: HTMLDivElement;
   private errorTitle: HTMLHeadingElement;
   private errorMessage: HTMLParagraphElement;
+  private retryButton: HTMLButtonElement;
 
   constructor(mount: HTMLElement, callbacks: HudCallbacks) {
     this.callbacks = callbacks;
@@ -172,20 +174,29 @@ export class Hud {
 
     this.errorOverlay = el('div', {
       className: 'hud-overlay hud-error',
-      attrs: { role: 'alertdialog', 'aria-live': 'assertive' },
+      attrs: {
+        role: 'alertdialog',
+        'aria-modal': 'true',
+        'aria-live': 'assertive',
+        'aria-labelledby': 'hud-error-title',
+      },
     });
     const card = el('div', { className: 'hud-overlay-card' });
-    this.errorTitle = el('h2', { text: 'Erreur' });
+    this.errorTitle = el('h2', {
+      text: t('hud.error'),
+      attrs: { id: 'hud-error-title' },
+    });
     this.errorMessage = el('p', { text: '' });
     const retry = el('button', {
       className: 'btn btn-primary hud-retry',
-      text: 'Recharger la page',
+      text: t('hud.reload'),
       attrs: { type: 'button' },
     });
     retry.addEventListener('click', () => window.location.reload());
     card.append(this.errorTitle, this.errorMessage, retry);
     this.errorOverlay.append(card);
     this.errorOverlay.hidden = true;
+    this.retryButton = retry;
 
     this.root.append(
       this.topBar.element,
@@ -203,9 +214,22 @@ export class Hud {
       this.errorOverlay,
     );
     mount.append(this.root);
+    document.addEventListener('keydown', this.handleEscape);
 
     this.refreshNews();
   }
+
+  /**
+   * Échap ferme les panneaux même quand le focus est sur un de leurs boutons :
+   * la session ignore les raccourcis ciblant un contrôle interactif.
+   */
+  private handleEscape = (event: KeyboardEvent): void => {
+    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    if (document.querySelector('.screen.is-visible')) return;
+    if (!this.closePanels()) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
 
   update(state: HudState): void {
     this.topBar.update(state);
@@ -290,12 +314,19 @@ export class Hud {
       return;
     }
     this.newsFeed.show();
+    this.topBar.setNewsOpen(true);
     this.markAllRead();
     this.renderNewsList();
   }
 
   closeNews(): void {
+    const active = document.activeElement;
+    const restore =
+      active instanceof HTMLElement &&
+      (this.newsFeed.element.contains(active) || !active.isConnected);
     this.newsFeed.hide();
+    this.topBar.setNewsOpen(false);
+    if (restore) this.topBar.focusNewsButton();
   }
 
   markAllRead(): void {
@@ -337,6 +368,7 @@ export class Hud {
     this.errorTitle.textContent = title;
     this.errorMessage.textContent = message;
     this.errorOverlay.hidden = false;
+    this.retryButton.focus();
   }
 
   private refreshNewsBadge(): void {
@@ -353,8 +385,15 @@ export class Hud {
   }
 
   dispose(): void {
+    document.removeEventListener('keydown', this.handleEscape);
+    this.topBar.dispose();
+    this.toolbar.dispose();
+    this.help.dispose();
+    this.selectionPanel.dispose();
+    this.newsFeed.dispose();
     this.toasts.dispose();
     this.buildHint.dispose();
+    this.buildOptions.dispose();
     this.buildOptions.element.remove();
     this.minimap.dispose();
     this.news.clear();
