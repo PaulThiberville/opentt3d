@@ -44,6 +44,7 @@ import {
 } from '../game/buildRules';
 import { stationFootprint } from '../game/buildRules';
 import {
+  depotConnections,
   parseBuildDirection,
   type BuildDirection,
   type BuildTransport,
@@ -52,6 +53,15 @@ import {
   type SignalTrack,
   type StationSettings,
 } from '../game/buildRules';
+import {
+  MAX_VEHICLE_ORDERS,
+  DEPOT_TRACK_BIT,
+  depotKindAt,
+  depotTileFromTarget,
+  vehicleModel,
+  type DepotKind,
+  type VehicleOrder,
+} from '../game/vehicleRules';
 
 /** Ticks moteur par jour de jeu (OpenTTD : `TICKS_PER_DAY`). */
 export const TICKS_PER_DAY = 74;
@@ -79,6 +89,10 @@ interface MockVehicle {
   id: number;
   kind: VehicleKind;
   company: number;
+  /** Modèle du catalogue (`vehicleRules`) ou chaîne vide pour la flotte initiale. */
+  model: string;
+  /** Dépôt d'achat, utilisé pour le retour et la liste du panneau dépôt. */
+  homeDepot: P2 | null;
   path: P2[];
   /** Longueur de chaque segment, recalculée au chargement. */
   pathLengths: number[];
@@ -98,6 +112,8 @@ interface MockVehicle {
   cargoAmount: number;
   cargoCapacity: number;
   orderTargets: number[];
+  /** Tournée typée (gare, industrie, dépôt) ; `orderTargets` reste la vue publique. */
+  orders: VehicleOrder[];
   profitLastYear: number;
   ageDays: number;
 }
@@ -319,6 +335,107 @@ function loopPath(tiles: P2[]): P2[] {
   const forward = tiles.map((tile) => ({ x: tile.x + 0.5, y: tile.y + 0.5 }));
   const backward = forward.slice(1, -1).reverse();
   return forward.concat(backward);
+}
+
+/** Marque les segments dont le nœud de départ est la tuile d'une gare. */
+function segmentsForStopsOnPath(
+  path: P2[],
+  stops: { x: number; y: number; station: number }[],
+): number[] {
+  const ids = new Array<number>(path.length).fill(-1);
+  for (let i = 0; i < path.length; i += 1) {
+    const point = path[i];
+    if (!point) continue;
+    for (const stop of stops) {
+      const dx = point.x - (stop.x + 0.5);
+      const dy = point.y - (stop.y + 0.5);
+      if (dx * dx + dy * dy <= 1.1) ids[i] = stop.station;
+    }
+  }
+  return ids;
+}
+
+/**
+ * Tracé de tournée : part de la position courante, passe par chaque cible
+ * dans l'ordre puis revient au point de départ (boucle aller-retour).
+ */
+function buildRoutePath(start: P2, targets: readonly P2[]): P2[] {
+  const anchor = { x: Math.floor(start.x), y: Math.floor(start.y) };
+  const tiles: P2[] = [anchor];
+  let cursor = anchor;
+  for (const target of targets) {
+    const segment = traceTiles(cursor, { x: Math.floor(target.x), y: Math.floor(target.y) });
+    for (let i = 1; i < segment.length; i += 1) {
+      const point = segment[i];
+      if (point) tiles.push(point);
+    }
+    cursor = { x: Math.floor(target.x), y: Math.floor(target.y) };
+  }
+  return loopPath(tiles);
+}
+
+interface ResolvedOrders {
+  targets: P2[];
+  stops: { x: number; y: number; station: number }[];
+  error: string | null;
+}
+
+/** Résout les cibles d'une tournée en points du monde et arrêts de gare. */
+function resolveOrders(world: MockWorld, orders: readonly VehicleOrder[]): ResolvedOrders {
+  const targets: P2[] = [];
+  const stops: { x: number; y: number; station: number }[] = [];
+  const map = mapSnapshotView(world);
+  for (const order of orders) {
+    if (order.kind === 'station') {
+      const station = world.stations.find((item) => item.id === order.target);
+      if (!station) return { targets: [], stops: [], error: `Gare #${order.target} introuvable.` };
+      targets.push({ x: station.x, y: station.y });
+      stops.push({
+        x: Math.floor(station.x),
+        y: Math.floor(station.y),
+        station: station.id,
+      });
+      continue;
+    }
+    if (order.kind === 'industry') {
+      const industry = world.industries.find((item) => item.id === order.target);
+      if (!industry) {
+        return { targets: [], stops: [], error: `Industrie #${order.target} introuvable.` };
+      }
+      targets.push({ x: industry.x, y: industry.y });
+      continue;
+    }
+    const tile = depotTileFromTarget(order.target, map);
+    if (!tile || depotKindAt(map, tile.x, tile.y) === null) {
+      return { targets: [], stops: [], error: 'Dépôt cible introuvable ou démoli.' };
+    }
+    targets.push({ x: tile.x + 0.5, y: tile.y + 0.5 });
+  }
+  return { targets, stops, error: null };
+}
+
+/** Recalcule la boucle d'un véhicule depuis sa tournée. */
+function rebuildRoute(world: MockWorld, vehicle: MockVehicle): boolean {
+  if (vehicle.orders.length === 0) {
+    addNews(world, 'warning', `Véhicule #${vehicle.id} : ajoutez au moins un ordre.`);
+    if (vehicle.status !== 3) vehicle.status = 0;
+    return false;
+  }
+  const resolved = resolveOrders(world, vehicle.orders);
+  if (resolved.error) {
+    addNews(world, 'error', `Tournée du véhicule #${vehicle.id} refusée : ${resolved.error}`);
+    if (vehicle.status !== 3) vehicle.status = 0;
+    return false;
+  }
+  const path = buildRoutePath({ x: vehicle.x, y: vehicle.y }, resolved.targets);
+  vehicle.path = path;
+  vehicle.pathLengths = computePathLengths(path);
+  vehicle.segmentStations = segmentsForStopsOnPath(path, resolved.stops);
+  vehicle.segment = 0;
+  vehicle.segmentT = 0;
+  vehicle.waitTicks = 0;
+  vehicle.status = 1;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -730,6 +847,42 @@ class WorldBuilder {
     return station;
   }
 
+  /** Cherche une tuile constructible (hors eau, voie, gare, ville, industrie). */
+  private findDepotSpot(near: P2): P2 | null {
+    const startX = clampInt(near.x, 1, this.width - 2);
+    const startY = clampInt(near.y, 1, this.height - 2);
+    for (let radius = 0; radius <= 12; radius += 1) {
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+          const x = startX + dx;
+          const y = startY + dy;
+          if (!inBounds(this.width, this.height, x, y)) continue;
+          const kind = this.kindAt(x, y);
+          if (kind === K.grass || kind === K.clear || kind === K.trees || kind === K.rough) {
+            return { x, y };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Pose un dépôt de démonstration : tuile route/rail marquée par
+   * `DEPOT_TRACK_BIT`, traversée est-ouest. Le panneau dépôt et l'achat de
+   * véhicules fonctionnent ainsi dès le premier snapshot.
+   */
+  private addDepot(kind: DepotKind, near: P2, owner: number): P2 | null {
+    const spot = this.findDepotSpot(near);
+    if (!spot) return null;
+    const index = this.index(spot.x, spot.y);
+    this.kind[index] = kind === 'rail' ? K.rail : K.road;
+    this.owner[index] = owner;
+    this.trackBits[index] = depotConnections('ne') | DEPOT_TRACK_BIT;
+    return { x: spot.x + 0.5, y: spot.y + 0.5 };
+  }
+
   private addVehiclesOnLoop(
     path: P2[],
     company: number,
@@ -748,6 +901,8 @@ class WorldBuilder {
         id: this.vehicles.length,
         kind,
         company,
+        model: '',
+        homeDepot: null,
         path,
         pathLengths: lengths,
         segment: 0,
@@ -764,6 +919,7 @@ class WorldBuilder {
         cargoAmount: Math.round(cargo.capacity * this.rng.float(0.2, 0.8)),
         cargoCapacity: cargo.capacity,
         orderTargets,
+        orders: orderTargets.map((target) => ({ target, kind: 'station' as const })),
         profitLastYear: Math.round(this.rng.float(8_000, 90_000)),
         ageDays: this.rng.int(40, 1_400),
       };
@@ -778,17 +934,7 @@ class WorldBuilder {
     path: P2[],
     stops: { x: number; y: number; station: number }[],
   ): number[] {
-    const ids = new Array<number>(path.length).fill(-1);
-    for (let i = 0; i < path.length; i += 1) {
-      const point = path[i];
-      if (!point) continue;
-      for (const stop of stops) {
-        const dx = point.x - (stop.x + 0.5);
-        const dy = point.y - (stop.y + 0.5);
-        if (dx * dx + dy * dy <= 1.1) ids[i] = stop.station;
-      }
-    }
-    return ids;
+    return segmentsForStopsOnPath(path, stops);
   }
 
   private generateNetwork(): void {
@@ -871,6 +1017,12 @@ class WorldBuilder {
       };
       this.stations.push(dock);
     }
+
+    // Dépôts de démonstration : un routier près de l'arrêt A, un ferroviaire
+    // près de la gare A. Ils rendent l'achat de véhicules immédiatement
+    // testable, sans attendre que le joueur en construise un.
+    if (roadA) this.addDepot('road', { x: roadA.x + 4, y: roadA.y + 4 }, 0);
+    if (trainA) this.addDepot('rail', { x: trainA.x + 4, y: trainA.y + 4 }, 0);
 
     // Réseau ferroviaire : gare A ↔ gare B.
     if (trainA && trainB) {
@@ -1036,6 +1188,8 @@ class WorldBuilder {
         path: template.path,
         pathLengths: template.pathLengths,
         segmentStations: template.segmentStations,
+        orderTargets: [...template.orderTargets],
+        orders: template.orders.map((order) => ({ ...order })),
         speed: this.rng.float(10, 18),
         cargoAmount: this.rng.int(0, 20),
         ageDays: this.rng.int(5, 600),
@@ -1426,8 +1580,7 @@ function applyDepot(
   for (const tile of plan.tiles) {
     world.kind[tile.index] = settings.kind === 'rail' ? K.rail : K.road;
     world.owner[tile.index] = command.company;
-    world.trackBits[tile.index] = tile.connections;
-    world.flags[tile.index] = 0;
+    world.trackBits[tile.index] = tile.connections | DEPOT_TRACK_BIT;
   }
   completeBuild(
     world,
@@ -1555,6 +1708,270 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
 }
 
 // ---------------------------------------------------------------------------
+// Véhicules
+// ---------------------------------------------------------------------------
+
+function nextVehicleId(world: MockWorld): number {
+  let next = 0;
+  for (const vehicle of world.vehicles) next = Math.max(next, vehicle.id + 1);
+  return next;
+}
+
+function syncVehicleCounts(world: MockWorld): void {
+  for (const company of world.companies) {
+    company.vehicleCount = world.vehicles.filter(
+      (vehicle) => vehicle.company === company.id,
+    ).length;
+  }
+}
+
+/** Valeur de reprise d'un véhicule : moitié du prix catalogue. */
+function vehicleRefund(vehicle: MockVehicle): number {
+  const model = vehicleModel(vehicle.model);
+  if (model) return Math.round(model.cost * 0.5);
+  return Math.round(Math.max(4_000, vehicle.cargoCapacity * 150));
+}
+
+function findVehicle(world: MockWorld, id: number | undefined): MockVehicle | null {
+  if (id === undefined || !Number.isFinite(id)) return null;
+  return world.vehicles.find((vehicle) => vehicle.id === id) ?? null;
+}
+
+function buyVehicle(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'vehicle' }>,
+  company: MockCompany,
+): void {
+  const model = vehicleModel(command.model);
+  if (!model) {
+    addNews(world, 'error', `Modèle « ${command.model ?? '?'} » inconnu au catalogue.`);
+    return;
+  }
+  if (!command.depot) {
+    addNews(world, 'error', 'Achat refusé : aucun dépôt ciblé.');
+    return;
+  }
+  const map = mapSnapshotView(world);
+  const x = Math.round(command.depot.x);
+  const y = Math.round(command.depot.y);
+  const depotKind = depotKindAt(map, x, y);
+  if (!depotKind) {
+    addNews(world, 'error', 'Achat refusé : la tuile ciblée n’est pas un dépôt.');
+    return;
+  }
+  if (depotKind !== model.depot) {
+    addNews(
+      world,
+      'error',
+      `Achat refusé : ${model.name} exige un dépôt ${model.depot === 'rail' ? 'ferroviaire' : 'routier'}.`,
+    );
+    return;
+  }
+  const index = tileIndex(x, y, world.width);
+  if ((world.owner[index] ?? COMPANY_NONE) !== company.id) {
+    addNews(world, 'error', 'Achat refusé : ce dépôt appartient à une autre entreprise.');
+    return;
+  }
+  if (company.money < model.cost) {
+    addNews(
+      world,
+      'error',
+      `Trésorerie insuffisante : ${Math.round(model.cost)} £ requis pour ${model.name}.`,
+    );
+    return;
+  }
+
+  const centre = { x: x + 0.5, y: y + 0.5 };
+  const vehicle: MockVehicle = {
+    id: nextVehicleId(world),
+    kind: model.kind,
+    company: company.id,
+    model: model.id,
+    homeDepot: { x, y },
+    path: [{ ...centre }],
+    pathLengths: [0],
+    segment: 0,
+    segmentT: 0,
+    segmentStations: [-1],
+    speed: model.speed,
+    direction: 0,
+    status: 3,
+    waitTicks: 0,
+    x: centre.x,
+    y: centre.y,
+    z: 0,
+    cargoType: model.cargo,
+    cargoAmount: 0,
+    cargoCapacity: model.capacity,
+    orderTargets: [],
+    orders: [],
+    profitLastYear: 0,
+    ageDays: 0,
+  };
+  world.vehicles.push(vehicle);
+  company.money -= model.cost;
+  syncVehicleCounts(world);
+  updateVehiclesTransforms(world);
+  addNews(
+    world,
+    'info',
+    `${model.name} acheté (#${vehicle.id}) pour ${Math.round(model.cost)} £ dans le dépôt (${x}, ${y}).`,
+  );
+}
+
+function sellVehicle(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'vehicle' }>,
+  company: MockCompany,
+): void {
+  const vehicle = findVehicle(world, command.vehicle);
+  if (!vehicle) {
+    addNews(world, 'error', `Vente refusée : véhicule #${command.vehicle ?? '?'} introuvable.`);
+    return;
+  }
+  if (vehicle.company !== company.id) {
+    addNews(world, 'error', 'Vente refusée : ce véhicule appartient à une autre entreprise.');
+    return;
+  }
+  const refund = vehicleRefund(vehicle);
+  world.vehicles = world.vehicles.filter((item) => item.id !== vehicle.id);
+  company.money += refund;
+  syncVehicleCounts(world);
+  addNews(world, 'info', `Véhicule #${vehicle.id} vendu pour ${Math.round(refund)} £.`);
+}
+
+function startVehicle(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'vehicle' }>,
+  company: MockCompany,
+): void {
+  const vehicle = findVehicle(world, command.vehicle);
+  if (!vehicle) {
+    addNews(world, 'error', `Démarrage refusé : véhicule #${command.vehicle ?? '?'} introuvable.`);
+    return;
+  }
+  if (vehicle.company !== company.id) {
+    addNews(world, 'error', 'Démarrage refusé : ce véhicule ne vous appartient pas.');
+    return;
+  }
+  if (vehicle.orders.length === 0) {
+    addNews(
+      world,
+      'error',
+      `Véhicule #${vehicle.id} : ajoutez au moins une gare ou un dépôt à sa tournée avant de le démarrer.`,
+    );
+    return;
+  }
+  if (rebuildRoute(world, vehicle)) {
+    addNews(
+      world,
+      'info',
+      `Véhicule #${vehicle.id} démarré : ${vehicle.orders.length} ordre(s) au programme.`,
+    );
+  }
+}
+
+function stopVehicle(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'vehicle' }>,
+  company: MockCompany,
+): void {
+  const vehicle = findVehicle(world, command.vehicle);
+  if (!vehicle) {
+    addNews(world, 'error', `Arrêt refusé : véhicule #${command.vehicle ?? '?'} introuvable.`);
+    return;
+  }
+  if (vehicle.company !== company.id) {
+    addNews(world, 'error', 'Arrêt refusé : ce véhicule ne vous appartient pas.');
+    return;
+  }
+  vehicle.status = 0;
+  vehicle.waitTicks = 0;
+  addNews(world, 'info', `Véhicule #${vehicle.id} arrêté.`);
+}
+
+function orderVehicle(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'vehicle' }>,
+  company: MockCompany,
+): void {
+  const vehicle = findVehicle(world, command.vehicle);
+  if (!vehicle) {
+    addNews(world, 'error', `Tournée refusée : véhicule #${command.vehicle ?? '?'} introuvable.`);
+    return;
+  }
+  if (vehicle.company !== company.id) {
+    addNews(world, 'error', 'Tournée refusée : ce véhicule ne vous appartient pas.');
+    return;
+  }
+  const orders = command.orders ?? [];
+  if (orders.length > MAX_VEHICLE_ORDERS) {
+    addNews(
+      world,
+      'error',
+      `Tournée refusée : ${orders.length} ordres (${MAX_VEHICLE_ORDERS} maximum).`,
+    );
+    return;
+  }
+  const resolved = resolveOrders(
+    world,
+    orders.map((order) => ({ target: order.target, kind: order.kind })),
+  );
+  if (resolved.error) {
+    addNews(world, 'error', `Tournée refusée : ${resolved.error}`);
+    return;
+  }
+  vehicle.orders = orders.map((order) => ({ target: order.target, kind: order.kind }));
+  vehicle.orderTargets = vehicle.orders.map((order) => order.target);
+  // Un véhicule déjà en route suit immédiatement sa nouvelle tournée ; un
+  // véhicule à l'arrêt ou en dépôt garde sa position jusqu'au démarrage.
+  if (vehicle.status === 1 || vehicle.status === 2) rebuildRoute(world, vehicle);
+  addNews(world, 'info', `Tournée du véhicule #${vehicle.id} : ${vehicle.orders.length} ordre(s).`);
+}
+
+/**
+ * Applique une commande véhicule. Comme la construction, le mock valide tout
+ * avant de modifier l'état : une commande refusée ne touche ni la trésorerie
+ * ni les véhicules et publie une news d'erreur lisible par le HUD.
+ */
+function applyVehicle(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'vehicle' }>,
+): void {
+  const company = world.companies[command.company];
+  if (!company) {
+    addNews(world, 'error', `Véhicules : entreprise #${command.company} inconnue.`);
+    return;
+  }
+  if (company.bankrupt) {
+    addNews(world, 'error', 'Véhicules : votre entreprise est en faillite.');
+    return;
+  }
+  switch (command.action) {
+    case 'buy':
+      buyVehicle(world, command, company);
+      break;
+    case 'sell':
+      sellVehicle(world, command, company);
+      break;
+    case 'start':
+      startVehicle(world, command, company);
+      break;
+    case 'stop':
+      stopVehicle(world, command, company);
+      break;
+    case 'order':
+      orderVehicle(world, command, company);
+      break;
+    case 'refit':
+      addNews(world, 'warning', 'Le refit de cargaison n’est pas encore supporté (#29).');
+      break;
+    default:
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Simulation
 // ---------------------------------------------------------------------------
 
@@ -1626,6 +2043,9 @@ function vehicleDepart(world: MockWorld, vehicle: MockVehicle, stationId: number
 }
 
 function moveVehicle(world: MockWorld, vehicle: MockVehicle): void {
+  // 0 = arrêté par le joueur, 3 = en dépôt : le véhicule ne bouge pas.
+  if (vehicle.status === 0 || vehicle.status === 3) return;
+  if (vehicle.path.length < 2) return;
   if (vehicle.waitTicks > 0) {
     vehicle.waitTicks -= 1;
     if (vehicle.waitTicks === 0) {
@@ -1797,6 +2217,8 @@ function serializeWorld(world: MockWorld): SerializedWorld {
       id: vehicle.id,
       kind: vehicle.kind,
       company: vehicle.company,
+      model: vehicle.model,
+      homeDepot: vehicle.homeDepot,
       path: vehicle.path,
       segment: vehicle.segment,
       segmentT: vehicle.segmentT,
@@ -1812,6 +2234,7 @@ function serializeWorld(world: MockWorld): SerializedWorld {
       cargoAmount: vehicle.cargoAmount,
       cargoCapacity: vehicle.cargoCapacity,
       orderTargets: vehicle.orderTargets,
+      orders: vehicle.orders,
       profitLastYear: vehicle.profitLastYear,
       ageDays: vehicle.ageDays,
     })),
@@ -2017,8 +2440,7 @@ export class MockEngine implements EngineDriver {
         applyBuild(world, command);
         break;
       case 'vehicle':
-        // Achat/ordres de véhicules : arrive avec la vague suivante (#29).
-        addNews(world, 'warning', 'Gestion des véhicules : disponible avec l’issue #29.');
+        applyVehicle(world, command);
         break;
       default:
         break;
@@ -2056,12 +2478,18 @@ export class MockEngine implements EngineDriver {
     }
     for (const vehicle of world.vehicles) {
       hash.mixInt(vehicle.id);
+      hash.mixString(vehicle.model);
       hash.mixFloat(vehicle.x);
       hash.mixFloat(vehicle.y);
       hash.mixFloat(vehicle.z);
       hash.mixInt(vehicle.direction);
       hash.mixInt(vehicle.status);
       hash.mixInt(vehicle.cargoAmount);
+      hash.mixInt(vehicle.orders.length);
+      for (const order of vehicle.orders) {
+        hash.mixInt(order.target);
+        hash.mixString(order.kind);
+      }
     }
     // La carte fait partie de l'état : une construction doit changer le hash
     // pour que le lockstep détecte une divergence de terrain.
@@ -2129,6 +2557,15 @@ export class MockEngine implements EngineDriver {
     };
     world.vehicles = saved.vehicles.map((vehicle) => ({
       ...vehicle,
+      model: vehicle.model ?? '',
+      homeDepot: vehicle.homeDepot ?? null,
+      orders:
+        vehicle.orders && vehicle.orders.length > 0
+          ? vehicle.orders.map((order) => ({ ...order }))
+          : (vehicle.orderTargets ?? []).map((target) => ({
+              target,
+              kind: 'station' as const,
+            })),
       pathLengths: computePathLengths(vehicle.path),
     }));
     this.world = world;
