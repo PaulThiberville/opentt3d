@@ -23,6 +23,7 @@ import { Picking, type PickResult } from './Picking';
 import { SignalLayer } from './SignalLayer';
 import { SurroundingsLayer } from './SurroundingsLayer';
 import { TerrainLayer } from './TerrainLayer';
+import { TownPropsLayer } from './TownPropsLayer';
 import { TrackLayer } from './TrackLayer';
 import { VegetationLayer } from './VegetationLayer';
 import { VehicleLayer } from './VehicleLayer';
@@ -71,6 +72,7 @@ export class WorldView {
   readonly terrain = new TerrainLayer();
   readonly tracks = new TrackLayer();
   readonly cityLayer = new CityLayer();
+  readonly townProps = new TownPropsLayer();
   readonly industries = new IndustryLayer();
   readonly vegetation = new VegetationLayer();
   readonly vehicles = new VehicleLayer();
@@ -136,6 +138,7 @@ export class WorldView {
     this.scene.add(this.terrain.group);
     this.scene.add(this.tracks.group);
     this.scene.add(this.cityLayer.group);
+    this.scene.add(this.townProps.group);
     this.scene.add(this.industries.group);
     this.scene.add(this.vegetation.group);
     this.scene.add(this.vehicles.group);
@@ -187,6 +190,7 @@ export class WorldView {
       }
       this.currentMap = map;
       this.cityLayer.build(snapshot.towns, map);
+      this.townProps.build(snapshot.towns, map, this.quality);
       this.industries.build(snapshot.industries, map, this.quality);
       this.vegetation.build(map, this.quality);
       this.signals.setMap(map);
@@ -222,6 +226,7 @@ export class WorldView {
     this.catenary.setNight(amount);
     this.vehicles.setNight(amount);
     this.cityLayer.setNight(amount);
+    this.townProps.setNight(amount);
     this.industries.setNight(amount);
     this.depots.setNight(amount);
     this.infrastructure.setNight(amount);
@@ -279,6 +284,7 @@ export class WorldView {
     this.tracks.update(this.camera.position);
     this.vegetation.update(deltaSeconds, this.camera.position);
     this.cityLayer.update(this.camera.position);
+    this.townProps.update(this.camera.position);
     this.industries.update(deltaSeconds, this.camera.position);
     this.atmosphere.update(deltaSeconds, this.camera.position, this.dayNight.phase);
     this.surroundings.update(deltaSeconds);
@@ -467,6 +473,9 @@ export class WorldView {
     this.cityLayer.setQuality(level);
     this.cityLayer.setShadows(level === 'high');
     this.cityLayer.setNightLights(qualitySettings(level).nightWindows);
+    this.townProps.setQuality(level);
+    this.townProps.setShadows(level === 'high');
+    this.townProps.setNightLights(qualitySettings(level).nightWindows);
     this.vehicles.setShadows(level === 'high');
     this.vehicles.setQuality(level);
     this.industries.setShadows(level === 'high');
@@ -538,6 +547,7 @@ export class WorldView {
     return (
       this.vehicles.drawCallCount +
       this.cityLayer.drawCallCount +
+      this.townProps.drawCallCount +
       this.vegetation.drawCallCount +
       this.industries.drawCallCount +
       this.depots.drawCallCount +
@@ -568,6 +578,7 @@ export class WorldView {
     this.scene.remove(this.terrain.group);
     this.scene.remove(this.tracks.group);
     this.scene.remove(this.cityLayer.group);
+    this.scene.remove(this.townProps.group);
     this.scene.remove(this.industries.group);
     this.scene.remove(this.vegetation.group);
     this.scene.remove(this.vehicles.group);
@@ -580,6 +591,7 @@ export class WorldView {
     this.terrain.dispose();
     this.tracks.dispose();
     this.cityLayer.dispose();
+    this.townProps.dispose();
     this.industries.dispose();
     this.vegetation.dispose();
     this.vehicles.dispose();

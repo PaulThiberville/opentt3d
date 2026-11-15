@@ -2,10 +2,12 @@
  * Rendu des villes, gares et dépôts de ville.
  *
  * Les bâtiments ne sont plus des boîtes uniformes : chaque tuile `house` reçoit
- * un archétype (maison, immeuble, commerce, église, entrepôt) construit par
- * `models/buildings.ts`. Les géométries sont fusionnées par archétype et
- * variante, puis posées par `InstancedMesh` : le nombre de draw calls dépend
- * des archétypes, pas du nombre de bâtiments.
+ * un archétype (maison, mitoyenne, immeuble, commerce, bureaux, église,
+ * entrepôt, édifice public) construit par `models/buildings.ts`. Les géométries
+ * sont fusionnées par archétype et variante, puis posées par `InstancedMesh` :
+ * le nombre de draw calls dépend des archétypes (16 au plus), pas du nombre de
+ * bâtiments. La palette de chaque quartier module la teinte d'instance sans
+ * créer de géométrie supplémentaire.
  *
  * LOD : les villes proches gardent la silhouette détaillée (fenêtres, portes,
  * cheminées, auvents) ; au-delà d'un seuil lié à la qualité, leurs bâtiments
@@ -25,7 +27,7 @@ import { companyColour, hexToRgb } from './tileVisuals';
 import { qualitySettings, type QualityLevel } from './quality';
 import { createModelMaterial } from './models/materials';
 import {
-  BUILDING_VARIANTS,
+  buildingVariantCount,
   chooseBuildingArchetype,
   createBuildingGeometry,
   createDistantBuildingGeometry,
@@ -59,6 +61,10 @@ interface Placement {
   tint: number;
   /** Dérive chaude/froide de la teinte, pour casser l'uniformité. */
   warmth: number;
+  /** Palette du quartier (facteurs RGB appliqués à la teinte d'instance). */
+  districtR: number;
+  districtG: number;
+  districtB: number;
   /** Vide à combler sous le bâtiment quand la tuile est en pente. */
   plinthHeight: number;
   plinthWidth: number;
@@ -96,9 +102,8 @@ export class CityLayer {
   private buckets: THREE.InstancedMesh[] = [];
   private bucketByKey = new Map<string, THREE.InstancedMesh>();
   private farBucket: THREE.InstancedMesh | null = null;
-  private dirtyKeys = new Set<string>();
   private allDirty = true;
-  private farDirty = true;
+  private bucketSignatures = new Map<THREE.InstancedMesh, number>();
   private bucketTownIds = new Map<THREE.InstancedMesh, number[]>();
   private geometryCache = new Map<string, THREE.BufferGeometry>();
   private distantGeometry: THREE.BufferGeometry | null = null;
@@ -194,10 +199,12 @@ export class CityLayer {
             hasChurch,
           });
           if (archetype === 'church') hasChurch = true;
+          const variantCount = buildingVariantCount(archetype);
           const variant = Math.min(
-            BUILDING_VARIANTS - 1,
-            Math.floor(hashUnit2d(town.id * 17 + 3, x + 13, y + 7) * BUILDING_VARIANTS),
+            variantCount - 1,
+            Math.floor(hashUnit2d(town.id * 17 + 3, x + 13, y + 7) * variantCount),
           );
+          const district = districtPalette(town.id, centerX, centerY, x, y);
           const worldX = x + 0.5;
           const worldZ = y + 0.5;
           placements.push({
@@ -213,6 +220,9 @@ export class CityLayer {
             scaleZ: rng.float(0.92, 1),
             tint: rng.float(0.9, 1.05),
             warmth: rng.float(-0.018, 0.018),
+            districtR: district[0],
+            districtG: district[1],
+            districtB: district[2],
             plinthHeight: 0,
             plinthWidth: 0.7,
             plinthDepth: 0.7,
@@ -333,7 +343,6 @@ export class CityLayer {
     }
     if (this.towns.size > 0) {
       this.allDirty = true;
-      this.farDirty = true;
       this.applyBuckets();
     }
     if (this.stationStations.length > 0) {
@@ -371,24 +380,13 @@ export class CityLayer {
       if (near === town.near) continue;
       town.near = near;
       this.lodSwitches += 1;
-      this.markTownDirty(town);
       changed = true;
     }
     if (changed) this.applyBuckets();
   }
 
-  /** Marque les lots touchés par une ville qui change d'état. */
-  private markTownDirty(town: TownState): void {
-    for (const placement of town.placements) {
-      this.dirtyKeys.add(`${placement.archetype}:${placement.variant}`);
-    }
-    this.farDirty = true;
-  }
-
   private applyBuckets(): void {
     const rebuildAll = this.allDirty;
-    const dirtyKeys = new Set(this.dirtyKeys);
-    this.dirtyKeys.clear();
     this.allDirty = false;
     this.bucketRebuilds = 0;
 
@@ -410,7 +408,12 @@ export class CityLayer {
     }
 
     for (const [key, placements] of nearBuckets) {
-      if (!rebuildAll && this.bucketByKey.has(key) && !dirtyKeys.has(key)) continue;
+      // Une bascule de LOD ne réinstancie que les lots dont le contenu change
+      // réellement : les lots partagés avec des villes restées proches gardent
+      // leur InstancedMesh.
+      const signature = bucketSignature(placements);
+      const existing = this.bucketByKey.get(key);
+      if (!rebuildAll && existing && this.bucketSignatures.get(existing) === signature) continue;
       this.removeBucket(key);
       const [archetypeName, variantText] = key.split(':');
       const archetype = (archetypeName ?? 'house') as BuildingArchetype;
@@ -418,6 +421,7 @@ export class CityLayer {
       const geometry = this.geometryFor(archetype, variant, this.detail);
       const mesh = this.createBucket(geometry, placements, `city-${key}`);
       this.bucketByKey.set(key, mesh);
+      this.bucketSignatures.set(mesh, signature);
     }
 
     for (const key of [...this.bucketByKey.keys()]) {
@@ -425,14 +429,16 @@ export class CityLayer {
     }
 
     if (far.length > 0) {
-      if (rebuildAll || this.farDirty || !this.farBucket) {
+      const signature = bucketSignature(far);
+      const existing = this.farBucket;
+      if (rebuildAll || !existing || this.bucketSignatures.get(existing) !== signature) {
         this.removeFarBucket();
         this.farBucket = this.createBucket(this.distantGeometryFor(), far, 'city-far');
+        this.bucketSignatures.set(this.farBucket, signature);
       }
     } else {
       this.removeFarBucket();
     }
-    this.farDirty = false;
 
     this.buckets = [...this.bucketByKey.values()];
     if (this.farBucket) this.buckets.push(this.farBucket);
@@ -454,6 +460,7 @@ export class CityLayer {
   private removeBucketMesh(mesh: THREE.InstancedMesh): void {
     this.group.remove(mesh);
     this.bucketTownIds.delete(mesh);
+    this.bucketSignatures.delete(mesh);
     mesh.dispose();
   }
 
@@ -463,6 +470,7 @@ export class CityLayer {
     this.removeFarBucket();
     this.buckets = [];
     this.bucketTownIds.clear();
+    this.bucketSignatures.clear();
   }
 
   private createBucket(
@@ -486,9 +494,9 @@ export class CityLayer {
       this.matrix.compose(this.position, this.quaternion, this.scale);
       mesh.setMatrixAt(index, this.matrix);
       this.colour.setRGB(
-        placement.tint * (1 + placement.warmth),
-        placement.tint * 0.995,
-        placement.tint * (0.975 - placement.warmth),
+        clampColour(placement.tint * (1 + placement.warmth) * placement.districtR),
+        clampColour(placement.tint * 0.995 * placement.districtG),
+        clampColour(placement.tint * (0.975 - placement.warmth) * placement.districtB),
       );
       mesh.setColorAt(index, this.colour);
       townIds.push(placement.townId);
@@ -758,9 +766,7 @@ export class CityLayer {
     this.towns.clear();
     this.clearPlinths();
     this.clearStations();
-    this.dirtyKeys.clear();
     this.allDirty = true;
-    this.farDirty = true;
   }
 
   private clearStations(): void {
@@ -813,8 +819,69 @@ export class CityLayer {
   }
 }
 
-/** Empreinte stable des villes + tuiles house + hauteurs + détail. */
-export function computeCitySignature(
+/**
+ * Signature bon marché du contenu d'un lot : identité des placements qui le
+ * composent. Elle évite de réinstancier un lot dont aucune instance n'a changé.
+ */
+function bucketSignature(placements: readonly Placement[]): number {
+  let hash = 0x811c9dc5;
+  for (const placement of placements) {
+    hash = Math.imul(hash ^ placement.townId, 0x01000193) >>> 0;
+    hash = Math.imul(hash ^ Math.round(placement.x * 512), 0x01000193) >>> 0;
+    hash = Math.imul(hash ^ Math.round(placement.z * 512), 0x01000193) >>> 0;
+    hash = Math.imul(hash ^ Math.round(placement.ground * 512), 0x01000193) >>> 0;
+  }
+  return Math.imul(hash ^ placements.length, 0x01000193) >>> 0;
+}
+
+/**
+ * Palettes de quartier : facteurs RGB appliqués à la teinte d'instance.
+ *
+ * Les géométries restent mutualisées (16 lots) ; c'est la couleur d'instance
+ * qui donne à chaque secteur de la ville son ambiance (tuiles chaudes, enduits
+ * crème, façades froides). Un quartier regroupe plusieurs dizaines de tuiles :
+ * la variation est visible sans transformer chaque maison en exception.
+ */
+const DISTRICT_PALETTES: readonly (readonly [number, number, number])[] = [
+  [1.045, 1.0, 0.935],
+  [1.0, 0.985, 1.05],
+  [1.05, 1.02, 0.97],
+  [1.02, 0.955, 0.95],
+  [0.955, 1.04, 1.0],
+  [0.975, 1.0, 1.055],
+  [1.02, 1.03, 1.01],
+  [1.035, 0.99, 1.02],
+];
+
+/** Secteur (8 quartiers) d'une tuile autour du centre-ville. */
+export function districtIndex(centreX: number, centreZ: number, x: number, z: number): number {
+  const dx = x - centreX;
+  const dz = z - centreZ;
+  const angle = Math.atan2(dz, dx);
+  const sector = Math.min(3, Math.max(0, Math.floor((angle + Math.PI) / (Math.PI / 2))));
+  const ring = Math.hypot(dx, dz) > MAX_RADIUS * 0.42 ? 1 : 0;
+  return ring * 4 + sector;
+}
+
+/** Facteurs RGB du quartier, déterministes pour une ville et un secteur. */
+export function districtPalette(
+  townId: number,
+  centreX: number,
+  centreZ: number,
+  x: number,
+  z: number,
+): readonly [number, number, number] {
+  const index = districtIndex(centreX, centreZ, x, z);
+  const hash = hashUnit2d(townId * 59 + 17, index, 3);
+  const palette = DISTRICT_PALETTES[Math.floor(hash * DISTRICT_PALETTES.length)] ?? [1, 1, 1];
+  return palette;
+}
+
+function clampColour(value: number): number {
+  return Math.max(0, Math.min(1.08, value));
+}
+
+/** Empreinte stable des villes + tuiles house + hauteurs + détail. */ export function computeCitySignature(
   towns: readonly TownSnapshot[],
   map: MapSnapshot,
   detail: BuildingDetail,
