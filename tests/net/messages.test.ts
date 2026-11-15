@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  JOIN_CHANNELS,
+  JOIN_PROTOCOL_VERSION,
   NET_PROTOCOL_VERSION,
   isAckMessage,
   isChannelName,
@@ -8,6 +10,11 @@ import {
   isEngineCommand,
   isHashMessage,
   isHelloMessage,
+  isJoinAcceptMessage,
+  isJoinChunkMessage,
+  isJoinReadyMessage,
+  isJoinRejectMessage,
+  isJoinRequestMessage,
   isResyncMessage,
   isTurnMessage,
   isTurnCommand,
@@ -137,5 +144,90 @@ describe('guards du protocole réseau', () => {
     expect(validateChannelMessage('hello', hello)?.k).toBe('hello');
     expect(validateChannelMessage('turn', hello)).toBeNull();
     expect(validateChannelMessage('unknown', hello)).toBeNull();
+  });
+
+  it('valide les messages de join en cours de partie', () => {
+    const request = {
+      ...base,
+      k: 'join-request',
+      pv: JOIN_PROTOCOL_VERSION,
+      player: 2,
+      name: 'Alice',
+    };
+    expect(isJoinRequestMessage(request)).toBe(true);
+    expect(isJoinRequestMessage({ ...request, pv: JOIN_PROTOCOL_VERSION + 1 })).toBe(false);
+    expect(isJoinRequestMessage({ ...request, player: 64 })).toBe(false);
+    expect(isJoinRequestMessage({ ...request, name: 'x'.repeat(25) })).toBe(false);
+    expect(isJoinRequestMessage({ ...request, engine: 42 })).toBe(false);
+
+    const accept = {
+      ...base,
+      k: 'join-accept',
+      epoch: 3,
+      tick: 500,
+      total: 2,
+      player: 2,
+      id: 'join-500-1',
+      hash: '500:abcdef',
+      engine: 'build-a',
+    };
+    expect(isJoinAcceptMessage(accept)).toBe(true);
+    expect(isJoinAcceptMessage({ ...accept, total: 0 })).toBe(false);
+    expect(isJoinAcceptMessage({ ...accept, tick: -1 })).toBe(false);
+    expect(isJoinAcceptMessage({ ...accept, player: 64 })).toBe(false);
+    expect(isJoinAcceptMessage({ ...accept, id: '' })).toBe(false);
+
+    const chunk = {
+      ...base,
+      k: 'join-chunk',
+      epoch: 3,
+      tick: 500,
+      save: { id: 'join-500-1', index: 1, total: 2, data: '{}' },
+    };
+    expect(isJoinChunkMessage(chunk)).toBe(true);
+    expect(
+      isJoinChunkMessage({
+        ...chunk,
+        save: { id: 'join-500-1', index: 2, total: 2, data: '{}' },
+      }),
+    ).toBe(false);
+    expect(
+      isJoinChunkMessage({
+        ...chunk,
+        save: { id: 'join-500-1', index: 0, total: 2, data: 'x'.repeat(32 * 1024 + 1) },
+      }),
+    ).toBe(false);
+
+    expect(
+      isJoinReadyMessage({ ...base, k: 'join-ready', tick: 500, hash: '500:abcdef', ok: true }),
+    ).toBe(true);
+    expect(
+      isJoinReadyMessage({
+        ...base,
+        k: 'join-ready',
+        tick: 500,
+        hash: '',
+        ok: false,
+        error: 'sauvegarde illisible',
+      }),
+    ).toBe(true);
+    expect(isJoinReadyMessage({ ...base, k: 'join-ready', tick: 500, hash: 42 })).toBe(false);
+
+    expect(
+      isJoinRejectMessage({
+        ...base,
+        k: 'join-reject',
+        reason: 'invalid-save',
+        message: 'La sauvegarde est invalide.',
+      }),
+    ).toBe(true);
+    expect(isJoinRejectMessage({ ...base, k: 'join-reject', reason: 'unknown-reason' })).toBe(
+      false,
+    );
+
+    expect(validateChannelMessage(JOIN_CHANNELS.request, request)?.k).toBe('join-request');
+    expect(validateChannelMessage(JOIN_CHANNELS.accept, accept)?.k).toBe('join-accept');
+    expect(validateChannelMessage(JOIN_CHANNELS.chunk, chunk)?.k).toBe('join-chunk');
+    expect(validateChannelMessage(JOIN_CHANNELS.reject, request)).toBeNull();
   });
 });
