@@ -1123,6 +1123,41 @@ const char *StationKindName(const Station *st)
 	return "train";
 }
 
+/**
+ * Type de dépôt exposé par le protocole (`road` ou `rail`), ou `nullptr` pour
+ * les dépôts non couverts en v1 (maritime, hangar d'aéroport).
+ */
+const char *DepotKindName(TileIndex tile)
+{
+	switch (GetTileType(tile)) {
+		case MP_ROAD:    return "road";
+		case MP_RAILWAY: return "rail";
+		default:         return nullptr;
+	}
+}
+
+/**
+ * Direction d'entrée d'un dépôt routier ou ferroviaire (0..3, `DiagDirection` :
+ * 0 = NE, 1 = SE, 2 = SW, 3 = NW).
+ */
+uint8_t DepotDirection(TileIndex tile)
+{
+	if (GetTileType(tile) == MP_ROAD) {
+		return static_cast<uint8_t>(GetRoadDepotDirection(tile));
+	}
+	return static_cast<uint8_t>(GetRailDepotDirection(tile));
+}
+
+/** Nombre de dépôts route/rail, c'est-à-dire ceux exposés dans `depots`. */
+uint32_t CountProtocolDepots()
+{
+	uint32_t count = 0;
+	for (const Depot *d : Depot::Iterate()) {
+		if (DepotKindName(d->xy) != nullptr) count++;
+	}
+	return count;
+}
+
 /** Sérialise les entités et l'économie dans `out` (JSON, sans la carte). */
 void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 {
@@ -1141,6 +1176,7 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 	const uint32_t towns = static_cast<uint32_t>(Town::GetNumItems());
 	const uint32_t industries = static_cast<uint32_t>(Industry::GetNumItems());
 	const uint32_t stations = static_cast<uint32_t>(Station::GetNumItems());
+	const uint32_t depots = CountProtocolDepots();
 
 	/* Compteurs par entreprise, alignés sur la liste de véhicules émise
 	 * (un train = une rame, pas un wagon). */
@@ -1160,7 +1196,8 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 		if (owner < MAX_COMPANIES) company_stations[owner]++;
 	}
 
-	out.reserve(4096 + companies * 256 + towns * 160 + industries * 256 + stations * 256 + vehicles * 256);
+	out.reserve(4096 + companies * 256 + towns * 160 + industries * 256 + stations * 256 +
+			depots * 128 + vehicles * 256);
 
 	out += fmt::format(
 		"{{\"meta\":{{\"protocol\":1,\"tick\":{},\"hash\":\"0x{:016x}\",\"sequence\":{}}},"
@@ -1172,8 +1209,9 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 		static_cast<unsigned>(OTTD_MAP_LAYER_COUNT));
 
 	out += fmt::format(
-		"\"counts\":{{\"companies\":{},\"towns\":{},\"industries\":{},\"stations\":{},\"vehicles\":{}}},",
-		companies, towns, industries, stations, vehicles);
+		"\"counts\":{{\"companies\":{},\"towns\":{},\"industries\":{},\"stations\":{},\"depots\":{},"
+		"\"vehicles\":{}}},",
+		companies, towns, industries, stations, depots, vehicles);
 
 	/* --- Configuration appliquée (issue #60) ------------------------------ */
 	const GameSetupConfig &active = _ottd_active_config;
@@ -1332,6 +1370,27 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 			out += fmt::format(",\"amount\":{}}}", waiting);
 		}
 		out += "]}";
+	}
+	out.push_back(']');
+
+	/* --- Dépôts route/rail ------------------------------------------------- */
+	/* `id` est l'index du pool OpenTTD (`DepotID`) : il reste stable tant que
+	 * le dépôt existe et sert directement aux ordres `vehicle.order`
+	 * (`kind: "depot"`). Les dépôts maritimes et hangars sont omis en v1. */
+	out += ",\"depots\":[";
+	first = true;
+	for (const Depot *d : Depot::Iterate()) {
+		const char *kind = DepotKindName(d->xy);
+		if (kind == nullptr) continue;
+
+		if (!first) out.push_back(',');
+		first = false;
+
+		out += fmt::format(
+			"{{\"id\":{},\"company\":{},\"kind\":\"{}\",\"x\":{},\"y\":{},\"direction\":{},"
+			"\"width\":1,\"height\":1}}",
+			d->index.base(), ProtocolOwner(GetTileOwner(d->xy)), kind,
+			TileX(d->xy), TileY(d->xy), DepotDirection(d->xy));
 	}
 	out.push_back(']');
 
