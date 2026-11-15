@@ -51,6 +51,19 @@ export interface CameraControllerOptions {
   onDoubleClick?: (ndc: { x: number; y: number }) => void;
 }
 
+/**
+ * Mode placement d'un outil (construction). Quand il est actif, le clic gauche
+ * et son drag appartiennent à l'outil ; le pan reste disponible au bouton
+ * milieu, l'orbite au bouton droit ou Alt + gauche. Un clic droit pendant le
+ * drag annule le tracé au lieu de démarrer une orbite.
+ */
+export interface PlacementHandlers {
+  begin(ndc: { x: number; y: number }): void;
+  move(ndc: { x: number; y: number }): void;
+  end(ndc: { x: number; y: number }): void;
+  cancel(): void;
+}
+
 interface DragState {
   mode: 'orbit' | 'pan';
   pointerId: number;
@@ -63,6 +76,9 @@ const KEY_LEFT = new Set(['ArrowLeft', 'KeyA']);
 const KEY_RIGHT = new Set(['ArrowRight', 'KeyD']);
 const KEY_UP = new Set(['ArrowUp', 'KeyW']);
 const KEY_DOWN = new Set(['ArrowDown', 'KeyS']);
+
+/** Bit `MouseEvent.buttons` du bouton droit (gauche = 1, droit = 2). */
+const POINTER_BUTTON_RIGHT = 2;
 
 export class CameraController {
   private camera: THREE.PerspectiveCamera;
@@ -89,6 +105,8 @@ export class CameraController {
 
   private onClick?: (ndc: { x: number; y: number }) => void;
   private onDoubleClick?: (ndc: { x: number; y: number }) => void;
+  private placement: PlacementHandlers | null = null;
+  private placementPointerId: number | null = null;
 
   constructor(options: CameraControllerOptions) {
     this.camera = options.camera;
@@ -153,6 +171,7 @@ export class CameraController {
     window.removeEventListener('blur', this.handleBlur);
     this.keys.clear();
     this.drag = null;
+    this.placementPointerId = null;
   }
 
   setBounds(bounds: MapBounds): void {
@@ -197,6 +216,26 @@ export class CameraController {
   setFollowTarget(provider: (() => { x: number; z: number } | null) | null, distance = 16): void {
     this.follow = provider;
     this.followDistance = clamp(distance, this.minDistance, this.maxDistance);
+  }
+
+  /**
+   * Active ou coupe le mode placement. Le curseur devient une croix et le clic
+   * gauche est réservé à l'outil ; `dispose()` ou `setPlacement(null)` rend le
+   * comportement de sélection habituel.
+   */
+  setPlacement(handlers: PlacementHandlers | null): void {
+    this.placement = handlers;
+    this.placementPointerId = null;
+    this.element.style.cursor = handlers ? 'crosshair' : '';
+  }
+
+  isPlacementEnabled(): boolean {
+    return this.placement !== null;
+  }
+
+  /** Un drag de construction est-il en cours ? */
+  isPlacing(): boolean {
+    return this.placementPointerId !== null;
   }
 
   isFollowing(): boolean {
@@ -344,9 +383,31 @@ export class CameraController {
   }
 
   private handlePointerDown = (event: PointerEvent): void => {
+    // Un clic droit pendant un drag de construction annule le tracé ; sans drag
+    // actif, il conserve son rôle d'orbite.
+    if (event.button === 2 && this.placement && this.placementPointerId !== null) {
+      event.preventDefault();
+      this.element.releasePointerCapture?.(this.placementPointerId);
+      this.placementPointerId = null;
+      this.placement.cancel();
+      return;
+    }
+
     const orbit = event.button === 2 || (event.button === 0 && event.altKey);
     const pan = event.button === 1 || (event.button === 0 && !event.altKey);
     if (!orbit && !pan) return;
+
+    // Mode placement : le clic gauche appartient à l'outil, sauf si un drag
+    // caméra (milieu / droit / Alt) est déjà engagé.
+    if (this.placement && !this.drag && event.button === 0 && !event.altKey) {
+      event.preventDefault();
+      this.placementPointerId = event.pointerId;
+      this.follow = null;
+      this.element.setPointerCapture?.(event.pointerId);
+      this.placement.begin(this.ndcForEvent(event.clientX, event.clientY));
+      return;
+    }
+
     event.preventDefault();
     this.drag = {
       mode: orbit ? 'orbit' : 'pan',
@@ -366,6 +427,22 @@ export class CameraController {
     this.lastPointerY = event.clientY;
     this.hoverNdc = this.ndcForEvent(event.clientX, event.clientY);
     this.hoverDirty = true;
+
+    if (this.placement && this.placementPointerId !== null) {
+      // Certains navigateurs (Chrome sous capture de pointeur) signalent un
+      // clic droit pendant un drag gauche par un `pointermove` avec
+      // `buttons & 2`, pas par un `pointerdown`. On annule donc ici aussi.
+      if ((event.buttons & POINTER_BUTTON_RIGHT) !== 0) {
+        this.element.releasePointerCapture?.(this.placementPointerId);
+        this.placementPointerId = null;
+        this.placement.cancel();
+        return;
+      }
+      if (this.placementPointerId === event.pointerId) {
+        this.placement.move(this.hoverNdc);
+        return;
+      }
+    }
 
     const drag = this.drag;
     if (!drag || drag.pointerId !== event.pointerId) return;
@@ -387,10 +464,17 @@ export class CameraController {
   };
 
   private handlePointerUp = (event: PointerEvent): void => {
+    if (this.placement && this.placementPointerId === event.pointerId) {
+      this.element.releasePointerCapture?.(event.pointerId);
+      this.placementPointerId = null;
+      this.placement.end(this.ndcForEvent(event.clientX, event.clientY));
+      return;
+    }
+
     const drag = this.drag;
     if (!drag || drag.pointerId !== event.pointerId) return;
     this.element.releasePointerCapture?.(event.pointerId);
-    this.element.style.cursor = '';
+    this.element.style.cursor = this.placement ? 'crosshair' : '';
     if (drag.mode === 'pan' && drag.moved < 6 && event.button === 0) {
       this.onClick?.(this.ndcForEvent(event.clientX, event.clientY));
     }
@@ -411,6 +495,8 @@ export class CameraController {
   };
 
   private handleDoubleClick = (event: MouseEvent): void => {
+    // En construction, le double-clic ne doit pas voler le focus caméra.
+    if (this.placement) return;
     const ndc = this.ndcForEvent(event.clientX, event.clientY);
     this.onDoubleClick?.(ndc);
   };
@@ -458,10 +544,15 @@ export class CameraController {
   private handleBlur = (): void => {
     this.keys.clear();
     this.drag = null;
+    if (this.placementPointerId !== null) {
+      this.placementPointerId = null;
+      this.placement?.cancel();
+    }
   };
 
   dispose(): void {
     this.detach();
+    this.placement = null;
     this.follow = null;
     this.onClick = undefined;
     this.onDoubleClick = undefined;

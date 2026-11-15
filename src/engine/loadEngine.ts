@@ -58,6 +58,9 @@ export interface EmscriptenModule {
   _ottd_hash(): number | bigint;
   _ottd_snapshot_json(out: number, capacity: number): number;
   _ottd_snapshot_map(out: number, capacity: number): number;
+  _ottd_command?(jsonPointer: number, out: number, capacity: number): number;
+  _ottd_command_result?(): number;
+  _ottd_company_id?(): number;
   _ottd_last_error(): number;
   _ottd_shutdown(): void;
   /** Libération optionnelle du runtime Emscripten. */

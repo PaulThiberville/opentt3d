@@ -19,7 +19,8 @@
     "format:check": "prettier --check .",
     "engine:fetch": "bash engine/scripts/fetch.sh",
     "engine:build": "bash engine/scripts/build.sh",
-    "engine:test": "node engine/scripts/smoke.mjs"
+    "engine:test": "node engine/scripts/smoke.mjs",
+    "engine:test:commands": "node engine/scripts/commands.mjs"
   },
   "dependencies": {
     "nostr-tools": "2.26.0",

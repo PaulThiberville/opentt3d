@@ -56,7 +56,25 @@ async function loadFactory() {
 
 const factory = await loadFactory();
 
-async function createInstance(label) {
+/**
+ * Aucun `Backup<T>` d'OpenTTD ne doit rester non restauré : le message
+ * « Backed-up value was not restored! » signale une corruption de contexte
+ * (voir wiki, Moteur-WASM > Commandes).
+ */
+const FORBIDDEN_OUTPUT = /Backed-up value was not restored/i;
+
+function assertNoBackupWarnings(diagnostics, what) {
+  const offenders = [...diagnostics.stdout, ...diagnostics.stderr].filter((line) =>
+    FORBIDDEN_OUTPUT.test(line),
+  );
+  if (offenders.length > 0) {
+    fail(
+      `${what} : ${offenders.length} avertissement(s) « Backed-up value was not restored » (${offenders[0]})`,
+    );
+  }
+}
+
+async function createInstance(label, diagnostics = { stdout: [], stderr: [] }) {
   const engine = await factory({
     // Les fichiers .wasm/.data sont copiés à côté du .js.
     locateFile: (file) => path.join(ARTIFACT_DIR, file),
@@ -68,8 +86,12 @@ async function createInstance(label) {
       const data = fs.readFileSync(file);
       return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
     },
-    print: VERBOSE ? (line) => console.log(`[${label}] ${line}`) : () => {},
+    print: (line) => {
+      diagnostics.stdout.push(line);
+      if (VERBOSE) console.log(`[${label}] ${line}`);
+    },
     printErr: (line) => {
+      diagnostics.stderr.push(line);
       if (VERBOSE) console.error(`[${label}] ${line}`);
     },
   });
@@ -136,7 +158,8 @@ function waitForMap(api, width, height) {
 
 async function run(label) {
   const started = Date.now();
-  const api = wrap(await createInstance(label));
+  const diagnostics = { stdout: [], stderr: [] };
+  const api = wrap(await createInstance(label, diagnostics));
 
   const boot = api.boot();
   if (boot !== 0) fail(`ottd_boot() = ${boot} : ${readError(api)}`);
@@ -195,8 +218,9 @@ async function run(label) {
       `industries=${state.counts.industries} mémoire=${memoryMiB} Mio`,
   );
   log(`[${label}] hash=${hash} (total ${elapsed} ms)`);
+  assertNoBackupWarnings(diagnostics, label);
 
-  return { state, hash, api };
+  return { state, hash, api, diagnostics };
 }
 
 log(`Module   : ${MODULE_PATH}`);
@@ -233,7 +257,12 @@ log(
   `[instance-1] 10 000 ticks supplémentaires en ${Date.now() - longStart} ms (tick ${first.api.engine._ottd_tick()})`,
 );
 
+assertNoBackupWarnings(first.diagnostics, 'instance-1 : charge');
+assertNoBackupWarnings(second.diagnostics, 'instance-2 : charge');
+
 // Libération explicite : vérifie `ottd_shutdown` et rend la mémoire au système.
 first.api.engine._ottd_shutdown();
 second.api.engine._ottd_shutdown();
+assertNoBackupWarnings(first.diagnostics, 'instance-1 : arrêt');
+assertNoBackupWarnings(second.diagnostics, 'instance-2 : arrêt');
 log('✅ ottd_shutdown() OK');

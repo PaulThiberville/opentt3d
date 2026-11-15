@@ -87,6 +87,25 @@ export class FakeEngineModule implements EmscriptenModule {
     return this.decoder.decode(this.HEAPU8.subarray(pointer, end));
   }
 
+  stringToUTF8(text: string, pointer: number, maxBytes: number): void {
+    const bytes = this.encoder.encode(text);
+    const count = Math.min(bytes.length, Math.max(0, maxBytes - 1));
+    this.HEAPU8.set(bytes.subarray(0, count), pointer);
+    this.HEAPU8[pointer + count] = 0;
+  }
+
+  lengthBytesUTF8(text: string): number {
+    return this.encoder.encode(text).length;
+  }
+
+  /** Écrit une chaîne dans le heap et renvoie son pointeur (tests). */
+  heapString(text: string): number {
+    const size = this.lengthBytesUTF8(text) + 1;
+    const pointer = this._malloc(size);
+    this.stringToUTF8(text, pointer, size);
+    return pointer;
+  }
+
   ccall(name: string, _returnType: string | null, _argTypes: string[], args: unknown[]): unknown {
     void _returnType;
     void _argTypes;

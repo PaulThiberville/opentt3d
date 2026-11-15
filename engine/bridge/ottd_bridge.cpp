@@ -10,51 +10,87 @@
  * (`GameLoop` + `InputLoop` + `UpdateWindows`) tick par tick, sans timer ni
  * rendu, ce qui garantit un comportement déterministe et testable sous Node.
  *
+ * Depuis #11, le pont expose aussi `ottd_command()` : les intentions
+ * `EngineCommand` (build/vehicle) sont validées puis exécutées via
+ * `Command<CMD_*>::Unsafe`, jamais par mutation directe de la carte.
+ *
  * Licence : GPL v2 (comme OpenTTD).
  */
 
 #include "stdafx.h"
 
 #include "ai/ai_info.hpp"
+#include "articulated_vehicles.h"
 #include "cargotype.h"
 #include "clear_map.h"
+#include "command_func.h"
 #include "company_base.h"
 #include "company_func.h"
 #include "company_type.h"
+#include "core/backup_type.hpp"
 #include "core/random_func.hpp"
 #include "debug.h"
+#include "depot_base.h"
+#include "depot_map.h"
+#include "depot_type.h"
+#include "direction_func.h"
+#include "direction_type.h"
 #include "elrail_func.h"
+#include "engine_base.h"
+#include "engine_func.h"
+#include "engine_type.h"
 #include "gfx_func.h"
 #include "genworld.h"
 #include "industry.h"
 #include "industrytype.h"
 #include "landscape.h"
+#include "landscape_cmd.h"
 #include "landscape_type.h"
 #include "map_func.h"
+#include "newgrf_roadstop.h"
+#include "newgrf_station.h"
 #include "openttd.h"
 #include "order_base.h"
+#include "order_cmd.h"
+#include "order_type.h"
+#include "rail.h"
+#include "rail_cmd.h"
 #include "rail_map.h"
+#include "rail_type.h"
+#include "road.h"
+#include "road_cmd.h"
+#include "road_func.h"
+#include "road_map.h"
+#include "road_type.h"
 #include "settings_type.h"
 #include "station_base.h"
+#include "station_cmd.h"
 #include "station_map.h"
 #include "station_type.h"
 #include "strings_func.h"
+#include "table/strings.h"
 #include "tile_map.h"
 #include "timer/timer_game_calendar.h"
 #include "timer/timer_game_tick.h"
 #include "town.h"
+#include "track_func.h"
+#include "track_type.h"
 #include "tunnelbridge_map.h"
 #include "vehicle_base.h"
+#include "vehicle_cmd.h"
 #include "vehicle_type.h"
 #include "water_map.h"
 #include "window_func.h"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <emscripten.h>
 #include <optional>
 #include <string_view>
+#include <tuple>
+#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -80,6 +116,25 @@ std::string _ottd_error;
 /** Compteurs de séquence indépendants pour les deux formats de snapshot. */
 uint32_t _ottd_json_sequence = 0;
 uint32_t _ottd_map_sequence = 0;
+
+/** Codes de retour de `ottd_command()` (voir wiki, Protocole > Erreurs). */
+enum OttdCommandStatus : int {
+	OTTD_CMD_OK = 0,            ///< Commande exécutée.
+	OTTD_CMD_NO_GAME = 1,       ///< Aucune partie en cours.
+	OTTD_CMD_BAD_JSON = 2,      ///< JSON invalide ou incomplet.
+	OTTD_CMD_UNKNOWN = 3,       ///< Type d'outil ou d'action inconnu.
+	OTTD_CMD_INVALID = 4,       ///< Paramètre hors bornes ou incohérent.
+	OTTD_CMD_BAD_COMPANY = 5,   ///< Entreprise inexistante.
+	OTTD_CMD_FAILED = 6,        ///< Refus d'OpenTTD (état inchangé).
+	OTTD_CMD_BUFFER = 7,        ///< Buffer de sortie trop petit.
+	OTTD_CMD_NOT_SUPPORTED = 8, ///< Commande reconnue mais non supportée.
+};
+
+/** Dernier résultat JSON produit par `ottd_command()` (relu par le pilote). */
+std::string _ottd_last_command_json = "{}";
+/** Statut du dernier `ottd_command()` (même valeur que son retour). */
+int _ottd_last_command_status = OTTD_CMD_OK;
+
 
 void SetError(std::string_view message)
 {
@@ -1335,6 +1390,1425 @@ int StartAiCompanies(int count, std::string &error)
 	return started;
 }
 
+/* ------------------------------------------------------------------------- */
+/*  Commandes de construction et de véhicules (issue #11)                    */
+/* ------------------------------------------------------------------------- */
+
+/* ------------------------------------------------------------------------- */
+/*  JSON générique (commandes)                                               */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Valeur JSON minimale (objet, tableau, chaîne, nombre, booléen, null).
+ *
+ * Le pont n'embarque pas de bibliothèque JSON : cette structure couvre
+ * exactement ce dont `EngineCommand` a besoin (objets imbriqués, tableaux
+ * d'ordres, options typées) avec un parseur strict et sans allocation
+ * superflue.
+ */
+struct JsonValue {
+	enum class Type : uint8_t { Null, Bool, Number, String, Array, Object };
+
+	Type type = Type::Null;
+	bool boolean = false;
+	double number = 0.0;
+	std::string text;
+	std::vector<JsonValue> items;
+	std::vector<std::pair<std::string, JsonValue>> fields;
+
+	bool IsNull() const { return this->type == Type::Null; }
+
+	/** Champ d'un objet, ou nullptr s'il est absent (ou si la valeur n'est pas un objet). */
+	const JsonValue *Find(std::string_view key) const
+	{
+		if (this->type != Type::Object) return nullptr;
+		for (const auto &field : this->fields) {
+			if (field.first == key) return &field.second;
+		}
+		return nullptr;
+	}
+};
+
+bool ParseJsonValue(std::string_view text, size_t &pos, JsonValue &out, std::string &error, int depth)
+{
+	if (depth > 24) return JsonFail(error, "JSON trop profond");
+	SkipJsonSpace(text, pos);
+	if (pos >= text.size()) return JsonFail(error, "valeur JSON manquante");
+
+	const char c = text[pos];
+	if (c == '{') {
+		pos++;
+		out.type = JsonValue::Type::Object;
+		SkipJsonSpace(text, pos);
+		if (pos < text.size() && text[pos] == '}') {
+			pos++;
+			return true;
+		}
+		for (;;) {
+			SkipJsonSpace(text, pos);
+			std::string key;
+			if (!ParseJsonString(text, pos, key, error)) return false;
+			if (out.Find(key) != nullptr) {
+				return JsonFail(error, fmt::format("clé JSON dupliquée « {} »", key));
+			}
+			SkipJsonSpace(text, pos);
+			if (pos >= text.size() || text[pos] != ':') {
+				return JsonFail(error, fmt::format("« : » attendu après la clé « {} »", key));
+			}
+			pos++;
+			JsonValue value;
+			if (!ParseJsonValue(text, pos, value, error, depth + 1)) return false;
+			out.fields.emplace_back(std::move(key), std::move(value));
+			SkipJsonSpace(text, pos);
+			if (pos >= text.size()) return JsonFail(error, "objet JSON incomplet");
+			if (text[pos] == ',') {
+				pos++;
+				continue;
+			}
+			if (text[pos] == '}') {
+				pos++;
+				return true;
+			}
+			return JsonFail(error, "virgule ou « } » attendu dans l'objet JSON");
+		}
+	}
+
+	if (c == '[') {
+		pos++;
+		out.type = JsonValue::Type::Array;
+		SkipJsonSpace(text, pos);
+		if (pos < text.size() && text[pos] == ']') {
+			pos++;
+			return true;
+		}
+		for (;;) {
+			JsonValue value;
+			if (!ParseJsonValue(text, pos, value, error, depth + 1)) return false;
+			out.items.emplace_back(std::move(value));
+			SkipJsonSpace(text, pos);
+			if (pos >= text.size()) return JsonFail(error, "tableau JSON incomplet");
+			if (text[pos] == ',') {
+				pos++;
+				continue;
+			}
+			if (text[pos] == ']') {
+				pos++;
+				return true;
+			}
+			return JsonFail(error, "virgule ou « ] » attendu dans le tableau JSON");
+		}
+	}
+
+	if (c == '"') {
+		out.type = JsonValue::Type::String;
+		return ParseJsonString(text, pos, out.text, error);
+	}
+
+	if (text.substr(pos, 4) == "true" && JsonDelimiter(text, pos + 4)) {
+		pos += 4;
+		out.type = JsonValue::Type::Bool;
+		out.boolean = true;
+		return true;
+	}
+	if (text.substr(pos, 5) == "false" && JsonDelimiter(text, pos + 5)) {
+		pos += 5;
+		out.type = JsonValue::Type::Bool;
+		out.boolean = false;
+		return true;
+	}
+	if (text.substr(pos, 4) == "null" && JsonDelimiter(text, pos + 4)) {
+		pos += 4;
+		out.type = JsonValue::Type::Null;
+		return true;
+	}
+
+	if (c == '-' || (c >= '0' && c <= '9')) {
+		double value = 0.0;
+		if (!ParseJsonNumber(text, pos, value, error)) return false;
+		out.type = JsonValue::Type::Number;
+		out.number = value;
+		return true;
+	}
+
+	return JsonFail(error, "valeur JSON invalide");
+}
+
+/** Analyse un document JSON complet ; la racine doit être un objet. */
+bool ParseCommandJson(std::string_view json, JsonValue &out, std::string &error)
+{
+	size_t pos = 0;
+	if (!ParseJsonValue(json, pos, out, error, 0)) return false;
+	SkipJsonSpace(json, pos);
+	if (pos != json.size()) return JsonFail(error, "caractères en trop après l'objet JSON");
+	if (out.type != JsonValue::Type::Object) return JsonFail(error, "objet JSON attendu à la racine");
+	return true;
+}
+
+bool JsonGetInt(const JsonValue *value, int &out)
+{
+	if (value == nullptr || value->type != JsonValue::Type::Number) return false;
+	const double number = value->number;
+	if (number < -2147483648.0 || number > 2147483647.0) return false;
+	const int truncated = static_cast<int>(number);
+	if (static_cast<double>(truncated) != number) return false;
+	out = truncated;
+	return true;
+}
+
+bool JsonGetNumber(const JsonValue *value, double &out)
+{
+	if (value == nullptr || value->type != JsonValue::Type::Number) return false;
+	out = value->number;
+	return true;
+}
+
+bool JsonGetString(const JsonValue *value, std::string &out)
+{
+	if (value == nullptr || value->type != JsonValue::Type::String) return false;
+	out = value->text;
+	return true;
+}
+
+/** Lit un point `{x,y}` en tuiles ; les fractions sont arrondies. */
+bool JsonGetTile(const JsonValue *value, int &x, int &y)
+{
+	if (value == nullptr || value->type != JsonValue::Type::Object) return false;
+	double dx = 0.0;
+	double dy = 0.0;
+	if (!JsonGetNumber(value->Find("x"), dx) || !JsonGetNumber(value->Find("y"), dy)) return false;
+	x = static_cast<int>(std::lround(dx));
+	y = static_cast<int>(std::lround(dy));
+	return true;
+}
+
+bool IsTileInMap(int x, int y)
+{
+	return x >= 0 && y >= 0 &&
+			static_cast<uint>(x) < Map::SizeX() && static_cast<uint>(y) < Map::SizeY();
+}
+
+std::string LowerAscii(std::string_view text)
+{
+	std::string result;
+	result.reserve(text.size());
+	for (const char c : text) {
+		result.push_back((c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c);
+	}
+	return result;
+}
+
+const JsonValue *FindOption(const JsonValue *options, std::string_view name)
+{
+	return options != nullptr ? options->Find(name) : nullptr;
+}
+
+std::string OptionString(const JsonValue *options, std::string_view name, std::string fallback = {})
+{
+	std::string text;
+	if (JsonGetString(FindOption(options, name), text)) return text;
+	return fallback;
+}
+
+int OptionInt(const JsonValue *options, std::string_view name, int fallback)
+{
+	int value = 0;
+	if (JsonGetInt(FindOption(options, name), value)) return value;
+	return fallback;
+}
+
+bool OptionBool(const JsonValue *options, std::string_view name, bool fallback)
+{
+	const JsonValue *value = FindOption(options, name);
+	if (value == nullptr) return fallback;
+	if (value->type == JsonValue::Type::Bool) return value->boolean;
+	if (value->type == JsonValue::Type::Number) return value->number != 0.0;
+	return fallback;
+}
+
+bool ParseDiagDirName(std::string_view name, DiagDirection &out)
+{
+	if (name == "ne" || name == "north-east" || name == "nord-est") {
+		out = DIAGDIR_NE;
+	} else if (name == "se" || name == "south-east" || name == "sud-est") {
+		out = DIAGDIR_SE;
+	} else if (name == "sw" || name == "south-west" || name == "sud-ouest") {
+		out = DIAGDIR_SW;
+	} else if (name == "nw" || name == "north-west" || name == "nord-ouest") {
+		out = DIAGDIR_NW;
+	} else {
+		return false;
+	}
+	return true;
+}
+
+DiagDirection OptionDiagDir(const JsonValue *options, std::string_view name, DiagDirection fallback)
+{
+	const JsonValue *value = FindOption(options, name);
+	if (value == nullptr) return fallback;
+	int number = 0;
+	if (JsonGetInt(value, number)) {
+		return (number >= 0 && number < 4) ? static_cast<DiagDirection>(number) : fallback;
+	}
+	std::string text;
+	if (JsonGetString(value, text)) {
+		DiagDirection dir = INVALID_DIAGDIR;
+		if (ParseDiagDirName(LowerAscii(text), dir)) return dir;
+	}
+	return fallback;
+}
+
+bool ParseTrackName(std::string_view name, Track &out)
+{
+	if (name == "x" || name == "ne" || name == "sw" || name == "ne-sw") {
+		out = TRACK_X;
+	} else if (name == "y" || name == "nw" || name == "se" || name == "nw-se") {
+		out = TRACK_Y;
+	} else if (name == "upper" || name == "north" || name == "n") {
+		out = TRACK_UPPER;
+	} else if (name == "lower" || name == "south" || name == "s") {
+		out = TRACK_LOWER;
+	} else if (name == "left" || name == "west" || name == "w") {
+		out = TRACK_LEFT;
+	} else if (name == "right" || name == "east" || name == "e") {
+		out = TRACK_RIGHT;
+	} else {
+		return false;
+	}
+	return true;
+}
+
+bool ParseRoadBitsName(std::string_view name, RoadBits &out)
+{
+	if (name == "x" || name == "ne-sw") {
+		out = ROAD_X;
+	} else if (name == "y" || name == "nw-se") {
+		out = ROAD_Y;
+	} else if (name == "n" || name == "north") {
+		out = ROAD_N;
+	} else if (name == "e" || name == "east") {
+		out = ROAD_E;
+	} else if (name == "s" || name == "south") {
+		out = ROAD_S;
+	} else if (name == "w" || name == "west") {
+		out = ROAD_W;
+	} else if (name == "all" || name == "cross") {
+		out = ROAD_ALL;
+	} else {
+		return false;
+	}
+	return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Résultat de commande                                                     */
+/* ------------------------------------------------------------------------- */
+
+/** Texte français associé à une erreur OpenTTD connue. */
+struct CommandErrorText {
+	StringID id;
+	const char *code;
+	const char *message;
+};
+
+static const CommandErrorText COMMAND_ERROR_TEXTS[] = {
+	{STR_ERROR_INSUFFICIENT_FUNDS,                "NOT_ENOUGH_MONEY",      "Fonds insuffisants pour cette opération."},
+	{STR_ERROR_SITE_UNSUITABLE,                   "SITE_UNSUITABLE",       "Emplacement inadapté : terrain, pente ou obstacle."},
+	{STR_ERROR_LAND_SLOPED_IN_WRONG_DIRECTION,    "SLOPE_TOO_STEEP",       "Pente trop forte dans cette direction."},
+	{STR_ERROR_FLAT_LAND_REQUIRED,                "FLAT_LAND_REQUIRED",    "Terrain plat requis à cet emplacement."},
+	{STR_ERROR_ALREADY_BUILT,                     "ALREADY_BUILT",         "Une construction occupe déjà cette tuile."},
+	{STR_ERROR_TOO_CLOSE_TO_EDGE_OF_MAP,          "TOO_CLOSE_TO_EDGE",     "Trop proche du bord de la carte."},
+	{STR_ERROR_TOO_CLOSE_TO_ANOTHER_TOWN,         "TOO_CLOSE_TO_TOWN",     "Trop proche d'une ville."},
+	{STR_ERROR_CAN_T_BUILD_HERE,                  "CANNOT_BUILD_HERE",     "Construction impossible à cet emplacement."},
+	{STR_ERROR_CAN_T_BUILD_ROAD_HERE,             "CANNOT_BUILD_ROAD",     "Route impossible à cet emplacement."},
+	{STR_ERROR_CAN_T_BUILD_RAILROAD_TRACK,        "CANNOT_BUILD_RAIL",     "Voie ferrée impossible à cet emplacement."},
+	{STR_ERROR_CAN_T_BUILD_ROAD_DEPOT,            "CANNOT_BUILD_DEPOT",    "Dépôt routier impossible à cet emplacement."},
+	{STR_ERROR_CAN_T_BUILD_TRAIN_DEPOT,           "CANNOT_BUILD_DEPOT",    "Dépôt ferroviaire impossible à cet emplacement."},
+	{STR_ERROR_CAN_T_BUILD_RAILROAD_STATION,      "CANNOT_BUILD_STATION",  "Gare ferroviaire impossible à cet emplacement."},
+	{STR_ERROR_CAN_T_BUILD_BUS_STATION,           "CANNOT_BUILD_STATION",  "Gare routière impossible à cet emplacement."},
+	{STR_ERROR_CAN_T_BUILD_TRUCK_STATION,         "CANNOT_BUILD_STATION",  "Gare de fret impossible à cet emplacement."},
+	{STR_ERROR_CAN_T_BUILD_SIGNALS_HERE,          "CANNOT_BUILD_SIGNAL",   "Signal impossible à cet emplacement."},
+	{STR_ERROR_NO_SUITABLE_RAILROAD_TRACK,        "NO_RAIL_TRACK",         "Aucune voie ferrée adaptée sur cette tuile."},
+	{STR_ERROR_STATION_TOO_SPREAD_OUT,            "STATION_TOO_SPREAD_OUT", "Gare trop étendue pour ce réglage de partie."},
+	{STR_ERROR_MUST_REMOVE_ROAD_FIRST,            "MUST_REMOVE_ROAD_FIRST", "La route doit être démolie avant cette construction."},
+	{STR_ERROR_MUST_REMOVE_RAILROAD_TRACK,        "MUST_REMOVE_RAIL_FIRST", "La voie ferrée doit être démolie avant cette construction."},
+	{STR_ERROR_RAIL_VEHICLE_NOT_AVAILABLE,        "ENGINE_NOT_AVAILABLE",  "Aucun matériel ferroviaire disponible à cette date."},
+	{STR_ERROR_ROAD_VEHICLE_NOT_AVAILABLE,        "ENGINE_NOT_AVAILABLE",  "Aucun véhicule routier disponible à cette date."},
+	{STR_ERROR_TOO_MANY_VEHICLES_IN_GAME,         "TOO_MANY_VEHICLES",     "Limite de véhicules de la partie atteinte."},
+	{STR_ERROR_CAN_T_BUY_ROAD_VEHICLE,            "CANNOT_BUY_VEHICLE",    "Achat du véhicule routier refusé."},
+	{STR_ERROR_CAN_T_BUY_TRAIN,                   "CANNOT_BUY_VEHICLE",    "Achat du train refusé."},
+	{STR_ERROR_CAN_T_SELL_ROAD_VEHICLE,           "CANNOT_SELL_VEHICLE",   "Vente du véhicule routier refusée."},
+	{STR_ERROR_CAN_T_SELL_TRAIN,                  "CANNOT_SELL_VEHICLE",   "Vente du train refusée."},
+	{STR_ERROR_CAN_T_STOP_START_TRAIN,            "CANNOT_START_STOP",     "Démarrage ou arrêt du train refusé."},
+	{STR_ERROR_CAN_T_STOP_START_ROAD_VEHICLE,     "CANNOT_START_STOP",     "Démarrage ou arrêt du véhicule refusé."},
+	{STR_ERROR_DEPOT_WRONG_DEPOT_TYPE,            "WRONG_DEPOT_TYPE",      "Ce dépôt n'accepte pas ce type de véhicule."},
+};
+
+/** Message OpenTTD (anglais) d'un échec, pour le diagnostic. */
+std::string DescribeCommandError(CommandCost result)
+{
+	const EncodedString &encoded = result.GetEncodedMessage();
+	if (!encoded.empty()) return encoded.GetDecodedString();
+	const StringID message = result.GetErrorMessage();
+	if (message == INVALID_STRING_ID) return {};
+	return GetEncodedString(message).GetDecodedString();
+}
+
+/** Réponse JSON d'une commande (voir wiki, Protocole > Erreurs). */
+struct CommandReply {
+	bool ok = false;
+	std::string code = "OK";
+	std::string message;
+	std::string detail;
+	Money cost = 0;
+	int tiles = 0;
+	int orders = 0;
+	VehicleID vehicle = VehicleID::Invalid();
+	StationID station = StationID::Invalid();
+	DepotID depot = DepotID::Invalid();
+	std::string model;
+};
+
+void AppendReplyJson(std::string &out, const CommandReply &reply)
+{
+	out += "{\"ok\":";
+	out += reply.ok ? "true" : "false";
+	out += ",\"code\":";
+	AppendJsonString(out, reply.code);
+	out += ",\"message\":";
+	AppendJsonString(out, reply.message);
+	if (!reply.detail.empty()) {
+		out += ",\"detail\":";
+		AppendJsonString(out, reply.detail);
+	}
+	if (reply.ok) out += fmt::format(",\"cost\":{}", reply.cost);
+	if (reply.tiles > 0) out += fmt::format(",\"tiles\":{}", reply.tiles);
+	if (reply.orders > 0) out += fmt::format(",\"orders\":{}", reply.orders);
+	if (reply.vehicle != VehicleID::Invalid()) {
+		out += fmt::format(",\"vehicleId\":{}", reply.vehicle.base());
+	}
+	if (reply.station != StationID::Invalid()) {
+		out += fmt::format(",\"stationId\":{}", reply.station.base());
+	}
+	if (reply.depot != DepotID::Invalid()) {
+		out += fmt::format(",\"depotId\":{}", reply.depot.base());
+	}
+	if (!reply.model.empty()) {
+		out += ",\"model\":";
+		AppendJsonString(out, reply.model);
+	}
+	out += "}";
+}
+
+bool FailWith(CommandReply &reply, std::string code, std::string message)
+{
+	reply.ok = false;
+	reply.code = std::move(code);
+	reply.message = std::move(message);
+	return false;
+}
+
+bool FailFromCommand(CommandReply &reply, CommandCost result, const char *fallback_code, std::string fallback_message)
+{
+	reply.ok = false;
+	reply.detail = DescribeCommandError(result);
+	const StringID id = result.GetErrorMessage();
+	for (const CommandErrorText &entry : COMMAND_ERROR_TEXTS) {
+		if (entry.id == id) {
+			reply.code = entry.code;
+			reply.message = entry.message;
+			return false;
+		}
+	}
+	reply.code = fallback_code;
+	reply.message = fallback_message;
+	return false;
+}
+
+bool Succeed(CommandReply &reply, std::string message)
+{
+	reply.ok = true;
+	reply.code = "OK";
+	reply.message = std::move(message);
+	return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Exécution de commandes OpenTTD                                           */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Exécute une commande pour une entreprise donnée.
+ *
+ * Passe par `Command<Tcmd>::Unsafe`, le même chemin que les scripts IA :
+ * validation entreprise, essai (`estimate_only`) puis exécution, contrôle des
+ * fonds et des dépenses. Aucune mutation directe de la carte n'est faite.
+ *
+ * @param company entreprise qui paie et possède la construction.
+ * @param location tuile utilisée pour les messages (peut être `INVALID_TILE`).
+ * @param estimate_only true pour un essai sans modification de l'état.
+ * @return le résultat brut de la commande (`CommandCost` ou tuple).
+ */
+template <Commands Tcmd, typename... Args>
+auto RunCompanyCommand(CompanyID company, TileIndex location, bool estimate_only, Args... args)
+{
+	/* `Backup<T>` ne restaure pas tout seul et journalise un avertissement si
+	 * `Restore()` n'est pas appelé ; `AutoRestoreBackup` garantit la
+	 * restauration à la sortie, y compris sur retour précoce ou exception. */
+	AutoRestoreBackup<CompanyID> company_guard(_current_company, company);
+	return Command<Tcmd>::template Unsafe<CommandCallback>(
+			(StringID)0, nullptr, false, estimate_only, location, std::forward_as_tuple(args...));
+}
+
+/** Extrait `CommandCost` d'un résultat simple ou d'un tuple OpenTTD. */
+template <typename T>
+CommandCost CostOf(const T &result)
+{
+	if constexpr (std::is_same_v<T, CommandCost>) {
+		return result;
+	} else {
+		return std::get<0>(result);
+	}
+}
+
+/** Type/dépôt de route disponible pour l'entreprise. */
+RoadType SelectRoadType(CompanyID company)
+{
+	if (HasRoadTypeAvail(company, ROADTYPE_ROAD)) return ROADTYPE_ROAD;
+	if (HasRoadTypeAvail(company, ROADTYPE_TRAM)) return ROADTYPE_TRAM;
+	return INVALID_ROADTYPE;
+}
+
+/** Type de rail disponible pour l'entreprise (rail classique en priorité). */
+RailType SelectRailType(CompanyID company)
+{
+	if (HasRailTypeAvail(company, RAILTYPE_RAIL)) return RAILTYPE_RAIL;
+	for (RailType candidate = RAILTYPE_BEGIN; candidate < RAILTYPE_END; candidate++) {
+		if (HasRailTypeAvail(company, candidate)) return candidate;
+	}
+	return INVALID_RAILTYPE;
+}
+
+/** Libellé lisible d'un moteur (nom personnalisé ou nom NewGRF). */
+std::string EngineName(EngineID engine)
+{
+	const Engine *info = Engine::GetIfValid(engine);
+	if (info != nullptr && !info->name.empty()) return info->name;
+	return GetString(STR_ENGINE_NAME, engine.base());
+}
+
+/**
+ * Choisit un moteur déterministe pour un dépôt.
+ *
+ * `model` accepte un identifiant numérique, un nom (sous-chaîne, insensible à
+ * la casse) ou un mot-clé : `bus`, `truck`/`camion`, `train`/`locomotive`.
+ * À défaut, le moteur disponible de plus grande capacité est retenu (le plus
+ * petit identifiant en cas d'égalité), comme le fait l'IA.
+ */
+EngineID SelectEngine(CompanyID company, VehicleType type, const std::string &model)
+{
+	const std::string needle = LowerAscii(model);
+	if (!needle.empty() && needle.size() <= 5 &&
+			std::all_of(needle.begin(), needle.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+		uint32_t value = 0;
+		for (const char c : needle) value = value * 10 + static_cast<uint32_t>(c - '0');
+		if (value >= 0xFFFF) return EngineID::Invalid();
+		const EngineID engine{static_cast<uint16_t>(value)};
+		if (IsEngineBuildable(engine, type, company)) return engine;
+		return EngineID::Invalid();
+	}
+
+	const bool passengers = needle.empty() || needle == "bus" || needle == "passenger" ||
+			needle == "passagers" || needle == "voyageurs";
+	const bool freight = needle == "truck" || needle == "camion" || needle == "cargo" ||
+			needle == "fret" || needle == "marchandises";
+	const bool any_train = needle == "train" || needle == "locomotive" || needle == "loco";
+	const bool name_filter = !needle.empty() && !passengers && !freight && !any_train;
+
+	EngineID best = EngineID::Invalid();
+	uint64_t best_capacity = 0;
+	for (const Engine *info : Engine::Iterate()) {
+		if (info->type != type) continue;
+		if (type == VEH_TRAIN && info->VehInfo<RailVehicleInfo>().railveh_type == RAILVEH_WAGON) continue;
+
+		const EngineID engine = info->index;
+		if (!IsEngineBuildable(engine, type, company)) continue;
+
+		const CargoType cargo = info->GetDefaultCargoType();
+		if (!IsValidCargoType(cargo)) continue;
+		const bool is_passenger_cargo =
+				CargoSpec::Get(cargo)->town_acceptance_effect == TAE_PASSENGERS;
+
+		if (type == VEH_ROAD && passengers && !is_passenger_cargo) continue;
+		if (type == VEH_ROAD && freight && is_passenger_cargo) continue;
+
+		if (name_filter) {
+			const std::string name = LowerAscii(EngineName(engine));
+			if (name.find(needle) == std::string::npos) continue;
+		}
+
+		const uint64_t capacity = GetTotalCapacityOfArticulatedParts(engine);
+		if (best == EngineID::Invalid() || capacity > best_capacity) {
+			best = engine;
+			best_capacity = capacity;
+		}
+	}
+	return best;
+}
+
+/** Chemin en L entre deux tuiles (origine incluse, sans doublon). */
+void MakeLPath(int from_x, int from_y, int to_x, int to_y, bool vertical_first, std::vector<TileIndex> &path)
+{
+	path.clear();
+	path.push_back(TileXY(from_x, from_y));
+
+	auto append_line = [&path](int x0, int y0, int x1, int y1) {
+		const int step_x = (x1 > x0) - (x1 < x0);
+		const int step_y = (y1 > y0) - (y1 < y0);
+		int x = x0;
+		int y = y0;
+		while (x != x1 || y != y1) {
+			x += step_x;
+			y += step_y;
+			path.push_back(TileXY(x, y));
+		}
+	};
+
+	if (vertical_first) {
+		append_line(from_x, from_y, from_x, to_y);
+		append_line(from_x, to_y, to_x, to_y);
+	} else {
+		append_line(from_x, from_y, to_x, from_y);
+		append_line(to_x, from_y, to_x, to_y);
+	}
+}
+
+/** Lit `from` (obligatoire) et `to` (facultatif) et vérifie les bornes. */
+bool ReadFromTo(const JsonValue &root, int &from_x, int &from_y, int &to_x, int &to_y, bool &has_to)
+{
+	if (!JsonGetTile(root.Find("from"), from_x, from_y) || !IsTileInMap(from_x, from_y)) return false;
+	has_to = false;
+	to_x = from_x;
+	to_y = from_y;
+	const JsonValue *to = root.Find("to");
+	if (to != nullptr && !to->IsNull()) {
+		if (!JsonGetTile(to, to_x, to_y) || !IsTileInMap(to_x, to_y)) return false;
+		has_to = true;
+	}
+	return true;
+}
+
+/** Direction d'entrée d'un dépôt : voisin route/rail déjà construit. */
+DiagDirection FindEntranceDirection(TileIndex tile, bool rail)
+{
+	static constexpr DiagDirection directions[4] = {DIAGDIR_NW, DIAGDIR_SW, DIAGDIR_SE, DIAGDIR_NE};
+	static constexpr int offsets_x[4] = {0, 1, 0, -1};
+	static constexpr int offsets_y[4] = {-1, 0, 1, 0};
+
+	const int x = static_cast<int>(TileX(tile));
+	const int y = static_cast<int>(TileY(tile));
+	for (int i = 0; i < 4; i++) {
+		const int nx = x + offsets_x[i];
+		const int ny = y + offsets_y[i];
+		if (!IsTileInMap(nx, ny)) continue;
+		const TileIndex neighbour = TileXY(nx, ny);
+		if (rail ? IsPlainRailTile(neighbour) : IsNormalRoadTile(neighbour)) return directions[i];
+	}
+	return INVALID_DIAGDIR;
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Outils de construction                                                   */
+/* ------------------------------------------------------------------------- */
+
+bool BuildRoad(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const JsonValue *options = root.Find("options");
+	const RoadType road_type = SelectRoadType(company);
+	if (road_type == INVALID_ROADTYPE) {
+		return FailWith(reply, "NO_ROAD_TYPE", "Aucun type de route disponible pour cette entreprise.");
+	}
+
+	std::string order = LowerAscii(OptionString(options, "order", "horizontal"));
+	bool vertical_first = false;
+	if (order == "vertical" || order == "y") {
+		vertical_first = true;
+	} else if (order != "horizontal" && order != "x") {
+		return FailWith(reply, "INVALID_PARAMETER", "« options.order » doit valoir « horizontal » ou « vertical ».");
+	}
+
+	std::vector<TileIndex> path;
+	MakeLPath(from_x, from_y, to_x, to_y, vertical_first, path);
+
+	if (path.size() == 1) {
+		RoadBits bits = ROAD_X;
+		const std::string bits_name = LowerAscii(OptionString(options, "bits", ""));
+		if (!bits_name.empty() && !ParseRoadBitsName(bits_name, bits)) {
+			return FailWith(reply, "INVALID_PARAMETER", "« options.bits » inconnu (x, y, n, e, s, w, all).");
+		}
+		const TileIndex tile = path.front();
+		CommandCost test = RunCompanyCommand<CMD_BUILD_ROAD>(
+				company, tile, true, tile, bits, road_type, DRD_NONE, TownID::Invalid());
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction de route refusée.");
+		CommandCost result = RunCompanyCommand<CMD_BUILD_ROAD>(
+				company, tile, false, tile, bits, road_type, DRD_NONE, TownID::Invalid());
+		if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction de route refusée.");
+		reply.cost = result.GetCost();
+		reply.tiles = 1;
+		return Succeed(reply, "Route construite sur 1 tuile.");
+	}
+
+	/* Essai de tous les tronçons avant d'en construire un seul : une commande
+	 * refusée laisse ainsi la carte strictement inchangée. */
+	for (size_t i = 1; i < path.size(); i++) {
+		const TileIndex start = path[i - 1];
+		const TileIndex end = path[i];
+		const Axis axis = TileY(start) != TileY(end) ? AXIS_Y : AXIS_X;
+		CommandCost test = RunCompanyCommand<CMD_BUILD_LONG_ROAD>(
+				company, end, true, end, start, road_type, axis, DRD_NONE, false, false, true);
+		if (test.Failed()) {
+			return FailFromCommand(reply, test, "COMMAND_FAILED", "Tronçon de route refusé : aucune tuile construite.");
+		}
+	}
+
+	Money spent = 0;
+	for (size_t i = 1; i < path.size(); i++) {
+		const TileIndex start = path[i - 1];
+		const TileIndex end = path[i];
+		const Axis axis = TileY(start) != TileY(end) ? AXIS_Y : AXIS_X;
+		CommandCost result = RunCompanyCommand<CMD_BUILD_LONG_ROAD>(
+				company, end, false, end, start, road_type, axis, DRD_NONE, false, false, true);
+		if (result.Failed()) {
+			/* Ne peut arriver qu'en cas de changement d'état entre l'essai et
+			 * l'exécution (autre commande, faillite) : on signale les tuiles
+			 * déjà posées sans masquer l'erreur. */
+			reply.cost = spent;
+			reply.tiles = static_cast<int>(i);
+			return FailFromCommand(reply, result, "COMMAND_FAILED", "Tronçon de route interrompu.");
+		}
+		spent += result.GetCost();
+	}
+
+	reply.cost = spent;
+	reply.tiles = static_cast<int>(path.size());
+	return Succeed(reply, fmt::format("Route construite sur {} tuiles.", path.size()));
+}
+
+bool BuildRail(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const JsonValue *options = root.Find("options");
+	const RailType rail_type = SelectRailType(company);
+	if (rail_type == INVALID_RAILTYPE) {
+		return FailWith(reply, "NO_RAIL_TYPE", "Aucun type de voie disponible pour cette entreprise.");
+	}
+
+	std::string order = LowerAscii(OptionString(options, "order", "horizontal"));
+	bool vertical_first = false;
+	if (order == "vertical" || order == "y") {
+		vertical_first = true;
+	} else if (order != "horizontal" && order != "x") {
+		return FailWith(reply, "INVALID_PARAMETER", "« options.order » doit valoir « horizontal » ou « vertical ».");
+	}
+
+	std::vector<TileIndex> path;
+	MakeLPath(from_x, from_y, to_x, to_y, vertical_first, path);
+
+	if (path.size() == 1) {
+		Track track = TRACK_X;
+		const std::string track_name = LowerAscii(OptionString(options, "track", "x"));
+		if (!ParseTrackName(track_name, track)) {
+			return FailWith(reply, "INVALID_PARAMETER", "« options.track » inconnu (x, y, upper, lower, left, right).");
+		}
+		const TileIndex tile = path.front();
+		CommandCost test = RunCompanyCommand<CMD_BUILD_SINGLE_RAIL>(
+				company, tile, true, tile, rail_type, track, false);
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction de voie refusée.");
+		CommandCost result = RunCompanyCommand<CMD_BUILD_SINGLE_RAIL>(
+				company, tile, false, tile, rail_type, track, false);
+		if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction de voie refusée.");
+		reply.cost = result.GetCost();
+		reply.tiles = 1;
+		return Succeed(reply, "Voie ferrée construite sur 1 tuile.");
+	}
+
+	for (size_t i = 1; i < path.size(); i++) {
+		const TileIndex start = path[i - 1];
+		const TileIndex end = path[i];
+		const Axis axis = TileY(start) != TileY(end) ? AXIS_Y : AXIS_X;
+		const Track track = axis == AXIS_X ? TRACK_X : TRACK_Y;
+		CommandCost test = RunCompanyCommand<CMD_BUILD_RAILROAD_TRACK>(
+				company, end, true, end, start, rail_type, track, false, false);
+		if (test.Failed()) {
+			return FailFromCommand(reply, test, "COMMAND_FAILED", "Tronçon de voie refusé : aucune tuile construite.");
+		}
+	}
+
+	Money spent = 0;
+	for (size_t i = 1; i < path.size(); i++) {
+		const TileIndex start = path[i - 1];
+		const TileIndex end = path[i];
+		const Axis axis = TileY(start) != TileY(end) ? AXIS_Y : AXIS_X;
+		const Track track = axis == AXIS_X ? TRACK_X : TRACK_Y;
+		CommandCost result = RunCompanyCommand<CMD_BUILD_RAILROAD_TRACK>(
+				company, end, false, end, start, rail_type, track, false, false);
+		if (result.Failed()) {
+			reply.cost = spent;
+			reply.tiles = static_cast<int>(i);
+			return FailFromCommand(reply, result, "COMMAND_FAILED", "Tronçon de voie interrompu.");
+		}
+		spent += result.GetCost();
+	}
+
+	reply.cost = spent;
+	reply.tiles = static_cast<int>(path.size());
+	return Succeed(reply, fmt::format("Voie ferrée construite sur {} tuiles.", path.size()));
+}
+
+bool BuildStation(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const JsonValue *options = root.Find("options");
+	const TileIndex tile = TileXY(from_x, from_y);
+
+	const std::string kind = LowerAscii(OptionString(options, "kind", OptionString(options, "station", "road")));
+	const bool rail = kind == "rail" || kind == "train" || kind == "ferroviaire";
+	const bool road = kind == "road" || kind == "bus" || kind == "truck" || kind == "camion" ||
+			kind == "routiere" || kind == "routière";
+
+	if (rail) {
+		const RailType rail_type = SelectRailType(company);
+		if (rail_type == INVALID_RAILTYPE) {
+			return FailWith(reply, "NO_RAIL_TYPE", "Aucun type de voie disponible pour cette entreprise.");
+		}
+
+		Axis axis = AXIS_X;
+		const std::string direction = LowerAscii(OptionString(options, "direction", OptionString(options, "axis", "")));
+		if (!direction.empty()) {
+			if (direction == "x" || direction == "ne" || direction == "sw" || direction == "ne-sw") {
+				axis = AXIS_X;
+			} else if (direction == "y" || direction == "nw" || direction == "se" || direction == "nw-se") {
+				axis = AXIS_Y;
+			} else {
+				return FailWith(reply, "INVALID_PARAMETER", "« options.direction » inconnu (x, y, ne, nw, se, sw).");
+			}
+		} else if (has_to) {
+			if (from_y == to_y) {
+				axis = AXIS_X;
+			} else if (from_x == to_x) {
+				axis = AXIS_Y;
+			} else {
+				return FailWith(reply, "INVALID_PARAMETER", "Une gare ferroviaire doit être alignée sur x ou y.");
+			}
+		}
+
+		int platforms = OptionInt(options, "platforms", OptionInt(options, "tracks", 1));
+		int length = OptionInt(options, "length", OptionInt(options, "platform_length", 1));
+		if (has_to) {
+			const int distance = std::abs(to_x - from_x) + std::abs(to_y - from_y);
+			if (OptionInt(options, "length", -1) < 0) length = distance + 1;
+		}
+		if (platforms < 1 || platforms > 8) {
+			return FailWith(reply, "INVALID_PARAMETER", "« options.platforms » doit être compris entre 1 et 8.");
+		}
+		if (length < 1 || length > 16) {
+			return FailWith(reply, "INVALID_PARAMETER", "« options.length » doit être compris entre 1 et 16.");
+		}
+
+		CommandCost test = RunCompanyCommand<CMD_BUILD_RAIL_STATION>(
+				company, tile, true, tile, rail_type, axis,
+				static_cast<uint8_t>(platforms), static_cast<uint8_t>(length),
+				STAT_CLASS_DFLT, 0, StationID::Invalid(), true);
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction de gare refusée.");
+		CommandCost result = RunCompanyCommand<CMD_BUILD_RAIL_STATION>(
+				company, tile, false, tile, rail_type, axis,
+				static_cast<uint8_t>(platforms), static_cast<uint8_t>(length),
+				STAT_CLASS_DFLT, 0, StationID::Invalid(), true);
+		if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction de gare refusée.");
+		reply.cost = result.GetCost();
+		reply.station = GetStationIndex(tile);
+		reply.tiles = platforms * length;
+		return Succeed(reply, fmt::format("Gare ferroviaire construite ({} voie(s) × {} tuile(s)).", platforms, length));
+	}
+
+	if (road) {
+		const RoadType road_type = SelectRoadType(company);
+		if (road_type == INVALID_ROADTYPE) {
+			return FailWith(reply, "NO_ROAD_TYPE", "Aucun type de route disponible pour cette entreprise.");
+		}
+		if (has_to && (std::abs(to_x - from_x) + std::abs(to_y - from_y)) > 1) {
+			return FailWith(reply, "NOT_SUPPORTED",
+					"Les gares routières multi-tuiles ne sont pas supportées : utilisez une tuile ou une tuile adjacente.");
+		}
+
+		const bool truck = kind == "truck" || kind == "camion" ||
+				LowerAscii(OptionString(options, "stop", "")) == "truck";
+		const RoadStopType stop_type = truck ? RoadStopType::Truck : RoadStopType::Bus;
+		const bool drive_through = OptionBool(options, "drive_through",
+				OptionBool(options, "driveThrough", false));
+
+		DiagDirection direction = OptionDiagDir(options, "direction", INVALID_DIAGDIR);
+		if (direction == INVALID_DIAGDIR && has_to) {
+			direction = DiagdirBetweenTiles(tile, TileXY(to_x, to_y));
+		}
+		if (direction == INVALID_DIAGDIR && drive_through && IsNormalRoadTile(tile)) {
+			const RoadBits bits = GetRoadBits(tile, RTT_ROAD);
+			if ((bits & ROAD_X) == ROAD_X) {
+				direction = DIAGDIR_NE;
+			} else if ((bits & ROAD_Y) == ROAD_Y) {
+				direction = DIAGDIR_NW;
+			}
+		}
+		if (direction == INVALID_DIAGDIR) {
+			return FailWith(reply, "INVALID_PARAMETER",
+					"« options.direction » requis pour une gare routière en passage (ne, se, sw, nw).");
+		}
+
+		CommandCost test = RunCompanyCommand<CMD_BUILD_ROAD_STOP>(
+				company, tile, true, tile, 1, 1, stop_type, drive_through, direction,
+				road_type, ROADSTOP_CLASS_DFLT, 0, StationID::Invalid(), true);
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction de gare refusée.");
+		CommandCost result = RunCompanyCommand<CMD_BUILD_ROAD_STOP>(
+				company, tile, false, tile, 1, 1, stop_type, drive_through, direction,
+				road_type, ROADSTOP_CLASS_DFLT, 0, StationID::Invalid(), true);
+		if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction de gare refusée.");
+		reply.cost = result.GetCost();
+		reply.station = GetStationIndex(tile);
+		reply.tiles = 1;
+		return Succeed(reply, truck ? "Gare de fret construite." : "Gare routière construite.");
+	}
+
+	return FailWith(reply, "UNKNOWN_TOOL", "« options.kind » doit valoir road, bus, truck ou rail.");
+}
+
+bool BuildDepot(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const JsonValue *options = root.Find("options");
+	const TileIndex tile = TileXY(from_x, from_y);
+	const std::string kind = LowerAscii(OptionString(options, "kind", OptionString(options, "vehicle", "road")));
+	const bool rail = kind == "rail" || kind == "train" || kind == "ferroviaire";
+	const bool tram = kind == "tram";
+
+	DiagDirection direction = OptionDiagDir(options, "direction", INVALID_DIAGDIR);
+	if (direction == INVALID_DIAGDIR && has_to) {
+		const TileIndex target = TileXY(to_x, to_y);
+		if (std::abs(to_x - from_x) + std::abs(to_y - from_y) == 1) {
+			direction = DiagdirBetweenTiles(tile, target);
+		}
+	}
+	if (direction == INVALID_DIAGDIR) direction = FindEntranceDirection(tile, rail);
+	if (direction == INVALID_DIAGDIR) direction = DIAGDIR_SE;
+
+	if (rail) {
+		const RailType rail_type = SelectRailType(company);
+		if (rail_type == INVALID_RAILTYPE) {
+			return FailWith(reply, "NO_RAIL_TYPE", "Aucun type de voie disponible pour cette entreprise.");
+		}
+		CommandCost test = RunCompanyCommand<CMD_BUILD_TRAIN_DEPOT>(
+				company, tile, true, tile, rail_type, direction);
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction de dépôt refusée.");
+		CommandCost result = RunCompanyCommand<CMD_BUILD_TRAIN_DEPOT>(
+				company, tile, false, tile, rail_type, direction);
+		if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction de dépôt refusée.");
+		reply.cost = result.GetCost();
+		reply.depot = GetDepotIndex(tile);
+		reply.tiles = 1;
+		return Succeed(reply, "Dépôt ferroviaire construit.");
+	}
+
+	if (kind == "road" || kind == "bus" || kind == "truck" || kind == "camion" ||
+			kind == "routier" || tram) {
+		const RoadType road_type = tram && HasRoadTypeAvail(company, ROADTYPE_TRAM)
+				? ROADTYPE_TRAM
+				: SelectRoadType(company);
+		if (road_type == INVALID_ROADTYPE) {
+			return FailWith(reply, "NO_ROAD_TYPE", "Aucun type de route disponible pour cette entreprise.");
+		}
+		CommandCost test = RunCompanyCommand<CMD_BUILD_ROAD_DEPOT>(
+				company, tile, true, tile, road_type, direction);
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction de dépôt refusée.");
+		CommandCost result = RunCompanyCommand<CMD_BUILD_ROAD_DEPOT>(
+				company, tile, false, tile, road_type, direction);
+		if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction de dépôt refusée.");
+		reply.cost = result.GetCost();
+		reply.depot = GetDepotIndex(tile);
+		reply.tiles = 1;
+		return Succeed(reply, tram ? "Dépôt de tramway construit." : "Dépôt routier construit.");
+	}
+
+	return FailWith(reply, "UNKNOWN_TOOL", "« options.kind » doit valoir road, tram ou rail.");
+}
+
+bool BuildSignal(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const JsonValue *options = root.Find("options");
+	const std::string type = LowerAscii(OptionString(options, "type", "block"));
+	if (type != "block" && type != "bloc") {
+		return FailWith(reply, "NOT_SUPPORTED",
+				"Seuls les signaux de bloc sont supportés (« options.type » = block).");
+	}
+
+	std::vector<TileIndex> tiles;
+	if (has_to) {
+		if (from_x != to_x && from_y != to_y) {
+			return FailWith(reply, "INVALID_PARAMETER", "Un alignement de signaux doit suivre x ou y.");
+		}
+		MakeLPath(from_x, from_y, to_x, to_y, false, tiles);
+	} else {
+		tiles.push_back(TileXY(from_x, from_y));
+	}
+
+	/* Choix de la voie : unique, sinon `options.track` tranche. */
+	Track forced_track = INVALID_TRACK;
+	const std::string track_name = LowerAscii(OptionString(options, "track", ""));
+	if (!track_name.empty() && !ParseTrackName(track_name, forced_track)) {
+		return FailWith(reply, "INVALID_PARAMETER", "« options.track » inconnu (x, y, upper, lower, left, right).");
+	}
+
+	std::vector<Track> tracks;
+	tracks.reserve(tiles.size());
+	for (const TileIndex tile : tiles) {
+		if (!IsPlainRailTile(tile)) {
+			return FailWith(reply, "NO_RAIL_TRACK", "Un signal exige une voie ferrée sur la tuile.");
+		}
+		const TrackBits bits = GetTrackBits(tile);
+		const uint8_t raw = static_cast<uint8_t>(bits & TRACK_BIT_MASK);
+		Track track = forced_track;
+		if (track == INVALID_TRACK) {
+			if (raw == 0 || (raw & (raw - 1)) != 0) {
+				return FailWith(reply, "AMBIGUOUS_TRACK",
+						"Plusieurs voies sur cette tuile : précisez « options.track ».");
+			}
+			track = TrackBitsToTrack(bits);
+		} else if ((raw & (1U << track)) == 0) {
+			return FailWith(reply, "NO_RAIL_TRACK", "La voie demandée n'existe pas sur cette tuile.");
+		}
+		tracks.push_back(track);
+	}
+
+	for (size_t i = 0; i < tiles.size(); i++) {
+		CommandCost test = RunCompanyCommand<CMD_BUILD_SINGLE_SIGNAL>(
+				company, tiles[i], true, tiles[i], tracks[i], SIGTYPE_BLOCK, SIG_ELECTRIC,
+				false, false, false, SIGTYPE_BLOCK, SIGTYPE_BLOCK, 0, 0);
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction de signal refusée.");
+	}
+
+	Money spent = 0;
+	for (size_t i = 0; i < tiles.size(); i++) {
+		CommandCost result = RunCompanyCommand<CMD_BUILD_SINGLE_SIGNAL>(
+				company, tiles[i], false, tiles[i], tracks[i], SIGTYPE_BLOCK, SIG_ELECTRIC,
+				false, false, false, SIGTYPE_BLOCK, SIGTYPE_BLOCK, 0, 0);
+		if (result.Failed()) {
+			reply.cost = spent;
+			reply.tiles = static_cast<int>(i);
+			return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction de signal interrompue.");
+		}
+		spent += result.GetCost();
+	}
+
+	reply.cost = spent;
+	reply.tiles = static_cast<int>(tiles.size());
+	return Succeed(reply, fmt::format("{} signal(aux) de bloc construit(s).", tiles.size()));
+}
+
+bool BuildClear(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+
+	const int min_x = std::min(from_x, to_x);
+	const int max_x = std::max(from_x, to_x);
+	const int min_y = std::min(from_y, to_y);
+	const int max_y = std::max(from_y, to_y);
+	const int64_t area = static_cast<int64_t>(max_x - min_x + 1) * (max_y - min_y + 1);
+	if (area > 1024) {
+		return FailWith(reply, "TOO_MANY_TILES", "Zone trop grande : 1 024 tuiles maximum par commande.");
+	}
+
+	std::vector<TileIndex> tiles;
+	tiles.reserve(static_cast<size_t>(area));
+	for (int y = min_y; y <= max_y; y++) {
+		for (int x = min_x; x <= max_x; x++) tiles.push_back(TileXY(x, y));
+	}
+
+	for (const TileIndex tile : tiles) {
+		CommandCost test = RunCompanyCommand<CMD_LANDSCAPE_CLEAR>(company, tile, true, tile);
+		if (test.Failed()) {
+			return FailFromCommand(reply, test, "COMMAND_FAILED", "Démolition refusée : aucune tuile modifiée.");
+		}
+	}
+
+	Money spent = 0;
+	int cleared = 0;
+	for (const TileIndex tile : tiles) {
+		CommandCost result = RunCompanyCommand<CMD_LANDSCAPE_CLEAR>(company, tile, false, tile);
+		if (result.Failed()) {
+			reply.cost = spent;
+			reply.tiles = cleared;
+			return FailFromCommand(reply, result, "COMMAND_FAILED", "Démolition interrompue.");
+		}
+		spent += result.GetCost();
+		cleared++;
+	}
+
+	reply.cost = spent;
+	reply.tiles = cleared;
+	return Succeed(reply, fmt::format("{} tuile(s) démolie(s).", cleared));
+}
+
+bool DispatchBuild(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	std::string tool;
+	if (!JsonGetString(root.Find("tool"), tool)) {
+		return FailWith(reply, "UNKNOWN_TOOL", "Le champ « tool » doit être une chaîne.");
+	}
+	tool = LowerAscii(tool);
+
+	if (tool == "road" || tool == "route") return BuildRoad(company, root, reply);
+	if (tool == "rail" || tool == "railway" || tool == "voie") return BuildRail(company, root, reply);
+	if (tool == "station" || tool == "gare") return BuildStation(company, root, reply);
+	if (tool == "depot" || tool == "depot_road" || tool == "depot_rail") return BuildDepot(company, root, reply);
+	if (tool == "signal" || tool == "signaux") return BuildSignal(company, root, reply);
+	if (tool == "clear" || tool == "demolish" || tool == "demolition") return BuildClear(company, root, reply);
+	if (tool == "bridge" || tool == "tunnel" || tool == "pont") {
+		return FailWith(reply, "NOT_SUPPORTED",
+				"Les ponts et tunnels ne sont pas supportés par le pont pour l'instant (#11).");
+	}
+	return FailWith(reply, "UNKNOWN_TOOL", fmt::format("Outil de construction inconnu « {} ».", tool));
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Véhicules                                                                */
+/* ------------------------------------------------------------------------- */
+
+Vehicle *FindVehicle(const JsonValue &root, CompanyID company, CommandReply &reply)
+{
+	int id = 0;
+	if (!JsonGetInt(root.Find("vehicle"), id) || id < 0) {
+		FailWith(reply, "INVALID_PARAMETER", "Le champ « vehicle » doit être un identifiant entier.");
+		return nullptr;
+	}
+	Vehicle *vehicle = Vehicle::GetIfValid(VehicleID(static_cast<uint16_t>(id)));
+	if (vehicle == nullptr) {
+		FailWith(reply, "UNKNOWN_VEHICLE", fmt::format("Véhicule {} inexistant.", id));
+		return nullptr;
+	}
+	if (vehicle->owner != company) {
+		FailWith(reply, "WRONG_OWNER", "Ce véhicule appartient à une autre entreprise.");
+		return nullptr;
+	}
+	return vehicle;
+}
+
+bool VehicleBuy(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int depot_x, depot_y;
+	if (!JsonGetTile(root.Find("depot"), depot_x, depot_y) || !IsTileInMap(depot_x, depot_y)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Le champ « depot » doit être une tuile de la carte.");
+	}
+	const TileIndex tile = TileXY(depot_x, depot_y);
+	if (!IsDepotTile(tile)) {
+		return FailWith(reply, "NOT_A_DEPOT", "L'achat d'un véhicule exige une tuile de dépôt.");
+	}
+	if (!IsTileOwner(tile, company)) {
+		return FailWith(reply, "WRONG_OWNER", "Ce dépôt appartient à une autre entreprise.");
+	}
+
+	const VehicleType type = GetDepotVehicleType(tile);
+	std::string model;
+	JsonGetString(root.Find("model"), model);
+	const EngineID engine = SelectEngine(company, type, model);
+	if (engine == EngineID::Invalid()) {
+		return FailWith(reply, "NO_ENGINE",
+				model.empty()
+						? "Aucun véhicule disponible pour ce dépôt à cette date."
+						: fmt::format("Aucun véhicule ne correspond à « {} » dans ce dépôt.", model));
+	}
+
+	auto test = RunCompanyCommand<CMD_BUILD_VEHICLE>(
+			company, tile, true, tile, engine, true, INVALID_CARGO, CLIENT_ID_SERVER);
+	if (std::get<0>(test).Failed()) {
+		return FailFromCommand(reply, std::get<0>(test), "COMMAND_FAILED", "Achat du véhicule refusé.");
+	}
+	auto result = RunCompanyCommand<CMD_BUILD_VEHICLE>(
+			company, tile, false, tile, engine, true, INVALID_CARGO, CLIENT_ID_SERVER);
+	CommandCost cost = std::get<0>(result);
+	if (cost.Failed()) return FailFromCommand(reply, cost, "COMMAND_FAILED", "Achat du véhicule refusé.");
+
+	reply.cost = cost.GetCost();
+	reply.vehicle = std::get<1>(result);
+	reply.model = EngineName(engine);
+	return Succeed(reply, fmt::format("Véhicule acheté : {}.", reply.model));
+}
+
+bool VehicleSell(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	Vehicle *vehicle = FindVehicle(root, company, reply);
+	if (vehicle == nullptr) return false;
+
+	const bool sell_chain = vehicle->type == VEH_TRAIN;
+	CommandCost test = RunCompanyCommand<CMD_SELL_VEHICLE>(
+			company, vehicle->tile, true, vehicle->index, sell_chain, false, CLIENT_ID_SERVER);
+	if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Vente du véhicule refusée.");
+	CommandCost result = RunCompanyCommand<CMD_SELL_VEHICLE>(
+			company, vehicle->tile, false, vehicle->index, sell_chain, false, CLIENT_ID_SERVER);
+	if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Vente du véhicule refusée.");
+
+	reply.cost = result.GetCost();
+	reply.vehicle = vehicle->index;
+	return Succeed(reply, "Véhicule vendu.");
+}
+
+bool VehicleStartStop(CompanyID company, const JsonValue &root, CommandReply &reply, bool start)
+{
+	Vehicle *vehicle = FindVehicle(root, company, reply);
+	if (vehicle == nullptr) return false;
+	if (!vehicle->IsPrimaryVehicle()) {
+		return FailWith(reply, "NOT_PRIMARY_VEHICLE", "Seul un véhicule de tête peut être démarré ou arrêté.");
+	}
+
+	const bool running = !vehicle->vehstatus.Test(VehState::Stopped);
+	if (running == start) {
+		reply.vehicle = vehicle->index;
+		return Succeed(reply, start ? "Le véhicule est déjà en service." : "Le véhicule est déjà arrêté.");
+	}
+
+	CommandCost test = RunCompanyCommand<CMD_START_STOP_VEHICLE>(
+			company, vehicle->tile, true, vehicle->index, false);
+	if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Démarrage ou arrêt refusé.");
+	CommandCost result = RunCompanyCommand<CMD_START_STOP_VEHICLE>(
+			company, vehicle->tile, false, vehicle->index, false);
+	if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Démarrage ou arrêt refusé.");
+
+	reply.cost = result.GetCost();
+	reply.vehicle = vehicle->index;
+	return Succeed(reply, start ? "Véhicule démarré." : "Véhicule arrêté.");
+}
+
+bool VehicleOrders(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	Vehicle *vehicle = FindVehicle(root, company, reply);
+	if (vehicle == nullptr) return false;
+	if (!vehicle->IsPrimaryVehicle()) {
+		return FailWith(reply, "NOT_PRIMARY_VEHICLE", "Seul un véhicule de tête peut recevoir des ordres.");
+	}
+
+	const JsonValue *orders = root.Find("orders");
+	if (orders == nullptr || orders->type != JsonValue::Type::Array || orders->items.empty()) {
+		return FailWith(reply, "INVALID_PARAMETER", "Le champ « orders » doit être un tableau non vide.");
+	}
+
+	/* Valider toutes les cibles avant d'insérer le premier ordre évite une
+	 * tournée partielle. Les industries ne sont pas des destinations
+	 * directes : il faut passer par une gare. */
+	for (const JsonValue &item : orders->items) {
+		std::string kind;
+		int target = 0;
+		if (!JsonGetString(item.Find("kind"), kind) || !JsonGetInt(item.Find("target"), target) || target < 0) {
+			return FailWith(reply, "INVALID_PARAMETER", "Chaque ordre exige « kind » et « target » (entier ≥ 0).");
+		}
+		kind = LowerAscii(kind);
+		if (kind == "station" || kind == "gare") {
+			if (!Station::IsValidID(StationID(static_cast<uint16_t>(target)))) {
+				return FailWith(reply, "UNKNOWN_STATION", fmt::format("Gare {} inexistante.", target));
+			}
+		} else if (kind == "depot") {
+			if (!Depot::IsValidID(DepotID(static_cast<uint16_t>(target)))) {
+				return FailWith(reply, "UNKNOWN_DEPOT", fmt::format("Dépôt {} inexistant.", target));
+			}
+		} else if (kind == "industry" || kind == "industrie") {
+			return FailWith(reply, "NOT_SUPPORTED",
+					"Les ordres vers une industrie passent par une gare : utilisez « kind: station ».");
+		} else {
+			return FailWith(reply, "INVALID_PARAMETER", fmt::format("Type d'ordre inconnu « {} ».", kind));
+		}
+	}
+
+	VehicleOrderID position = vehicle->GetNumManualOrders();
+	int inserted = 0;
+	for (const JsonValue &item : orders->items) {
+		std::string kind;
+		int target = 0;
+		JsonGetString(item.Find("kind"), kind);
+		JsonGetInt(item.Find("target"), target);
+		kind = LowerAscii(kind);
+
+		Order order;
+		if (kind == "station" || kind == "gare") {
+			order.MakeGoToStation(StationID(static_cast<uint16_t>(target)));
+			/* Les véhicules routiers n'acceptent que FarEnd : la valeur par
+			 * défaut (NearEnd) fait échouer CmdInsertOrder. */
+			order.SetStopLocation(OrderStopLocation::FarEnd);
+		} else {
+			OrderDepotTypeFlags depot_flags;
+			depot_flags.Set(OrderDepotTypeFlag::PartOfOrders);
+			order.MakeGoToDepot(DepotID(static_cast<uint16_t>(target)), depot_flags,
+					OrderNonStopFlags{}, OrderDepotActionFlags{});
+		}
+
+		CommandCost result = RunCompanyCommand<CMD_INSERT_ORDER>(
+				company, vehicle->tile, false, vehicle->index, position, order);
+		if (result.Failed()) {
+			reply.orders = inserted;
+			return FailFromCommand(reply, result, "COMMAND_FAILED", "Ajout d'ordre refusé.");
+		}
+		position++;
+		inserted++;
+	}
+
+	reply.orders = inserted;
+	return Succeed(reply, fmt::format("{} ordre(s) ajouté(s).", inserted));
+}
+
+bool DispatchVehicle(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	std::string action;
+	if (!JsonGetString(root.Find("action"), action)) {
+		return FailWith(reply, "UNKNOWN_ACTION", "Le champ « action » doit être une chaîne.");
+	}
+	action = LowerAscii(action);
+
+	if (action == "buy" || action == "acheter") return VehicleBuy(company, root, reply);
+	if (action == "sell" || action == "vendre") return VehicleSell(company, root, reply);
+	if (action == "start" || action == "demarrer" || action == "démarrer") return VehicleStartStop(company, root, reply, true);
+	if (action == "stop" || action == "arreter" || action == "arrêter") return VehicleStartStop(company, root, reply, false);
+	if (action == "order" || action == "ordre") return VehicleOrders(company, root, reply);
+	if (action == "refit") {
+		return FailWith(reply, "NOT_SUPPORTED", "Le rééquipement (refit) n'est pas supporté par le pont (#11).");
+	}
+	return FailWith(reply, "UNKNOWN_ACTION", fmt::format("Action véhicule inconnue « {} ».", action));
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Point d'entrée JSON                                                      */
+/* ------------------------------------------------------------------------- */
+
+bool ResolveCompany(const JsonValue &root, CompanyID &company, std::string &error)
+{
+	const JsonValue *value = root.Find("company");
+	if (value == nullptr || value->IsNull()) {
+		company = _local_company;
+		if (!Company::IsValidID(company)) return JsonFail(error, "aucune entreprise locale dans cette partie");
+		return true;
+	}
+	int id = 0;
+	if (!JsonGetInt(value, id)) return JsonFail(error, "« company » doit être un entier");
+	/* `COMPANY_NONE` (255) est utilisé par le frontend quand aucune
+	 * entreprise n'est sélectionnée : on retombe sur l'entreprise locale. */
+	if (id == 255) {
+		company = _local_company;
+		if (!Company::IsValidID(company)) return JsonFail(error, "aucune entreprise locale dans cette partie");
+		return true;
+	}
+	if (id < 0 || id >= static_cast<int>(MAX_COMPANIES) ||
+			!Company::IsValidID(CompanyID(static_cast<uint8_t>(id)))) {
+		return JsonFail(error, fmt::format("entreprise {} inexistante", id));
+	}
+	company = CompanyID(static_cast<uint8_t>(id));
+	return true;
+}
+
+int FinishCommand(CommandReply &reply)
+{
+	int status = OTTD_CMD_OK;
+	if (!reply.ok) {
+		if (reply.code == "NO_GAME") {
+			status = OTTD_CMD_NO_GAME;
+		} else if (reply.code == "BAD_JSON") {
+			status = OTTD_CMD_BAD_JSON;
+		} else if (reply.code == "UNKNOWN_COMMAND" || reply.code == "UNKNOWN_TOOL" ||
+				reply.code == "UNKNOWN_ACTION") {
+			status = OTTD_CMD_UNKNOWN;
+		} else if (reply.code == "INVALID_PARAMETER" || reply.code == "TOO_MANY_TILES") {
+			status = OTTD_CMD_INVALID;
+		} else if (reply.code == "INVALID_COMPANY") {
+			status = OTTD_CMD_BAD_COMPANY;
+		} else if (reply.code == "NOT_SUPPORTED") {
+			status = OTTD_CMD_NOT_SUPPORTED;
+		} else {
+			status = OTTD_CMD_FAILED;
+		}
+	}
+
+	std::string json;
+	AppendReplyJson(json, reply);
+	_ottd_last_command_json = std::move(json);
+	_ottd_last_command_status = status;
+	return status;
+}
+
+int ExecuteCommandJson(std::string_view json)
+{
+	CommandReply reply;
+
+	if (!_ottd_in_game) {
+		FailWith(reply, "NO_GAME", "Aucune partie en cours : démarrez une partie avant d'envoyer une commande.");
+		return FinishCommand(reply);
+	}
+	if (json.empty()) {
+		FailWith(reply, "BAD_JSON", "Commande JSON vide.");
+		return FinishCommand(reply);
+	}
+
+	JsonValue root;
+	std::string error;
+	if (!ParseCommandJson(json, root, error)) {
+		FailWith(reply, "BAD_JSON", fmt::format("JSON invalide : {}.", error));
+		return FinishCommand(reply);
+	}
+
+	std::string type;
+	if (!JsonGetString(root.Find("type"), type)) {
+		FailWith(reply, "UNKNOWN_COMMAND", "Le champ « type » doit être une chaîne (build, vehicle).");
+		return FinishCommand(reply);
+	}
+	type = LowerAscii(type);
+
+	CompanyID company = _local_company;
+	if (!ResolveCompany(root, company, error)) {
+		FailWith(reply, "INVALID_COMPANY", error);
+		return FinishCommand(reply);
+	}
+
+	if (type == "build") {
+		DispatchBuild(company, root, reply);
+	} else if (type == "vehicle") {
+		DispatchVehicle(company, root, reply);
+	} else if (type == "pause" || type == "speed" || type == "console") {
+		FailWith(reply, "NOT_SUPPORTED",
+				fmt::format("La commande « {} » est gérée par le pilote, pas par le pont (#11).", type));
+	} else {
+		FailWith(reply, "UNKNOWN_COMMAND", fmt::format("Commande inconnue « {} ».", type));
+	}
+
+	return FinishCommand(reply);
+}
+
 } // namespace
 
 extern "C" {
@@ -1493,6 +2967,8 @@ static int StartGame(uint32_t seed, uint32_t w, uint32_t h, const GameSetupConfi
 	_ottd_in_game = true;
 	_ottd_json_sequence = 0;
 	_ottd_map_sequence = 0;
+	_ottd_last_command_json = "{}";
+	_ottd_last_command_status = OTTD_CMD_OK;
 
 	/* Un tick pour laisser les initialisations de partie se terminer. */
 	PumpOneTick();
@@ -1619,6 +3095,54 @@ EMSCRIPTEN_KEEPALIVE uint64_t ottd_hash(void)
 EMSCRIPTEN_KEEPALIVE const char *ottd_last_error(void)
 {
 	return _ottd_error.c_str();
+}
+
+/**
+ * Exécute une commande de construction ou de véhicule (issue #11).
+ *
+ * Le JSON d'entrée suit `EngineCommand` de `src/engine/protocol.ts` :
+ * `{"type":"build","tool":…,"from":{…},"to":{…},"options":{…},"company":…}`
+ * ou `{"type":"vehicle","action":…,"company":…,"vehicle":…,"depot":{…},…}`.
+ * Le JSON de sortie `{ok, code, message, cost, tiles, stationId, vehicleId,
+ * depotId, model, detail}` est toujours disponible via
+ * `ottd_command_result()` ; il est aussi recopié dans `out` si la capacité le
+ * permet.
+ *
+ * @param json      commande JSON (NUL-terminé).
+ * @param out       buffer de sortie (facultatif, peut être NULL).
+ * @param capacity  taille de `out` en octets.
+ * @return 0 si la commande a été exécutée, sinon un code `OttdCommandStatus` :
+ *         1 aucune partie, 2 JSON invalide, 3 commande inconnue, 4 paramètre
+ *         invalide, 5 entreprise invalide, 6 refus d'OpenTTD, 7 buffer trop
+ *         petit, 8 commande non supportée.
+ */
+EMSCRIPTEN_KEEPALIVE int ottd_command(const char *json, char *out, int capacity)
+{
+	const int status = ExecuteCommandJson(json != nullptr ? std::string_view(json) : std::string_view{});
+
+	const size_t required = _ottd_last_command_json.size() + 1;
+	if (out != nullptr && capacity >= static_cast<int>(required)) {
+		std::copy(_ottd_last_command_json.begin(), _ottd_last_command_json.end(), out);
+		out[_ottd_last_command_json.size()] = '\0';
+	}
+	if (out != nullptr && capacity < static_cast<int>(required)) return OTTD_CMD_BUFFER;
+	return status;
+}
+
+/** Dernier résultat JSON de `ottd_command()` (valide jusqu'au prochain appel). */
+EMSCRIPTEN_KEEPALIVE const char *ottd_command_result(void)
+{
+	return _ottd_last_command_json.c_str();
+}
+
+/**
+ * Identifiant de l'entreprise locale (contexte par défaut des commandes).
+ * @return 0..14, ou -1 si aucune partie n'est en cours.
+ */
+EMSCRIPTEN_KEEPALIVE int ottd_company_id(void)
+{
+	if (!_ottd_in_game || !Company::IsValidID(_local_company)) return -1;
+	return static_cast<int>(_local_company.base());
 }
 
 /**
