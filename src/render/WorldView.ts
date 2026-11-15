@@ -24,7 +24,11 @@ import { TrackLayer } from './TrackLayer';
 import { VegetationLayer } from './VegetationLayer';
 import { VehicleLayer } from './VehicleLayer';
 import { phaseFromEconomy, sunState } from './dayNight';
-import { DEFAULT_DAY_NIGHT_CYCLE_SECONDS, DayNightCycle } from './dayNightCycle';
+import {
+  DEFAULT_DAY_NIGHT_CYCLE_SECONDS,
+  DayNightCycle,
+  ensureDaytimePhase,
+} from './dayNightCycle';
 import { qualitySettings, type QualityLevel } from './quality';
 
 /** Surface minimale du renderer pour piloter le cycle jour/nuit. */
@@ -190,7 +194,7 @@ export class WorldView {
     // avance au temps réel, indépendamment de la vitesse de jeu.
     if (!this.phaseInitialized) {
       this.phaseInitialized = true;
-      this.dayNight.setPhase(phaseFromEconomy(snapshot.economy));
+      this.dayNight.setPhase(ensureDaytimePhase(phaseFromEconomy(snapshot.economy)));
       this.applyDayNightPhase(true);
       this.applyNight(this.night);
     }

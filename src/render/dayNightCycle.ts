@@ -16,7 +16,7 @@
  * Aucune dépendance Three.js/DOM : testable sous Node.
  */
 
-import { clamp01, wrap01 } from './dayNight';
+import { clamp01, sunState, wrap01 } from './dayNight';
 
 /** Durée par défaut d'une journée visuelle complète. */
 export const DEFAULT_DAY_NIGHT_CYCLE_SECONDS = 120;
@@ -35,6 +35,16 @@ export function sanitizeCycleSeconds(value: unknown): number {
   return Math.round(
     Math.max(MIN_DAY_NIGHT_CYCLE_SECONDS, Math.min(MAX_DAY_NIGHT_CYCLE_SECONDS, value)),
   );
+}
+
+/**
+ * Ramène une phase de départ nocturne vers une fin de matinée lisible.
+ * Les parties neuves du moteur peuvent démarrer à une heure arbitraire :
+ * l'ambiance ne doit pas ouvrir sur un écran noir.
+ */
+export function ensureDaytimePhase(phase: number, fallback = DEFAULT_DAY_NIGHT_PHASE): number {
+  const normalized = wrap01(phase);
+  return sunState(normalized).night > 0.35 ? fallback : normalized;
 }
 
 export interface DayNightCycleOptions {

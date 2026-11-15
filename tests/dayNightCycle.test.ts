@@ -6,6 +6,7 @@ import {
   MAX_DAY_NIGHT_CYCLE_SECONDS,
   MIN_DAY_NIGHT_CYCLE_SECONDS,
   DayNightCycle,
+  ensureDaytimePhase,
   sanitizeCycleSeconds,
 } from '../src/render/dayNightCycle';
 
@@ -71,6 +72,14 @@ describe('horloge visuelle jour/nuit', () => {
     cycle.setPhase(Number.NaN);
     expect(cycle.phase).toBeCloseTo(0.4, 6);
     expect(cycle.advance(-20)).toBeCloseTo(0.4, 6);
+  });
+
+  it('ramène une heure de départ nocturne vers la fin de matinée', () => {
+    expect(ensureDaytimePhase(0)).toBeCloseTo(0.45, 6);
+    expect(ensureDaytimePhase(0.9)).toBeCloseTo(0.45, 6);
+    expect(ensureDaytimePhase(0.5)).toBeCloseTo(0.5, 6);
+    expect(ensureDaytimePhase(0.25, 0.4)).toBeCloseTo(0.25, 6);
+    expect(ensureDaytimePhase(Number.NaN)).toBeCloseTo(0.45, 6);
   });
 
   it('expose le temps restant avant minuit', () => {
