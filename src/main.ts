@@ -12,7 +12,7 @@ import { Game, type GameSpeed, type Selection } from './game/Game';
 import { Renderer } from './render/Renderer';
 import { WorldView, type WorldTarget } from './render/WorldView';
 import { Hud, type SelectionSummary } from './ui/Hud';
-import { detectQuality, nextQuality, type QualityLevel } from './render/quality';
+import { QUALITY_PRESETS, detectQuality, nextQuality, type QualityLevel } from './render/quality';
 import { companyColour } from './render/tileVisuals';
 import { TILE_KINDS, tileIndex } from './game/mapGrid';
 import type { MapSnapshot, WorldSnapshot } from './engine/protocol';
@@ -97,7 +97,7 @@ async function bootstrap(): Promise<void> {
       quality = nextQuality(quality);
       renderer?.setQuality(quality);
       world?.setQuality(quality);
-      hud.notify('info', `Qualité de rendu : ${quality}.`);
+      hud.notify('info', `Qualité de rendu : ${QUALITY_PRESETS[quality].label.toLowerCase()}.`);
       refreshHud();
     },
   });
@@ -217,6 +217,11 @@ async function bootstrap(): Promise<void> {
         refreshHud();
       }
     });
+
+    if (import.meta.env.DEV) {
+      // Point d'accroche pour Playwright et le débogage manuel.
+      (window as unknown as Record<string, unknown>).__opentt3d = { game, world, renderer, engine };
+    }
 
     hud.setProgress(1, 'Monde prêt');
     hud.hideLoading();

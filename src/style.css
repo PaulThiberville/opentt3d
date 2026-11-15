@@ -51,6 +51,10 @@ body {
 
 /* ------------------------------------------------------------------ HUD */
 
+.hud [hidden] {
+  display: none !important;
+}
+
 .hud {
   position: absolute;
   inset: 0;

@@ -22,8 +22,8 @@ interface WindUniform {
 export class VegetationLayer {
   readonly group = new THREE.Group();
 
-  private trunkGeometry = new THREE.CylinderGeometry(0.07, 0.1, 0.55, 5);
-  private canopyGeometry = new THREE.ConeGeometry(0.38, 1.15, 6);
+  private trunkGeometry = new THREE.CylinderGeometry(0.05, 0.075, 0.42, 5);
+  private canopyGeometry = new THREE.ConeGeometry(0.3, 0.85, 6);
   private trunkMaterial = new THREE.MeshLambertMaterial({ color: 0x5d4630 });
   private canopyMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff, vertexColors: false });
   private trunks: THREE.InstancedMesh | null = null;
@@ -39,8 +39,8 @@ export class VegetationLayer {
 
   constructor() {
     this.group.name = 'vegetation';
-    this.trunkGeometry.translate(0, 0.275, 0);
-    this.canopyGeometry.translate(0, 0.93, 0);
+    this.trunkGeometry.translate(0, 0.21, 0);
+    this.canopyGeometry.translate(0, 0.66, 0);
     this.canopyMaterial.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = this.windUniform ?? { value: 0 };
       this.windUniform = shader.uniforms.uTime as WindUniform;
@@ -95,7 +95,7 @@ export class VegetationLayer {
         x: wx,
         z: wz,
         ground: sampleHeightWorld(map, wx, wz),
-        scale: 0.7 + hashUnit2d(0x33, x, y) * 0.75,
+        scale: 0.72 + hashUnit2d(0x33, x, y) * 0.5,
         rotation: hashUnit2d(0x44, x, y) * Math.PI * 2,
         phase: hashUnit2d(0x55, x, y) * Math.PI * 2,
         tint: hashUnit2d(0x66, x, y),
@@ -127,7 +127,7 @@ export class VegetationLayer {
       if (!tree) continue;
       quaternion.setFromAxisAngle(axis, tree.rotation);
       position.set(tree.x, tree.ground, tree.z);
-      scale.set(tree.scale, tree.scale * (0.85 + tree.tint * 0.4), tree.scale);
+      scale.set(tree.scale, tree.scale * (0.9 + tree.tint * 0.35), tree.scale);
       matrix.compose(position, quaternion, scale);
       trunks.setMatrixAt(i, matrix);
       canopies.setMatrixAt(i, matrix);

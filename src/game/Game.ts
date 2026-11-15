@@ -90,7 +90,7 @@ export class Game {
   private paused = false;
   private speed: GameSpeed = 1;
   private selection: Selection | null = null;
-  private fps = 0;
+  private fps = 60;
   private lastFrameTime = 0;
   private disposed = false;
   private buffer: TimedSnapshot[] = [];
@@ -144,7 +144,8 @@ export class Game {
       return;
     }
     delta = Math.min(delta, this.maxDeltaSeconds);
-    this.fps = this.fps === 0 ? 1 / delta : this.fps * 0.9 + (1 / delta) * 0.1;
+    const instant = 1 / Math.max(delta, 1 / 240);
+    this.fps = this.fps * 0.9 + instant * 0.1;
 
     const speed = this.effectiveSpeed();
     if (speed === 0) {

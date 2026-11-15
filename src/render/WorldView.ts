@@ -73,7 +73,7 @@ export class WorldView {
       {
         vehicles: () => this.vehicles.pickTargets(),
         buildings: () => this.cityLayer.pickTargets(),
-        terrain: () => this.terrain.group.children,
+        terrain: () => this.terrain.pickTargets(),
       },
       (x, z) => this.terrain.heightAt(x, z),
     );
@@ -164,9 +164,13 @@ export class WorldView {
     return { kind: 'tile', x: result.x, y: result.y };
   }
 
+  /** Picking programmatique (tests, menus contextuels). */
+  pickAtNdc(ndc: { x: number; y: number }): WorldTarget | null {
+    return this.toWorldTarget(this.picking.pickWithCamera(ndc, this.camera));
+  }
+
   private handleClick(ndc: { x: number; y: number }): void {
-    const result = this.picking.pickWithCamera(ndc, this.camera);
-    this.onSelect?.(this.toWorldTarget(result));
+    this.onSelect?.(this.pickAtNdc(ndc));
   }
 
   private handleDoubleClick(ndc: { x: number; y: number }): void {
@@ -184,11 +188,8 @@ export class WorldView {
   setSelection(target: WorldTarget | null): void {
     this.selectedVehicle = target?.kind === 'vehicle' ? target.id : null;
     this.vehicles.setSelected(this.selectedVehicle);
-    if (target?.kind === 'vehicle') {
-      this.followVehicle(target.id);
-    } else {
-      this.controller.setFollowTarget(null);
-    }
+    // Le simple clic sélectionne ; le double-clic (ou `focusVehicle`) suit.
+    if (target?.kind !== 'vehicle') this.controller.setFollowTarget(null);
   }
 
   /** Centre la caméra sur un véhicule et le suit. */

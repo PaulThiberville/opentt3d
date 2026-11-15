@@ -15,13 +15,13 @@
 
 import * as THREE from 'three';
 import type { MapSnapshot } from '../engine/protocol';
-import { cornerHeightWorld, isWaterKind, sampleHeightWorld, tileKindFromIndex } from '../game/mapGrid';
+import { HEIGHT_SCALE, cornerHeightWorld, isWaterKind, sampleHeightWorld, tileKindFromIndex } from '../game/mapGrid';
 import { hashUnit2d } from '../game/prng';
 import { hexToRgb, rgbToHex, shallowWaterColour, tileColour } from './tileVisuals';
 import { qualitySettings, type QualityLevel } from './quality';
 
 export const CHUNK_SIZE = 32;
-const WATER_OFFSET = 0.055;
+const WATER_OFFSET = 0.5;
 
 interface Chunk {
   cx: number;
@@ -68,11 +68,25 @@ export class TerrainLayer {
   private animateWater = true;
   private chunksX = 0;
   private chunksY = 0;
+  /** Compteur de chunks reconstruits (diagnostic/tests). */
+  chunksBuilt = 0;
+  private ocean: THREE.Mesh;
+  private oceanGeometry: THREE.PlaneGeometry;
+  private oceanMaterial: THREE.MeshBasicMaterial;
 
   constructor() {
     this.group.name = 'terrain';
     this.groundMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: false });
     this.waterMaterial = this.createWaterMaterial();
+    // Fond océanique : masque la découpe de la carte et donne une île crédible.
+    this.oceanGeometry = new THREE.PlaneGeometry(1, 1);
+    this.oceanGeometry.rotateX(-Math.PI / 2);
+    this.oceanMaterial = new THREE.MeshBasicMaterial({ color: 0x1b4664, fog: true });
+    this.ocean = new THREE.Mesh(this.oceanGeometry, this.oceanMaterial);
+    this.ocean.name = 'ocean-backdrop';
+    this.ocean.position.y = -0.45;
+    this.ocean.frustumCulled = false;
+    this.group.add(this.ocean);
   }
 
   get mapSnapshot(): MapSnapshot | null {
@@ -133,6 +147,8 @@ export class TerrainLayer {
       this.disposeChunks();
       this.chunksX = Math.ceil(map.width / CHUNK_SIZE);
       this.chunksY = Math.ceil(map.height / CHUNK_SIZE);
+      this.ocean.scale.set(map.width * 6, 1, map.height * 6);
+      this.ocean.position.set(map.width / 2, -0.45, map.height / 2);
       this.previous = null;
       this.rebuildAll();
     } else {
@@ -194,6 +210,7 @@ export class TerrainLayer {
   private buildChunk(cx: number, cy: number): void {
     const map = this.map;
     if (!map) return;
+    this.chunksBuilt += 1;
     const key = cy * this.chunksX + cx;
     const existing = this.chunks.get(key);
     if (existing) {
@@ -239,7 +256,7 @@ export class TerrainLayer {
         const variation = hashUnit2d(map.width, wx, wy);
         const colour = tileColour(kind, level, steepness, map.width);
         // Léger éclat aléatoire pour casser les aplats.
-        const shade = 0.94 + variation * 0.12;
+        const shade = 0.968 + variation * 0.064;
         hexToRgb(
           rgbToHex(((colour >> 16) & 0xff) * shade, ((colour >> 8) & 0xff) * shade, (colour & 0xff) * shade),
           rgb,
@@ -337,16 +354,17 @@ export class TerrainLayer {
             (wx + 1 < map.width && !isWaterKind(tileKindFromIndex(map.kind[index + 1] ?? 0))) ||
             (wy > 0 && !isWaterKind(tileKindFromIndex(map.kind[index - map.width] ?? 0))) ||
             (wy + 1 < map.height && !isWaterKind(tileKindFromIndex(map.kind[index + map.width] ?? 0)));
-          const base = landNeighbour ? shallowWaterColour(wx * 31 + wy) : 0x2f7ba2;
-          const shimmer = 0.93 + hashUnit2d(wx, wy, 91) * 0.14;
+          const base = landNeighbour ? shallowWaterColour(wx * 31 + wy) : 0x2a6f95;
+          const shimmer = 0.965 + hashUnit2d(wx, wy, 91) * 0.06;
           hexToRgb(
             rgbToHex(((base >> 16) & 0xff) * shimmer, ((base >> 8) & 0xff) * shimmer, (base & 0xff) * shimmer),
             waterRgb,
           );
-          const hA = cornerAt(tx, ty) + WATER_OFFSET;
-          const hB = cornerAt(tx + 1, ty) + WATER_OFFSET;
-          const hC = cornerAt(tx + 1, ty + 1) + WATER_OFFSET;
-          const hD = cornerAt(tx, ty + 1) + WATER_OFFSET;
+          const level = (map.heightMap[index] ?? 0) * HEIGHT_SCALE + WATER_OFFSET;
+          const hA = level;
+          const hB = level;
+          const hC = level;
+          const hD = level;
           const write = (x: number, h: number, z: number): void => {
             waterPositions[waterVertex * 3] = x;
             waterPositions[waterVertex * 3 + 1] = h;
@@ -376,6 +394,13 @@ export class TerrainLayer {
     }
 
     this.chunks.set(key, { cx, cy, ground, water });
+  }
+
+  /** Maillages ciblables au raycast (exclut le fond océanique). */
+  pickTargets(): THREE.Object3D[] {
+    const meshes: THREE.Object3D[] = [];
+    for (const chunk of this.chunks.values()) meshes.push(chunk.ground);
+    return meshes;
   }
 
   /** Hauteur du terrain (unités monde) en coordonnées tuiles fractionnaires. */
@@ -424,6 +449,9 @@ export class TerrainLayer {
   dispose(): void {
     this.disposeChunks();
     this.group.clear();
+    this.group.remove(this.ocean);
+    this.oceanGeometry.dispose();
+    this.oceanMaterial.dispose();
     this.groundMaterial.dispose();
     this.waterMaterial.dispose();
     this.map = null;

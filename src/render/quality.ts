@@ -45,7 +45,7 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualitySettings> = {
     waterAnimation: false,
     wind: false,
     maxTrees: 4_000,
-    ambientLight: 1.15,
+    ambientLight: 0.95,
   },
   medium: {
     level: 'medium',
@@ -60,7 +60,7 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualitySettings> = {
     waterAnimation: true,
     wind: true,
     maxTrees: 9_000,
-    ambientLight: 1,
+    ambientLight: 0.78,
   },
   high: {
     level: 'high',
@@ -75,7 +75,7 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualitySettings> = {
     waterAnimation: true,
     wind: true,
     maxTrees: 16_000,
-    ambientLight: 0.9,
+    ambientLight: 0.68,
   },
 };
 

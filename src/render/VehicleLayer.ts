@@ -62,6 +62,7 @@ export class VehicleLayer {
   private scale = new THREE.Vector3(1, 1, 1);
   private up = new THREE.Vector3(0, 1, 0);
   private tint = new THREE.Color();
+  private modelCounts = new Map<VehicleModelKind, number>();
 
   constructor() {
     this.group.name = 'vehicles';
@@ -88,9 +89,11 @@ export class VehicleLayer {
   update(vehicles: readonly RenderVehicle[]): void {
     for (const slot of this.slots.values()) slot.used = 0;
 
-    const counts = new Map<VehicleModelKind, number>();
-    for (const vehicle of vehicles) counts.set(vehicle.model, (counts.get(vehicle.model) ?? 0) + 1);
-    for (const [model, count] of counts) this.ensureSlot(model, count);
+    this.modelCounts.clear();
+    for (const vehicle of vehicles) {
+      this.modelCounts.set(vehicle.model, (this.modelCounts.get(vehicle.model) ?? 0) + 1);
+    }
+    for (const [model, count] of this.modelCounts) this.ensureSlot(model, count);
 
     for (const vehicle of vehicles) {
       const slot = this.slots.get(vehicle.model);

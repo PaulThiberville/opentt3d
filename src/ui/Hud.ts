@@ -89,7 +89,7 @@ export class Hud {
   private fpsValue: HTMLSpanElement;
   private qualityButton: HTMLButtonElement;
   private pauseButton: HTMLButtonElement;
-  private speedButtons: HTMLButtonElement[] = [];
+  private speedButtons: { button: HTMLButtonElement; speed: GameSpeed }[] = [];
   private selectionCard: HTMLDivElement;
   private selectionDot: HTMLSpanElement;
   private selectionTitle: HTMLDivElement;
@@ -131,7 +131,7 @@ export class Hud {
 
     const speedBlock = el('div', 'hud-stat hud-speed');
     speedBlock.append(el('span', 'hud-label', 'Vitesse'));
-    this.pauseButton = el('button', 'hud-button hud-pause', '❚❚');
+    this.pauseButton = el('button', 'hud-button hud-pause', 'II');
     this.pauseButton.type = 'button';
     this.pauseButton.title = 'Pause (Espace)';
     this.pauseButton.setAttribute('aria-label', 'Pause');
@@ -143,7 +143,7 @@ export class Hud {
       button.type = 'button';
       button.title = `Vitesse ${speed}×`;
       button.addEventListener('click', () => this.callbacks.onSpeedChange(speed));
-      this.speedButtons.push(button);
+      this.speedButtons.push({ button, speed });
       speedGroup.append(button);
     }
     speedBlock.append(speedGroup);
@@ -204,7 +204,6 @@ export class Hud {
       item.append(el('kbd', undefined, keys ?? ''), el('span', undefined, description ?? ''));
       helpList.append(item);
     }
-    helpTitle.append();
     this.helpPanel.append(helpTitle, helpList);
 
     this.loadingOverlay = el('div', 'hud-overlay hud-loading');
@@ -252,11 +251,10 @@ export class Hud {
     this.setText(this.dateValue, 'date', formatDate(snapshot));
     this.setText(this.fpsValue, 'fps', state.fps > 0 ? `${Math.round(state.fps)}` : '—');
     this.setText(this.qualityButton, 'quality', QUALITY_PRESETS[state.quality].label);
-    this.setText(this.pauseButton, 'pause', state.paused ? '▶' : '❚❚');
+    this.setText(this.pauseButton, 'pause', state.paused ? '▶' : 'II');
     this.pauseButton.classList.toggle('is-active', state.paused);
-    for (const button of this.speedButtons) {
-      const value = button.textContent === '2×' ? 2 : 1;
-      button.classList.toggle('is-active', !state.paused && state.speed === value);
+    for (const entry of this.speedButtons) {
+      entry.button.classList.toggle('is-active', !state.paused && state.speed === entry.speed);
     }
 
     const selection = state.selection;

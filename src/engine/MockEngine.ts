@@ -528,17 +528,20 @@ class WorldBuilder {
         }
 
         const inland = 1 - x / width;
-        const ridges = fbm(seed + 0x3a, x * 0.032, y * 0.032, 4);
-        const detail = fbm(seed + 0x51, x * 0.1, y * 0.1, 2);
-        const raw = 2 + ridges * 9 + detail * 2.4 + inland * 3.2;
+        const macro = fbm(seed + 0x3a, x * 0.018, y * 0.018, 4);
+        const ridge = 1 - Math.abs(2 * fbm(seed + 0x77, x * 0.045, y * 0.045, 3) - 1);
+        const detail = valueNoise(seed + 0x51, x * 0.12, y * 0.12);
+        const raw = 1.2 + macro * 8.5 + Math.pow(ridge, 3) * 5.5 + detail * 1.2 + inland * 1.2;
         const level = Math.max(1, Math.min(15, Math.round(raw)));
         this.heightMap[index] = level;
 
         const treeNoise = valueNoise(seed + 0x91, x * 0.115, y * 0.115);
-        if (level >= 12 || (level >= 10 && treeNoise > 0.58)) {
+        if (level >= 12) {
           this.kind[index] = K.rough;
         } else if (treeNoise > 0.635) {
           this.kind[index] = K.trees;
+        } else if (level >= 11 && treeNoise > 0.6) {
+          this.kind[index] = K.rough;
         } else {
           this.kind[index] = K.grass;
         }
@@ -580,7 +583,7 @@ class WorldBuilder {
       const x = index % width;
       const y = (index - x) / width;
       const next = (distances[index] ?? 0) + 1;
-      if (next > 8) continue;
+      if (next > 4) continue;
       const visit = (nx: number, ny: number): void => {
         if (!inBounds(width, height, nx, ny)) return;
         const neighbour = tileIndex(nx, ny, width);
@@ -595,8 +598,8 @@ class WorldBuilder {
     }
     for (let index = 0; index < heightMap.length; index += 1) {
       const distance = distances[index] ?? 9;
-      if (distance === 0 || distance > 8) continue;
-      const cap = 2 + distance * 1.1;
+      if (distance <= 0 || distance > 4) continue;
+      const cap = 1 + distance * 2;
       heightMap[index] = Math.min(heightMap[index] ?? 0, Math.max(1, Math.round(cap)));
     }
   }
@@ -610,16 +613,16 @@ class WorldBuilder {
     for (let i = 0; i < 3; i += 1) {
       const anchor = anchors[i] ?? { x: this.width / 2, y: this.height / 2 };
       const spot =
-        this.findLand(anchor.x, anchor.y, 22, 4) ?? { x: Math.round(anchor.x), y: Math.round(anchor.y) };
+        this.findLand(anchor.x, anchor.y, 22, 5) ?? { x: Math.round(anchor.x), y: Math.round(anchor.y) };
       const level = Math.max(2, this.heightMap[this.index(spot.x, spot.y)] ?? 3);
-      this.flatten(spot.x, spot.y, 7, 7, level);
-      const radius = 4;
+      this.flatten(spot.x, spot.y, 8, 8, level);
+      const radius = 5;
       let buildings = 0;
       for (let dy = -radius; dy <= radius; dy += 1) {
         for (let dx = -radius; dx <= radius; dx += 1) {
           const d = Math.sqrt(dx * dx + dy * dy);
           if (d > radius + 0.35) continue;
-          if (this.rng.chance(0.16 + (radius - d) * 0.075)) {
+          if (this.rng.chance(0.42 + (radius - d) * 0.1)) {
             this.setTile(spot.x + dx, spot.y + dy, K.house);
             buildings += 1;
           }

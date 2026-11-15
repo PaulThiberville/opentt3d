@@ -96,7 +96,7 @@ export class Renderer {
     this.hemi = new THREE.HemisphereLight(0xe6f2ff, 0x38412f, this.settings.ambientLight);
     this.scene.add(this.hemi);
 
-    this.sun = new THREE.DirectionalLight(0xfff0cf, 2.1);
+    this.sun = new THREE.DirectionalLight(0xfff0cf, 2.35);
     this.sun.position.set(60, 120, 45);
     this.sun.castShadow = this.settings.shadows;
     this.sun.shadow.mapSize.set(this.settings.shadowMapSize, this.settings.shadowMapSize);

@@ -17,15 +17,15 @@ export interface Rgb {
 /** Palette de base par type de tuile (hex sRGB). */
 export const TILE_COLOURS: Record<TileKind, number> = {
   void: 0x0d1218,
-  clear: 0x6f924f,
-  grass: 0x54803f,
-  rough: 0x7d7b58,
+  clear: 0x5f8a43,
+  grass: 0x477334,
+  rough: 0x6d6452,
   water: 0x1f4f70,
-  coast: 0xc9b27c,
+  coast: 0xc2a878,
   rail: 0x5c5348,
   road: 0x4d4d4f,
   house: 0x8c8478,
-  trees: 0x39602f,
+  trees: 0x2f5428,
   station: 0x9a9a96,
   industry: 0x746457,
   bridge: 0x6b5540,
@@ -84,15 +84,15 @@ export function tileColour(kind: TileKind, heightLevel: number, steepness: numbe
   // Altitude : les sommets tirent vers la roche claire.
   if (kind === 'grass' || kind === 'clear' || kind === 'trees' || kind === 'rough') {
     const altitude = Math.max(0, Math.min(1, (heightLevel - 8) / 6));
-    if (altitude > 0) colour = mixHex(colour, 0x9a9484, altitude * 0.55);
-    if (steepness >= 3) colour = mixHex(colour, 0x6e6656, 0.35);
+    if (altitude > 0) colour = mixHex(colour, 0x8d8676, altitude * 0.5);
+    if (steepness >= 3) colour = mixHex(colour, 0x5f584a, 0.32);
   }
   return colour;
 }
 
 /** Variation appliquée aux eaux peu profondes (proches d'une côte). */
 export function shallowWaterColour(seed: number): number {
-  return mixHex(TILE_COLOURS.water, 0x5fa8c4, 0.28 + hashUnit2d(seed, 7, 3) * 0.12);
+  return mixHex(TILE_COLOURS.water, 0x4a93b4, 0.2 + hashUnit2d(seed, 7, 3) * 0.08);
 }
 
 /** Couleur d'un bâtiment de ville, selon le quartier et la graine. */

@@ -86,10 +86,10 @@ export class CityLayer {
           const distance = Math.sqrt(dx * dx + dy * dy);
           if (distance > MAX_RADIUS) continue;
 
-          const footprint = Math.min(MAX_FOOTPRINT, 0.56 + rng.float(0, 0.22));
+          const footprint = Math.min(MAX_FOOTPRINT, 0.6 + rng.float(0, 0.18));
           const centrality = Math.max(0, 1 - distance / MAX_RADIUS);
-          const tall = centrality > 0.62 && hashUnit2d(town.id, x, y) > 0.55;
-          const height = tall ? 1.5 + rng.float(0, 1.6) : 0.55 + rng.float(0, 0.75);
+          const tall = centrality > 0.55 && hashUnit2d(town.id, x, y) > 0.52;
+          const height = tall ? 1.4 + rng.float(0, 1.3) : 0.8 + rng.float(0, 0.7);
           placements.push({
             x: x + 0.5 + rng.float(-0.03, 0.03),
             y: y + 0.5 + rng.float(-0.03, 0.03),
@@ -97,8 +97,8 @@ export class CityLayer {
             width: footprint,
             depth: Math.min(MAX_FOOTPRINT, footprint * rng.float(0.85, 1.08)),
             body: buildingColour(town.id * 31 + x, y, 0x9aa0a4),
-            roof: tall ? 0x5a5f66 : rng.chance(0.5) ? 0x8a4a3c : 0x5f5a52,
-            roofHeight: tall ? 0.22 : 0.3 + rng.float(0, 0.16),
+            roof: tall ? 0x454b55 : rng.chance(0.55) ? 0x8f4132 : 0x555a60,
+            roofHeight: tall ? 0.2 : 0.3 + rng.float(0, 0.2),
           });
         }
       }
