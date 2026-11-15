@@ -31,9 +31,10 @@ describe('budget de mouvement', () => {
       (match) => match[1] ?? '',
     );
     expect(declarations.length).toBeGreaterThan(10);
+    // Fondus ambiants, hors micro-animation : démo de menu et hint d'intro.
+    const ambient = new Set(['opacity 800ms ease', 'opacity 400ms ease']);
     for (const declaration of declarations) {
-      // La démo de fond garde son fondu d'apparition, hors micro-animation.
-      if (declaration.trim() === 'opacity 800ms ease') continue;
+      if (ambient.has(declaration.trim())) continue;
       for (const duration of durations(declaration)) {
         expect(duration, declaration).toBeLessThanOrEqual(250);
       }
