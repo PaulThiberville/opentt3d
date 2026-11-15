@@ -1,0 +1,32 @@
+{
+  "name": "opentt3d",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "OpenTTD en 3D : moteur OpenTTD headless en WebAssembly, frontend Three.js, multijoueur P2P",
+  "license": "GPL-2.0-or-later",
+  "author": "Paul Thiberville",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "engine:fetch": "bash engine/scripts/fetch.sh",
+    "engine:build": "bash engine/scripts/build.sh",
+    "engine:test": "node engine/scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "nostr-tools": "2.26.0",
+    "three": "0.187.0",
+    "trystero": "0.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/three": "0.187.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.8",
+    "vitest": "5.1.0"
+  }
+}

@@ -1,0 +1,21 @@
+node_modules/
+dist/
+coverage/
+.DS_Store
+*.log
+.vite/
+
+# Moteur : sources upstream, artefacts de build et caches locaux
+engine/upstream/
+engine/build/
+engine/build-host/
+engine/.cache/
+public/engine/
+*.wasm
+*.wasm.map
+!tests/fixtures/**/*.wasm
+
+# Outils
+.idea/
+.vscode/
+*.swp
