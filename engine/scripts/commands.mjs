@@ -81,7 +81,26 @@ async function loadFactory() {
 
 const factory = await loadFactory();
 
-async function createInstance(label) {
+/**
+ * Sortie interdite : `Backup<T>` d'OpenTTD journalise ce message quand une
+ * valeur sauvegardée n'est pas restaurée. Aucune commande du pont ne doit en
+ * produire (voir wiki, Moteur-WASM > Commandes).
+ */
+const FORBIDDEN_OUTPUT = /Backed-up value was not restored/i;
+
+function makeDiagnostics() {
+  return { stdout: [], stderr: [] };
+}
+
+function assertNoBackupWarnings(lines, what) {
+  const offenders = lines.filter((line) => FORBIDDEN_OUTPUT.test(line));
+  assert(
+    offenders.length === 0,
+    `${what} : ${offenders.length} avertissement(s) « Backed-up value was not restored » (${offenders[0]})`,
+  );
+}
+
+async function createInstance(label, diagnostics = makeDiagnostics()) {
   const engine = await factory({
     locateFile: (file) => path.join(ARTIFACT_DIR, file),
     getPreloadedPackage: (name) => {
@@ -89,8 +108,12 @@ async function createInstance(label) {
       const data = fs.readFileSync(file);
       return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
     },
-    print: VERBOSE ? (line) => console.log(`[${label}] ${line}`) : () => {},
+    print: (line) => {
+      diagnostics.stdout.push(line);
+      if (VERBOSE) console.log(`[${label}] ${line}`);
+    },
     printErr: (line) => {
+      diagnostics.stderr.push(line);
       if (VERBOSE) console.error(`[${label}] ${line}`);
     },
   });
@@ -334,7 +357,8 @@ function localCompany(state) {
  * Joue le scénario complet sur une instance neuve et renvoie les mesures.
  */
 async function runScenario(label) {
-  const api = wrap(await createInstance(label));
+  const diagnostics = makeDiagnostics();
+  const api = wrap(await createInstance(label, diagnostics));
   if (api.boot() !== 0) fail(`ottd_boot() : ${readError(api)}`);
 
   const created = api.newGameEx(
@@ -348,7 +372,26 @@ async function runScenario(label) {
   const json = makeJsonReader(api.engine);
   const map = makeMapReader(api.engine);
   const commands = makeCommandRunner(api.engine);
-  const run = (command) => commands.run(command);
+  /**
+   * Envoie une commande et vérifie qu'elle n'a produit aucun avertissement de
+   * `Backup` non restauré (attribution immédiate à la commande fautive).
+   */
+  const run = (command) => {
+    const markOut = diagnostics.stdout.length;
+    const markErr = diagnostics.stderr.length;
+    const reply = commands.run(command);
+    const what =
+      typeof command === 'string'
+        ? 'commande JSON brute'
+        : command.type === 'build'
+          ? `build ${command.tool}`
+          : `vehicle ${command.action}`;
+    assertNoBackupWarnings(
+      [...diagnostics.stdout.slice(markOut), ...diagnostics.stderr.slice(markErr)],
+      `${label} : ${what}`,
+    );
+    return reply;
+  };
 
   const initial = json.read();
   const initialMap = map.read();
@@ -758,6 +801,11 @@ async function runScenario(label) {
     hashBeforeInvalid,
     models: { bus: busBuy.model, train: trainBuy.model },
   };
+
+  assertNoBackupWarnings(
+    [...diagnostics.stdout, ...diagnostics.stderr],
+    `${label} : scénario complet`,
+  );
 
   replies.length = 0;
   json.free();
