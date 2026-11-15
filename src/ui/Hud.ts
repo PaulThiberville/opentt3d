@@ -358,7 +358,7 @@ export class Hud {
     const vehicle = state.vehicle ?? null;
     const depot = vehicle ? null : (state.depot ?? null);
     const place = vehicle || depot ? null : (state.place ?? null);
-    this.depotPanel.update(depot);
+    this.depotPanel.update(depot, state.quality);
     this.vehiclePanel.update(vehicle);
     this.placePanel.update(place);
     this.financePanel.update(state.finance ?? null);
@@ -604,6 +604,7 @@ export class Hud {
     this.buildOptions.dispose();
     this.buildOptions.element.remove();
     this.financePanel.dispose();
+    this.depotPanel.dispose();
     this.minimap.dispose();
     this.news.clear();
     this.root.remove();
