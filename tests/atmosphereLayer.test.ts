@@ -14,6 +14,7 @@ import {
 } from '../src/render/AtmosphereLayer';
 import { IndustryLayer } from '../src/render/IndustryLayer';
 import { QUALITY_LEVELS, qualitySettings } from '../src/render/quality';
+import { sampleHeightWorld } from '../src/game/mapGrid';
 import { VegetationLayer } from '../src/render/VegetationLayer';
 import { VehicleLayer } from '../src/render/VehicleLayer';
 import { sunState } from '../src/render/dayNight';
@@ -243,6 +244,149 @@ describe('AtmosphereLayer : vie et nuit', () => {
     update(layer, 1);
     expect(layer.systemVisible('dust')).toBe(false);
     layer.dispose();
+  });
+});
+
+describe('AtmosphereLayer : poussière de chantier discrète (#179)', () => {
+  function pathTiles(fromX: number, fromY: number, toX: number, toY: number) {
+    const tiles: { x: number; y: number }[] = [];
+    const steps = Math.max(Math.abs(toX - fromX), Math.abs(toY - fromY));
+    for (let step = 0; step <= steps; step += 1) {
+      const t = steps === 0 ? 0 : step / steps;
+      tiles.push({
+        x: Math.round(fromX + (toX - fromX) * t),
+        y: Math.round(fromY + (toY - fromY) * t),
+      });
+    }
+    return tiles;
+  }
+
+  it('réduit fortement le budget, la taille et l’opacité', () => {
+    expect(ATMOSPHERE_BUDGETS.low.dust).toBe(0);
+    expect(ATMOSPHERE_BUDGETS.medium.dust).toBeLessThanOrEqual(12);
+    expect(ATMOSPHERE_BUDGETS.high.dust).toBeLessThanOrEqual(20);
+    expect(ATMOSPHERE_BUDGETS.high.dust).toBeGreaterThan(ATMOSPHERE_BUDGETS.medium.dust);
+
+    const world = makeWorld();
+    const layer = new AtmosphereLayer();
+    layer.applyWorld(world.map, world.towns, world.stations);
+    layer.setNight(0);
+    layer.setQuality('high');
+    layer.setConstructionSite({
+      x: 30.5,
+      z: 30.5,
+      tiles: pathTiles(28, 30, 34, 30),
+    });
+    update(layer, 1);
+    expect(layer.dustVisible).toBe(true);
+    expect(layer.dustOpacity).toBeGreaterThan(0);
+    expect(layer.dustOpacity).toBeLessThanOrEqual(0.2);
+    expect(layer.dustSize).toBeLessThanOrEqual(0.55);
+    expect(layer.dustSize).toBeGreaterThan(0);
+    expect(layer.pointSystems.dust).toBe(ATMOSPHERE_BUDGETS.high.dust);
+    layer.dispose();
+  });
+
+  it('borne les particules à l’emprise du plan et à une faible hauteur', () => {
+    const world = makeWorld();
+    const layer = new AtmosphereLayer();
+    layer.applyWorld(world.map, world.towns, world.stations);
+    layer.setNight(0);
+    layer.setQuality('high');
+    const tiles = pathTiles(20, 20, 28, 20);
+    layer.setConstructionSite({ x: 24.5, z: 20.5, tiles });
+    update(layer, 4);
+    expect(layer.dustTileAnchorCount).toBe(tiles.length);
+
+    const positions = layer.positionsOf('dust');
+    const count = layer.budgetSnapshot.dust;
+    let visibleParticles = 0;
+    for (let index = 0; index < count; index += 1) {
+      const offset = index * 3;
+      const x = positions[offset]!;
+      const y = positions[offset + 1]!;
+      const z = positions[offset + 2]!;
+      if (y < -500) continue;
+      visibleParticles += 1;
+      // Rayon borné à une demi-tuile autour du tracé (20..28, y = 20).
+      expect(x).toBeGreaterThanOrEqual(19.4);
+      expect(x).toBeLessThanOrEqual(29.6);
+      expect(z).toBeGreaterThanOrEqual(19.4);
+      expect(z).toBeLessThanOrEqual(21.6);
+      const ground = sampleHeightWorld(world.map, x, z);
+      expect(y).toBeGreaterThanOrEqual(ground);
+      expect(y).toBeLessThanOrEqual(ground + 0.8);
+    }
+    expect(visibleParticles).toBeGreaterThan(0);
+    layer.dispose();
+  });
+
+  it('s’éteint rapidement même quand le plan reste affiché', () => {
+    const world = makeWorld();
+    const layer = new AtmosphereLayer();
+    layer.applyWorld(world.map, world.towns, world.stations);
+    layer.setNight(0);
+    layer.setConstructionSite({ x: 30.5, z: 30.5, tiles: pathTiles(29, 30, 32, 30) });
+    update(layer, 2);
+    expect(layer.systemVisible('dust')).toBe(true);
+    expect(layer.dustOpacity).toBeGreaterThan(0);
+
+    // Une seconde plus tard, la bouffée a disparu sans que le plan change.
+    for (let frame = 0; frame < 12; frame += 1) {
+      layer.update(0.1, new THREE.Vector3(30, 40, 30), 0.5);
+    }
+    expect(layer.systemVisible('dust')).toBe(false);
+    expect(layer.dustOpacity).toBe(0);
+    expect(layer.hasConstructionSite).toBe(true);
+    expect(layer.pointSystems.dust).toBe(0);
+
+    // Un nouveau plan relance une bouffée, sans réallouer de buffer.
+    const before = layer.positionsOf('dust');
+    layer.setConstructionSite({ x: 31.5, z: 30.5, tiles: pathTiles(30, 30, 33, 30) });
+    update(layer, 2);
+    expect(layer.systemVisible('dust')).toBe(true);
+    expect(layer.positionsOf('dust')).toBe(before);
+    layer.dispose();
+  });
+
+  it('est coupée en low et sous reduced motion, jamais par un plan invalide', () => {
+    const world = makeWorld();
+    const layer = new AtmosphereLayer();
+    layer.applyWorld(world.map, world.towns, world.stations);
+    layer.setNight(0);
+    layer.setQuality('low');
+    layer.setConstructionSite({ x: 30.5, z: 30.5 });
+    update(layer, 1);
+    expect(layer.dustVisible).toBe(false);
+    expect(layer.dustOpacity).toBe(0);
+    expect(layer.pointSystems.dust).toBe(0);
+
+    layer.setQuality('medium');
+    layer.setReducedMotion(true);
+    layer.setConstructionSite({ x: 30.5, z: 30.5 });
+    update(layer, 1);
+    expect(layer.dustVisible).toBe(false);
+    expect(layer.dustOpacity).toBe(0);
+
+    layer.setReducedMotion(false);
+    layer.setConstructionSite({ x: 30.5, z: 30.5 });
+    update(layer, 1);
+    expect(layer.dustVisible).toBe(true);
+    expect(layer.dustOpacity).toBeGreaterThan(0);
+    layer.dispose();
+  });
+
+  it('libère la bouffée au dispose', () => {
+    const world = makeWorld();
+    const layer = new AtmosphereLayer();
+    layer.applyWorld(world.map, world.towns, world.stations);
+    layer.setConstructionSite({ x: 30.5, z: 30.5, tiles: pathTiles(29, 30, 32, 30) });
+    update(layer, 2);
+    layer.dispose();
+    expect(layer.dustVisible).toBe(false);
+    expect(layer.dustOpacity).toBe(0);
+    expect(layer.dustTileAnchorCount).toBe(0);
+    expect(layer.particleCount).toBe(0);
   });
 });
 

@@ -314,11 +314,12 @@ export class WorldView {
   /** Affiche le fantôme du plan courant (ou le masque avec `null`). */
   setBuildPlan(plan: BuildPlan | null): void {
     this.buildOverlay.setPlan(plan, this.currentMap);
-    // Poussière de chantier : uniquement sur un tracé accepté, au centre.
+    // Poussière de chantier : bouffée discrète bornée aux tuiles du plan.
     if (plan && plan.valid) {
       this.atmosphere.setConstructionSite({
         x: (plan.from.x + plan.to.x) / 2 + 0.5,
         z: (plan.from.y + plan.to.y) / 2 + 0.5,
+        tiles: plan.tiles,
       });
     } else {
       this.atmosphere.setConstructionSite(null);
