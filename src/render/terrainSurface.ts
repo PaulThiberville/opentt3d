@@ -25,8 +25,17 @@ export const TERRAIN_SUBDIVISION: Record<QualityLevel, number> = {
   high: 2,
 };
 
-export function terrainSubdivision(level: QualityLevel): number {
-  return TERRAIN_SUBDIVISION[level] ?? 1;
+/**
+ * Au-delà de ce nombre de tuiles, la haute qualité garde la peau procédurale
+ * mais renonce à la subdivision : sur 512×512 elle coûte 4× plus de triangles
+ * sans gain visible à distance de jeu, et fait passer le rendu sous 60 fps.
+ */
+export const TERRAIN_HIGH_SUBDIVISION_MAX_TILES = 100_000;
+
+export function terrainSubdivision(level: QualityLevel, tileCount = 0): number {
+  const subdivision = TERRAIN_SUBDIVISION[level] ?? 1;
+  if (level === 'high' && tileCount > TERRAIN_HIGH_SUBDIVISION_MAX_TILES) return 1;
+  return subdivision;
 }
 
 /**
@@ -69,7 +78,7 @@ export function terrainBudget(
 ): TerrainBudget {
   const safeWidth = Math.max(0, Math.floor(width));
   const safeHeight = Math.max(0, Math.floor(height));
-  const subdivision = terrainSubdivision(level);
+  const subdivision = terrainSubdivision(level, safeWidth * safeHeight);
   const chunksX = Math.ceil(safeWidth / chunkSize);
   const chunksY = Math.ceil(safeHeight / chunkSize);
   let vertices = 0;

@@ -100,6 +100,15 @@ describe('TerrainLayer', () => {
     layer.dispose();
   });
 
+  it('désactive la subdivision haute sur une très grande carte', () => {
+    const layer = new TerrainLayer();
+    layer.setQuality('high');
+    layer.setMap(makeMap(320, 320));
+    expect(layer.tileSubdivision).toBe(1);
+    expect(totalTriangles(layer)).toBe(320 * 320 * 2);
+    layer.dispose();
+  });
+
   it('lisse les normales par sommet au lieu de les laisser par face', () => {
     const layer = new TerrainLayer();
     layer.setMap(makeMap(64, 64));
@@ -284,16 +293,20 @@ describe('budgets de terrain', () => {
       const low = terrainBudget(size, size, 'low');
       const medium = terrainBudget(size, size, 'medium');
       const high = terrainBudget(size, size, 'high');
+      // La subdivision haute est désactivée au-delà de 100 000 tuiles.
+      const highSubdivision = size > 256 ? 1 : 2;
       expect(low.subdivision).toBe(1);
       expect(medium.subdivision).toBe(1);
-      expect(high.subdivision).toBe(2);
+      expect(high.subdivision).toBe(highSubdivision);
 
       expect(low.triangles).toBe(size * size * 2);
       expect(medium.triangles).toBe(low.triangles);
-      expect(high.triangles).toBe(low.triangles * 4);
+      expect(high.triangles).toBe(low.triangles * highSubdivision ** 2);
       expect(low.indices).toBe(low.triangles * 3);
       expect(low.vertices).toBe(Math.ceil(size / CHUNK_SIZE) ** 2 * (CHUNK_SIZE + 1) ** 2);
-      expect(high.vertices).toBe(Math.ceil(size / CHUNK_SIZE) ** 2 * (CHUNK_SIZE * 2 + 1) ** 2);
+      expect(high.vertices).toBe(
+        Math.ceil(size / CHUNK_SIZE) ** 2 * (CHUNK_SIZE * highSubdivision + 1) ** 2,
+      );
     }
   });
 
@@ -301,6 +314,8 @@ describe('budgets de terrain', () => {
     expect(terrainSubdivision('low')).toBe(1);
     expect(terrainSubdivision('medium')).toBe(1);
     expect(terrainSubdivision('high')).toBe(2);
+    // Garde-fou : 512×512 dépasse le seuil, la haute qualité reste en 1×1.
+    expect(terrainSubdivision('high', 200_000)).toBe(1);
   });
 
   it('gère les cartes non multiples de la taille de chunk', () => {

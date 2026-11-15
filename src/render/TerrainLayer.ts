@@ -333,6 +333,7 @@ ${SKIN_NOISE_GLSL}`,
       this.ocean.scale.set(map.width * 6, 1, map.height * 6);
       this.ocean.position.set(map.width / 2, -0.45, map.height / 2);
       this.previous = null;
+      this.subdivision = this.resolveSubdivision();
       this.rebuildAll();
     } else {
       this.applyDelta(map);
@@ -763,11 +764,17 @@ ${SKIN_NOISE_GLSL}`,
     this.skinUniform.value = terrainSkinStrength(level);
     this.waterMaterial.shininess =
       settings.level === 'low' ? 40 : settings.level === 'high' ? 130 : 90;
-    const subdivision = terrainSubdivision(level);
+    const subdivision = this.resolveSubdivision();
     if (subdivision !== this.subdivision) {
       this.subdivision = subdivision;
       if (this.map) this.rebuildAll();
     }
+  }
+
+  /** Subdivision applicable à la carte courante (adaptative en haute qualité). */
+  private resolveSubdivision(): number {
+    const tiles = this.map ? this.map.width * this.map.height : 0;
+    return terrainSubdivision(this.quality, tiles);
   }
 
   /** 0 = jour, 1 = nuit : active l'émission des routes, rails et de l'eau. */
