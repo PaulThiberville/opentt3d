@@ -159,6 +159,28 @@ export interface DepotSnapshot {
   height: number;
 }
 
+/** Action municipale proposée par l'autorité locale (#166). */
+export type TownActionKind = 'advertise' | 'fund_roads' | 'fund_buildings';
+
+/**
+ * Disponibilité et coût d'une action municipale. Le coût est déjà indexé sur
+ * l'inflation par le moteur : l'UI l'affiche tel quel et ne le recalcule pas.
+ */
+export interface TownActionSnapshot {
+  available: boolean;
+  cost: number;
+}
+
+/** Autorité locale d'une ville pour l'entreprise locale (#166). */
+export interface TownAuthoritySnapshot {
+  /**
+   * Échelle moteur : mock 0..100, pont OpenTTD 0..1000. L'UI normalise toute
+   * comparaison via `normalizeRating` et n'affiche jamais la valeur brute.
+   */
+  rating: number;
+  actions: Record<TownActionKind, TownActionSnapshot>;
+}
+
 export interface TownSnapshot {
   id: number;
   name: string;
@@ -169,6 +191,8 @@ export interface TownSnapshot {
   /** Nombre de bâtiments de la ville, pour le niveau de détail. */
   buildings: number;
   rating: number;
+  /** Absent des snapshots antérieurs à #166 : l'UI retombe sur `rating`. */
+  authority?: TownAuthoritySnapshot;
 }
 
 export interface IndustrySnapshot {
@@ -181,6 +205,30 @@ export interface IndustrySnapshot {
   production: number;
   transported: number;
   stocks: { cargo: string; amount: number }[];
+  /** Cargaisons acceptées par l'industrie (chaînes de production, #167). */
+  accepts?: string[];
+  /** Taux de service 0..100 (transporté / production), exposé depuis #167. */
+  serviceRate?: number;
+}
+
+/**
+ * Subvention proposée ou attribuée (#166/#167).
+ *
+ * Une offre est attribuée automatiquement au premier transporteur qui relie
+ * la source à la destination avec la cargaison concernée : il n'existe pas de
+ * commande « accepter » dans OpenTTD, l'UI explique cette règle.
+ */
+export interface SubsidySnapshot {
+  id: number;
+  cargo: string;
+  from: string;
+  to: string;
+  fromKind: 'town' | 'industry';
+  toKind: 'town' | 'industry';
+  /** Mois restants avant expiration de l'offre ou de la subvention. */
+  remainingMonths: number;
+  /** Entreprise bénéficiaire, ou `null` tant que l'offre n'est pas attribuée. */
+  awardedTo: CompanyId | null;
 }
 
 export interface CompanySnapshot {
@@ -199,6 +247,10 @@ export interface CompanySnapshot {
   isAI: boolean;
   isLocal: boolean;
   bankrupt: boolean;
+  /** Plafond de prêt courant (#165), absent des snapshots antérieurs. */
+  maxLoan?: number;
+  /** Mois consécutifs de trésorerie négative ; 0 = entreprise saine. */
+  monthsOfBankruptcy?: number;
 }
 
 export interface EconomySnapshot {
@@ -210,6 +262,16 @@ export interface EconomySnapshot {
   /** Multiplicateur de vitesse courant (1 = normal). */
   speed: number;
   paused: boolean;
+  /** Inflation cumulée en pourcentage depuis le début de partie (#165). */
+  inflation?: number;
+  /** Difficulté 0..3 lue par le moteur (#165). */
+  difficulty?: number;
+  /** Taux d'intérêt annuel des prêts, en pourcentage (#165). */
+  interestRate?: number;
+  /** Plafond de prêt global avant application par entreprise (#165). */
+  maxLoan?: number;
+  /** Pas minimal de remboursement/emprunt (#165). */
+  loanInterval?: number;
 }
 
 export interface SnapshotMeta {
@@ -232,6 +294,8 @@ export interface WorldSnapshot {
   /** Dépôts route/rail, ids de pool stables (voir `DepotSnapshot`). */
   depots: DepotSnapshot[];
   vehicles: VehicleSnapshot[];
+  /** Subventions proposées et attribuées (#166/#167). */
+  subsidies?: SubsidySnapshot[];
   /** Nouvelles du jeu, consommées par le HUD. */
   news: { tick: number; kind: 'info' | 'warning' | 'error' | 'company'; text: string }[];
   /** Événements ponctuels entre deux snapshots (départ, arrivée, panne…). */
@@ -243,7 +307,11 @@ export type WorldEvent =
   | { type: 'vehicle_departed'; vehicle: number; station: number; tick: number }
   | { type: 'company_bankrupt'; company: CompanyId; tick: number }
   | { type: 'town_growth'; town: number; population: number; tick: number }
-  | { type: 'industry_production'; industry: number; amount: number; tick: number };
+  | { type: 'industry_production'; industry: number; amount: number; tick: number }
+  | { type: 'loan_changed'; company: CompanyId; loan: number; tick: number }
+  | { type: 'subsidy_awarded'; subsidy: number; company: CompanyId; tick: number }
+  | { type: 'subsidy_expired'; subsidy: number; tick: number }
+  | { type: 'town_action'; town: number; action: TownActionKind; tick: number };
 
 export interface EngineInitOptions {
   /** URL du module WASM ou chemin local. */
@@ -327,6 +395,20 @@ export type EngineCommand =
        * (`depots[].id` pour `kind: 'depot'`).
        */
       orders?: { target: number; kind: OrderTargetKind }[];
+    }
+  | {
+      /** Prêts bancaires (#165). `amount` absent = un pas de prêt. */
+      type: 'finance';
+      action: 'increase_loan' | 'decrease_loan';
+      company: CompanyId;
+      amount?: number;
+    }
+  | {
+      /** Actions de l'autorité locale (#166). */
+      type: 'town_action';
+      action: TownActionKind;
+      company: CompanyId;
+      town: number;
     };
 
 export interface EngineStatus {

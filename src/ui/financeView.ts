@@ -8,16 +8,32 @@
  * seule ligne agrégée est affichée et le panneau explique la limite.
  */
 
-import type { CompanySnapshot, WorldSnapshot } from '../engine/protocol';
+import type {
+  CompanyId,
+  CompanySnapshot,
+  SubsidySnapshot,
+  WorldSnapshot,
+} from '../engine/protocol';
+import {
+  BANKRUPTCY_MONTHS,
+  bankruptcyWarning,
+  difficultyOf,
+  loanCapacity,
+  loanIntervalOf,
+  maxLoanOf,
+} from '../game/economyRules';
 import { formatInt, formatMoney, formatPercent, formatSignedMoney } from './format';
 import { cargoLabel, CARGO_LABEL_KEYS } from './labels';
 import { t, type TranslationKey } from './i18n';
 import type {
+  BankruptcyAlertView,
   FinanceAlertView,
   FinanceCategoryView,
   FinanceHistoryPoint,
   FinancePanelView,
   FinanceRankingRow,
+  FinanceSubsidyView,
+  FinanceView,
   ReportActionView,
 } from './types';
 import { percentOf } from './charts';
@@ -416,4 +432,152 @@ export function financeChartLabel(points: readonly FinanceHistoryPoint[]): strin
     delta: formatSignedMoney(delta),
     points: formatInt(points.length),
   });
+}
+
+const DIFFICULTY_KEYS = [
+  'difficulty.easy',
+  'difficulty.normal',
+  'difficulty.hard',
+  'difficulty.expert',
+] as const;
+
+function difficultyLabel(difficulty: number): string {
+  return t(DIFFICULTY_KEYS[Math.min(3, Math.max(0, difficulty))] ?? DIFFICULTY_KEYS[1]);
+}
+
+function localCompanyOf(
+  snapshot: WorldSnapshot,
+  companyId?: CompanyId | null,
+): CompanySnapshot | null {
+  if (companyId !== undefined && companyId !== null) {
+    const targeted = snapshot.companies.find((company) => company.id === companyId);
+    if (targeted) return targeted;
+  }
+  return snapshot.companies.find((company) => company.isLocal) ?? snapshot.companies[0] ?? null;
+}
+
+/** Sous-titre d'une subvention : cargaison, trajet et durée. */
+function subsidyDetail(subsidy: SubsidySnapshot): string {
+  if (subsidy.remainingMonths <= 0) return t('finance.subsidy.expired');
+  return t('finance.subsidy.detail', {
+    cargo: subsidy.cargo,
+    from: subsidy.from,
+    to: subsidy.to,
+    months: subsidy.remainingMonths,
+  });
+}
+
+function subsidyView(subsidy: SubsidySnapshot, companyId: CompanyId): FinanceSubsidyView {
+  if (subsidy.awardedTo === companyId) {
+    return {
+      id: subsidy.id,
+      title: t('finance.subsidy.awardedTitle', { cargo: subsidy.cargo }),
+      detail: subsidyDetail(subsidy),
+      state: 'awarded',
+      tone: 'good',
+    };
+  }
+  if (subsidy.awardedTo !== null) {
+    return {
+      id: subsidy.id,
+      title: t('finance.subsidy.otherTitle', { cargo: subsidy.cargo }),
+      detail: subsidyDetail(subsidy),
+      state: 'foreign',
+      tone: 'muted',
+    };
+  }
+  return {
+    id: subsidy.id,
+    title: t('finance.subsidy.offerTitle', { cargo: subsidy.cargo }),
+    detail: subsidyDetail(subsidy),
+    state: subsidy.remainingMonths > 0 ? 'offer' : 'expired',
+    tone: subsidy.remainingMonths > 0 ? 'good' : 'muted',
+  };
+}
+
+/**
+ * Vue du panneau finances. `history` est fourni par la session (échantillons
+ * de trésorerie et de valeur) : la fonction ne conserve que les points finis
+ * et les borne pour un graphique lisible.
+ */
+export function describeFinanceView(
+  snapshot: WorldSnapshot | null,
+  companyId?: CompanyId | null,
+  history: readonly FinanceHistoryPoint[] = [],
+): FinanceView | null {
+  if (!snapshot) return null;
+  const company = localCompanyOf(snapshot, companyId);
+  if (!company) return null;
+
+  const economy = snapshot.economy;
+  const capacity = loanCapacity(company, economy);
+  const step = loanIntervalOf(economy);
+  const warning = bankruptcyWarning(company);
+  const points = history
+    .filter((point) => Number.isFinite(point.money) && Number.isFinite(point.value))
+    .slice(-60);
+  const subsidies = [...(snapshot.subsidies ?? [])]
+    .sort((a, b) => {
+      const score = (entry: SubsidySnapshot): number =>
+        entry.awardedTo === company.id ? 0 : entry.awardedTo === null ? 1 : 2;
+      const diff = score(a) - score(b);
+      return diff !== 0 ? diff : a.id - b.id;
+    })
+    .map((subsidy) => subsidyView(subsidy, company.id));
+
+  return {
+    company: company.name,
+    money: formatMoney(company.money),
+    loan: formatMoney(company.loan),
+    maxLoan: formatMoney(maxLoanOf(company, economy)),
+    value: formatMoney(company.value),
+    income: formatSignedMoney(company.income),
+    expenses: formatSignedMoney(-company.expenses),
+    interestRate: formatPercent(economy.interestRate ?? 0, 1),
+    inflation: formatPercent(economy.inflation ?? 0, 1),
+    difficulty: difficultyLabel(difficultyOf(economy)),
+    loanStep: formatMoney(step),
+    increaseLabel: t('finance.loan.increase', {
+      amount: formatMoney(capacity.increaseAmount),
+    }),
+    decreaseLabel: t('finance.loan.decrease', {
+      amount: formatMoney(capacity.decreaseAmount),
+    }),
+    canIncrease: capacity.canIncrease,
+    canDecrease: capacity.canDecrease,
+    monthsOfBankruptcy: company.monthsOfBankruptcy ?? 0,
+    bankrupt: company.bankrupt,
+    warning: warning.active
+      ? company.bankrupt
+        ? t('finance.warning.bankrupt')
+        : t('finance.warning.months', {
+            months: Math.max(0, BANKRUPTCY_MONTHS - warning.months),
+          })
+      : null,
+    history: points.map((point) => ({ money: point.money, value: point.value ?? 0 })),
+    subsidies,
+    hint: t('finance.hint'),
+  };
+}
+
+/** Bandeau d'alerte faillite, ou `null` quand l'entreprise est saine. */
+export function describeBankruptcyAlert(
+  snapshot: WorldSnapshot | null,
+  companyId?: CompanyId | null,
+): BankruptcyAlertView | null {
+  if (!snapshot) return null;
+  const company = localCompanyOf(snapshot, companyId);
+  if (!company) return null;
+  if (company.bankrupt) {
+    return { text: t('finance.alert.bankrupt', { company: company.name }), tone: 'error' };
+  }
+  const warning = bankruptcyWarning(company);
+  if (!warning.active) return null;
+  return {
+    text: t('finance.alert.negative', {
+      months: Math.max(0, BANKRUPTCY_MONTHS - warning.months),
+      money: formatMoney(company.money),
+    }),
+    tone: warning.critical ? 'error' : 'warning',
+  };
 }

@@ -7,6 +7,7 @@
  */
 
 import type { GameSpeed } from '../game/Game';
+import type { TownActionKind } from '../engine/protocol';
 import type { BuildSettings } from '../game/buildRules';
 import { createBuildSettings } from '../game/buildRules';
 import type { QualityLevel } from '../render/quality';
@@ -20,6 +21,7 @@ import type { CameraView, HudState, PlaceTarget, SelectionSummary } from './type
 import { BuildHint } from './hud/BuildHint';
 import { BuildOptions } from './hud/BuildOptions';
 import { DepotPanel } from './hud/DepotPanel';
+import { FinancesPanel } from './hud/FinancesPanel';
 import { HelpPanel } from './hud/HelpPanel';
 import { Minimap } from './hud/Minimap';
 import { NetworkAlert } from './hud/NetworkAlert';
@@ -63,6 +65,12 @@ export interface HudCallbacks {
   onToggleAudio?: () => void;
   /** Ouvre/ferme le mode photo (bouton appareil). */
   onPhotoMode?: () => void;
+  /** Panneau finances (#165). */
+  onToggleFinances: () => void;
+  onIncreaseLoan: () => void;
+  onDecreaseLoan: () => void;
+  /** Action municipale depuis le panneau ville (#166). */
+  onTownAction: (townId: number, action: TownActionKind) => void;
 }
 
 export interface HudNewsInput {
@@ -89,6 +97,9 @@ export class Hud {
   private vehiclePanel: VehiclePanel;
   private placePanel: PlacePanel;
   private reports: ReportsPanel;
+  private financePanel: FinancesPanel;
+  private bankruptcyAlert: HTMLDivElement;
+  private bankruptcyText: HTMLSpanElement;
   private minimap: Minimap;
   private newsFeed: NewsFeed;
   private toolbar: Toolbar;
@@ -116,6 +127,7 @@ export class Hud {
       onToggleHelp: () => this.toggleHelp(),
       onOpenSettings: () => this.callbacks.onOpenSettings(),
       onOpenReports: (tab) => this.openReports(tab),
+      onToggleFinances: () => this.callbacks.onToggleFinances(),
     });
 
     // Bouton mute minimal : ajouté à la barre d'outils existante sans modifier
@@ -177,6 +189,7 @@ export class Hud {
       onClose: () => this.callbacks.onClosePlace(),
       onFocus: (x, y) => this.callbacks.onPlaceFocus(x, y),
       onSelect: (target) => this.callbacks.onPlaceSelect(target),
+      onTownAction: (townId, action) => this.callbacks.onTownAction(townId, action),
     });
 
     this.reports = new ReportsPanel({
@@ -189,6 +202,34 @@ export class Hud {
       onStopVehicle: (vehicleId) => this.callbacks.onStopVehicle(vehicleId),
       onSellVehicle: (vehicleId) => this.callbacks.onSellVehicle(vehicleId),
     });
+
+    this.financePanel = new FinancesPanel({
+      onClose: () => this.closeFinances(),
+      onIncreaseLoan: () => this.callbacks.onIncreaseLoan(),
+      onDecreaseLoan: () => this.callbacks.onDecreaseLoan(),
+    });
+
+    this.bankruptcyAlert = el('div', {
+      className: 'hud-bankruptcy',
+      attrs: {
+        role: 'alert',
+        'aria-live': 'assertive',
+      },
+    });
+    const bankruptcyText = el('span', { className: 'hud-bankruptcy-text' });
+    this.bankruptcyText = bankruptcyText;
+    const bankruptcyAction = el('button', {
+      className: 'hud-bankruptcy-action',
+      text: t('finance.alert.open'),
+      attrs: { type: 'button' },
+    });
+    bankruptcyAction.addEventListener('click', () => this.openFinances());
+    this.bankruptcyAlert.append(bankruptcyText, bankruptcyAction);
+    this.bankruptcyAlert.addEventListener('click', (event) => {
+      if (event.target === bankruptcyAction) return;
+      this.openFinances();
+    });
+    this.bankruptcyAlert.hidden = true;
 
     this.minimap = new Minimap({
       onRecenter: (x, y) => this.callbacks.onRecenterCamera(x, y),
@@ -251,11 +292,13 @@ export class Hud {
 
     this.root.append(
       this.topBar.element,
+      this.bankruptcyAlert,
       this.selectionPanel.element,
       this.depotPanel.element,
       this.vehiclePanel.element,
       this.placePanel.element,
       this.reports.element,
+      this.financePanel.element,
       this.minimap.element,
       this.newsFeed.element,
       this.toolbar.element,
@@ -309,6 +352,7 @@ export class Hud {
     this.topBar.update(state);
     this.reports.updateSnapshot(state.snapshot);
     this.updateNetworkStatus(state);
+    this.updateBankruptcyAlert(state);
     // Le panneau véhicule est prioritaire sur le dépôt, lui-même prioritaire
     // sur le panneau lieu, lui-même prioritaire sur la sélection générique.
     const vehicle = state.vehicle ?? null;
@@ -317,6 +361,8 @@ export class Hud {
     this.depotPanel.update(depot);
     this.vehiclePanel.update(vehicle);
     this.placePanel.update(place);
+    this.financePanel.update(state.finance ?? null);
+    this.topBar.setFinancesOpen(this.financePanel.isOpen());
     const panelsOpen = vehicle !== null || depot !== null || place !== null;
     this.selectionPanel.update(
       panelsOpen ? null : state.selection,
@@ -326,6 +372,14 @@ export class Hud {
     this.minimap.setSelection(state.selection?.selection ?? null);
     this.refreshNewsBadge();
     if (this.newsFeed.isOpen()) this.renderNewsList();
+  }
+
+  private updateBankruptcyAlert(state: HudState): void {
+    const alert = state.bankruptcyAlert ?? null;
+    this.bankruptcyAlert.hidden = alert === null;
+    if (!alert) return;
+    this.bankruptcyText.textContent = alert.text;
+    this.bankruptcyAlert.dataset.tone = alert.tone;
   }
 
   private updateNetworkStatus(state: HudState): void {
@@ -451,6 +505,37 @@ export class Hud {
     if (this.help.isOpen()) this.closeNews();
   }
 
+  /** Ouvre/ferme le panneau finances ; le focus revient au bouton. */
+  toggleFinances(): void {
+    if (this.financePanel.isOpen()) {
+      this.closeFinances();
+      return;
+    }
+    this.openFinances();
+  }
+
+  openFinances(): void {
+    if (this.financePanel.isOpen()) return;
+    this.closeNews();
+    this.hideHelp();
+    this.financePanel.show();
+    this.topBar.setFinancesOpen(true);
+  }
+
+  closeFinances(): void {
+    const active = document.activeElement;
+    const restore =
+      active instanceof HTMLElement &&
+      (this.financePanel.element.contains(active) || !active.isConnected);
+    this.financePanel.hide();
+    this.topBar.setFinancesOpen(false);
+    if (restore) this.topBar.focusFinancesButton();
+  }
+
+  isFinancesOpen(): boolean {
+    return this.financePanel.isOpen();
+  }
+
   hideHelp(): void {
     this.help.hide();
   }
@@ -475,6 +560,10 @@ export class Hud {
     }
     if (this.help.isOpen()) {
       this.hideHelp();
+      closed = true;
+    }
+    if (this.financePanel.isOpen()) {
+      this.closeFinances();
       closed = true;
     }
     return closed;
@@ -514,6 +603,7 @@ export class Hud {
     this.buildHint.dispose();
     this.buildOptions.dispose();
     this.buildOptions.element.remove();
+    this.financePanel.dispose();
     this.minimap.dispose();
     this.news.clear();
     this.root.remove();

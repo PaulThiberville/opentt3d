@@ -35,6 +35,7 @@
 #include "depot_type.h"
 #include "direction_func.h"
 #include "direction_type.h"
+#include "economy_func.h"
 #include "elrail_func.h"
 #include "engine_base.h"
 #include "engine_func.h"
@@ -47,6 +48,7 @@
 #include "landscape_cmd.h"
 #include "landscape_type.h"
 #include "map_func.h"
+#include "misc_cmd.h"
 #include "newgrf_config.h"
 #include "newgrf_roadstop.h"
 #include "newgrf_station.h"
@@ -54,6 +56,7 @@
 #include "order_base.h"
 #include "order_cmd.h"
 #include "order_type.h"
+#include "pricebase.h"
 #include "rail.h"
 #include "rail_cmd.h"
 #include "rail_map.h"
@@ -71,11 +74,13 @@
 #include "station_map.h"
 #include "station_type.h"
 #include "strings_func.h"
+#include "subsidy_base.h"
 #include "table/strings.h"
 #include "tile_map.h"
 #include "timer/timer_game_calendar.h"
 #include "timer/timer_game_tick.h"
 #include "town.h"
+#include "town_cmd.h"
 #include "track_func.h"
 #include "track_type.h"
 #include "tunnelbridge_map.h"
@@ -1115,6 +1120,68 @@ std::string CompanyName(const Company *c)
 	return fmt::format("Company {}", c->index.base() + 1);
 }
 
+/* ------------------------------------------------------------------------- */
+/*  Autorité locale et subventions (#165/#166)                               */
+/* ------------------------------------------------------------------------- */
+
+/** Coût courant d'une action municipale, inflation des prix comprise. */
+Money TownActionCost(TownAction action)
+{
+	return static_cast<Money>(_price[PR_TOWN_ACTION]) * GetTownActionCost(action) >> 8;
+}
+
+/** Nom JSON stable d'une action municipale exposée par le protocole. */
+const char *TownActionKey(TownAction action)
+{
+	switch (action) {
+		case TownAction::AdvertiseSmall:
+		case TownAction::AdvertiseMedium:
+		case TownAction::AdvertiseLarge:
+			return "advertise";
+		case TownAction::RoadRebuild:
+			return "fund_roads";
+		case TownAction::FundBuildings:
+			return "fund_buildings";
+		default:
+			return nullptr;
+	}
+}
+
+/** Résout une action demandée par l'UI (advertise, fund_roads, fund_buildings). */
+std::optional<TownAction> ParseTownAction(std::string_view name)
+{
+	if (name == "advertise" || name == "publicite" || name == "publicité") {
+		return TownAction::AdvertiseSmall;
+	}
+	if (name == "fund_roads" || name == "roads" || name == "routes") {
+		return TownAction::RoadRebuild;
+	}
+	if (name == "fund_buildings" || name == "buildings" || name == "batiments" ||
+			name == "bâtiments") {
+		return TownAction::FundBuildings;
+	}
+	return std::nullopt;
+}
+
+/** Nom lisible d'une extrémité de subvention (ville ou industrie). */
+std::string SubsidySourceName(const Source &source)
+{
+	if (source.type == SourceType::Industry) {
+		const Industry *industry = Industry::GetIfValid(IndustryID(source.id));
+		if (industry != nullptr) return industry->GetCachedName();
+	}
+	if (source.type == SourceType::Town) {
+		const Town *town = Town::GetIfValid(TownID(source.id));
+		if (town != nullptr) return town->GetCachedName();
+	}
+	return "—";
+}
+
+const char *SubsidySourceKind(const Source &source)
+{
+	return source.type == SourceType::Town ? "town" : "industry";
+}
+
 std::string PresidentName(const Company *c)
 {
 	if (!c->president_name.empty()) return c->president_name;
@@ -1277,6 +1344,11 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 	const TimerGameCalendar::YearMonthDay ymd = TimerGameCalendar::ConvertDateToYMD(TimerGameCalendar::date);
 	const uint32_t day_fraction = static_cast<uint32_t>(TimerGameTick::counter % Ticks::DAY_TICKS);
 	const double speed = static_cast<double>(_game_speed) / 100.0;
+	const GameSetupConfig &active = _ottd_active_config;
+	/* Inflation cumulée en pourcentage : `inflation_prices` est un multiplicateur
+	 * 16.16 (1.0 = 65536). Le pont ne publie jamais une valeur négative. */
+	const double inflation = std::max(0.0,
+			(static_cast<double>(_economy.inflation_prices) / 65536.0 - 1.0) * 100.0);
 
 	const uint32_t companies = static_cast<uint32_t>(Company::GetNumItems());
 	const uint32_t towns = static_cast<uint32_t>(Town::GetNumItems());
@@ -1307,10 +1379,13 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 
 	out += fmt::format(
 		"{{\"meta\":{{\"protocol\":1,\"tick\":{},\"hash\":\"0x{:016x}\",\"sequence\":{}}},"
-		"\"economy\":{{\"year\":{},\"month\":{},\"day\":{},\"dayFraction\":{},\"speed\":{:.2f},\"paused\":{}}},"
+		"\"economy\":{{\"year\":{},\"month\":{},\"day\":{},\"dayFraction\":{},\"speed\":{:.2f},\"paused\":{},"
+		"\"inflation\":{:.2f},\"interestRate\":{},\"difficulty\":{},\"maxLoan\":{},\"loanInterval\":{}}},"
 		"\"map\":{{\"width\":{},\"height\":{},\"encoding\":\"binary\",\"api\":\"ottd_snapshot_map\",\"bytes\":{},\"layers\":{},\"elementSize\":1}},",
 		tick, hash, sequence,
 		ymd.year.base(), ymd.month, ymd.day, day_fraction, speed, _pause_mode.Any() ? "true" : "false",
+		inflation, _economy.interest_rate, active.difficulty.value_or(-1),
+		static_cast<int64_t>(_economy.max_loan), static_cast<int64_t>(LOAN_INTERVAL),
 		width, height, MapSnapshotBytes(width, height),
 		static_cast<unsigned>(OTTD_MAP_LAYER_COUNT));
 
@@ -1320,7 +1395,6 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 		companies, towns, industries, stations, depots, vehicles);
 
 	/* --- Configuration appliquée (issue #60) ------------------------------ */
-	const GameSetupConfig &active = _ottd_active_config;
 	out += "\"config\":{\"climate\":";
 	AppendJsonString(out, LandscapeName(_settings_game.game_creation.landscape));
 	out += fmt::format(
@@ -1363,18 +1437,21 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 		out += ",\"president\":";
 		AppendJsonString(out, PresidentName(c));
 		out += fmt::format(
-			",\"colour\":{},\"money\":{},\"loan\":{},\"value\":{},\"income\":{},\"expenses\":{},"
-			"\"vehicles\":{},\"stations\":{},\"isAI\":{},\"isLocal\":{},\"bankrupt\":{}}}",
+			",\"colour\":{},\"money\":{},\"loan\":{},\"maxLoan\":{},\"value\":{},\"income\":{},\"expenses\":{},"
+			"\"vehicles\":{},\"stations\":{},\"isAI\":{},\"isLocal\":{},\"bankrupt\":{},"
+			"\"monthsOfBankruptcy\":{}}}",
 			static_cast<unsigned>(c->colour),
 			static_cast<int64_t>(c->money),
 			static_cast<int64_t>(c->current_loan),
+			static_cast<int64_t>(c->GetMaxLoan()),
 			static_cast<int64_t>(CalculateCompanyValue(c)),
 			static_cast<int64_t>(c->cur_economy.income),
 			static_cast<int64_t>(c->cur_economy.expenses),
 			vehicles_owned, stations_owned,
 			c->is_ai ? "true" : "false",
 			c->index == _local_company ? "true" : "false",
-			c->months_of_bankruptcy > 0 ? "true" : "false");
+			c->months_of_bankruptcy > 0 ? "true" : "false",
+			static_cast<unsigned>(c->months_of_bankruptcy));
 	}
 	out.push_back(']');
 
@@ -1391,9 +1468,31 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 			"{{\"id\":{},\"name\":", t->index.base());
 		AppendJsonString(out, t->GetCachedName());
 		out += fmt::format(
-			",\"x\":{},\"y\":{},\"population\":{},\"growthRate\":{},\"buildings\":{},\"rating\":{}}}",
+			",\"x\":{},\"y\":{},\"population\":{},\"growthRate\":{},\"buildings\":{},\"rating\":{}",
 			TileX(t->xy), TileY(t->xy),
 			t->cache.population, t->growth_rate, t->cache.num_houses, rating);
+
+		/* Autorité locale : note et coûts des actions disponibles pour
+		 * l'entreprise locale (#166). Une action hors masque reste exposée
+		 * avec `available: false` pour que l'UI explique son indisponibilité. */
+		TownActions mask{};
+		if (Company::IsValidID(_local_company)) mask = GetMaskOfTownActions(_local_company, t);
+		out += ",\"authority\":{\"rating\":";
+		out += fmt::format("{}", rating);
+		out += ",\"actions\":{";
+		bool first_action = true;
+		for (const TownAction action : {TownAction::AdvertiseSmall, TownAction::RoadRebuild,
+				TownAction::FundBuildings}) {
+			const char *key = TownActionKey(action);
+			if (key == nullptr) continue;
+			if (!first_action) out.push_back(',');
+			first_action = false;
+			AppendJsonString(out, key);
+			out += fmt::format(":{{\"available\":{},\"cost\":{}}}",
+				mask.Test(action) ? "true" : "false",
+				static_cast<int64_t>(TownActionCost(action)));
+		}
+		out += "}}}";
 	}
 	out.push_back(']');
 
@@ -1413,6 +1512,8 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 			production += produced.history[LAST_MONTH].production;
 			transported += produced.history[LAST_MONTH].transported;
 		}
+		const uint64_t service_rate = production > 0
+			? std::min<uint64_t>(100, transported * 100 / production) : 0;
 
 		out += fmt::format("{{\"id\":{},\"name\":", ind->index.base());
 		AppendJsonString(out, ind->GetCachedName());
@@ -1420,12 +1521,12 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 		AppendJsonString(out, spec != nullptr ? GetString(spec->name) : "unknown");
 		out += fmt::format(
 			",\"type\":{},\"x\":{:.2f},\"y\":{:.2f},\"width\":{},\"height\":{},"
-			"\"production\":{},\"transported\":{},\"stocks\":[",
+			"\"production\":{},\"transported\":{},\"serviceRate\":{},\"stocks\":[",
 			static_cast<unsigned>(ind->type),
 			TileX(ind->location.tile) + (ind->location.w > 1 ? (ind->location.w - 1) / 2.0 : 0.0),
 			TileY(ind->location.tile) + (ind->location.h > 1 ? (ind->location.h - 1) / 2.0 : 0.0),
 			ind->location.w, ind->location.h,
-			production, transported);
+			production, transported, service_rate);
 
 		bool first_cargo = true;
 		for (const Industry::ProducedCargo &produced : ind->produced) {
@@ -1439,6 +1540,14 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 				produced.waiting, static_cast<unsigned>(produced.rate));
 		}
 
+		out += "],\"accepts\":[";
+		bool first_accept = true;
+		for (const Industry::AcceptedCargo &accepted : ind->accepted) {
+			if (!IsValidCargoType(accepted.cargo)) continue;
+			if (!first_accept) out.push_back(',');
+			first_accept = false;
+			AppendJsonString(out, CargoName(accepted.cargo));
+		}
 		out += "]}";
 	}
 	out.push_back(']');
@@ -1542,7 +1651,26 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 
 	/* `news` et `events` restent vides en v1 : le moteur ne journalise pas
 	 * encore ces informations de façon exploitable (voir wiki). */
-	out += ",\"news\":[],\"events\":[]}";
+	out += ",\"subsidies\":[";
+	bool first_subsidy = true;
+	for (const Subsidy *subsidy : Subsidy::Iterate()) {
+		if (!IsValidCargoType(subsidy->cargo_type)) continue;
+		if (!first_subsidy) out.push_back(',');
+		first_subsidy = false;
+		out += fmt::format("{{\"id\":{},\"cargo\":", subsidy->index.base());
+		AppendJsonString(out, CargoName(subsidy->cargo_type));
+		out += ",\"from\":";
+		AppendJsonString(out, SubsidySourceName(subsidy->src));
+		out += ",\"to\":";
+		AppendJsonString(out, SubsidySourceName(subsidy->dst));
+		out += fmt::format(
+			",\"fromKind\":\"{}\",\"toKind\":\"{}\",\"remainingMonths\":{},\"awardedTo\":{}}}",
+			SubsidySourceKind(subsidy->src), SubsidySourceKind(subsidy->dst),
+			static_cast<unsigned>(subsidy->remaining),
+			Company::IsValidID(subsidy->awarded) ? subsidy->awarded.base() : -1);
+	}
+	out += "],";
+	out += "\"news\":[],\"events\":[]}";
 }
 
 /**
@@ -3010,6 +3138,91 @@ bool VehicleOrders(CompanyID company, const JsonValue &root, CommandReply &reply
 	return Succeed(reply, fmt::format("{} ordre(s) ajouté(s).", inserted));
 }
 
+bool DispatchFinance(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	std::string action;
+	if (!JsonGetString(root.Find("action"), action)) {
+		return FailWith(reply, "UNKNOWN_ACTION", "Le champ « action » doit être une chaîne.");
+	}
+	action = LowerAscii(action);
+
+	LoanCommand loan_command = LoanCommand::Interval;
+	Money amount = 0;
+	const JsonValue *amount_value = root.Find("amount");
+	if (amount_value != nullptr && !amount_value->IsNull()) {
+		int parsed = 0;
+		if (!JsonGetInt(amount_value, parsed) || parsed <= 0) {
+			return FailWith(reply, "INVALID_PARAMETER", "« amount » doit être un entier positif.");
+		}
+		loan_command = LoanCommand::Amount;
+		amount = static_cast<Money>(parsed);
+	}
+
+	const bool increase = action == "increase_loan" || action == "emprunter" || action == "borrow";
+	const bool decrease = action == "decrease_loan" || action == "rembourser" || action == "repay";
+	if (!increase && !decrease) {
+		return FailWith(reply, "UNKNOWN_ACTION",
+			fmt::format("Action financière inconnue « {} ».", action));
+	}
+
+	if (increase) {
+		CommandCost test = RunCompanyCommand<CMD_INCREASE_LOAN>(
+			company, INVALID_TILE, true, loan_command, amount);
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Emprunt refusé.");
+		CommandCost result = RunCompanyCommand<CMD_INCREASE_LOAN>(
+			company, INVALID_TILE, false, loan_command, amount);
+		if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Emprunt refusé.");
+		reply.cost = result.GetCost();
+		return Succeed(reply, loan_command == LoanCommand::Amount
+			? fmt::format("Prêt augmenté de {} £.", static_cast<int64_t>(amount))
+			: "Prêt augmenté d’un pas.");
+	}
+
+	CommandCost test = RunCompanyCommand<CMD_DECREASE_LOAN>(
+		company, INVALID_TILE, true, loan_command, amount);
+	if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Remboursement refusé.");
+	CommandCost result = RunCompanyCommand<CMD_DECREASE_LOAN>(
+		company, INVALID_TILE, false, loan_command, amount);
+	if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Remboursement refusé.");
+	reply.cost = result.GetCost();
+	return Succeed(reply, loan_command == LoanCommand::Amount
+		? fmt::format("Prêt remboursé de {} £.", static_cast<int64_t>(amount))
+		: "Prêt remboursé d’un pas.");
+}
+
+bool DispatchTownAction(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int town_id = 0;
+	if (!JsonGetInt(root.Find("town"), town_id) || town_id < 0) {
+		return FailWith(reply, "INVALID_PARAMETER", "« town » doit être un entier positif.");
+	}
+	Town *town = Town::GetIfValid(TownID(static_cast<uint16_t>(town_id)));
+	if (town == nullptr) {
+		return FailWith(reply, "INVALID_PARAMETER",
+			fmt::format("Ville #{} inexistante.", town_id));
+	}
+	std::string action;
+	if (!JsonGetString(root.Find("action"), action)) {
+		return FailWith(reply, "UNKNOWN_ACTION", "Le champ « action » doit être une chaîne.");
+	}
+	const std::optional<TownAction> parsed = ParseTownAction(LowerAscii(action));
+	if (!parsed.has_value()) {
+		return FailWith(reply, "UNKNOWN_ACTION",
+			fmt::format("Action municipale inconnue « {} ».", action));
+	}
+
+	CommandCost test = RunCompanyCommand<CMD_DO_TOWN_ACTION>(
+		company, town->xy, true, TownID(static_cast<uint16_t>(town_id)), *parsed);
+	if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Action municipale refusée.");
+	CommandCost result = RunCompanyCommand<CMD_DO_TOWN_ACTION>(
+		company, town->xy, false, TownID(static_cast<uint16_t>(town_id)), *parsed);
+	if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Action municipale refusée.");
+	reply.cost = result.GetCost();
+	reply.tiles = 1;
+	return Succeed(reply, fmt::format("Action municipale exécutée ({} £).",
+		static_cast<int64_t>(result.GetCost())));
+}
+
 bool DispatchVehicle(CompanyID company, const JsonValue &root, CommandReply &reply)
 {
 	std::string action;
@@ -3115,7 +3328,7 @@ int ExecuteCommandJson(std::string_view json)
 
 	std::string type;
 	if (!JsonGetString(root.Find("type"), type)) {
-		FailWith(reply, "UNKNOWN_COMMAND", "Le champ « type » doit être une chaîne (build, vehicle).");
+		FailWith(reply, "UNKNOWN_COMMAND", "Le champ « type » doit être une chaîne (build, vehicle, finance, town_action).");
 		return FinishCommand(reply);
 	}
 	type = LowerAscii(type);
@@ -3130,6 +3343,10 @@ int ExecuteCommandJson(std::string_view json)
 		DispatchBuild(company, root, reply);
 	} else if (type == "vehicle") {
 		DispatchVehicle(company, root, reply);
+	} else if (type == "finance") {
+		DispatchFinance(company, root, reply);
+	} else if (type == "town_action" || type == "town") {
+		DispatchTownAction(company, root, reply);
 	} else if (type == "pause" || type == "speed" || type == "console") {
 		FailWith(reply, "NOT_SUPPORTED",
 				fmt::format("La commande « {} » est gérée par le pilote, pas par le pont (#11).", type));
@@ -4183,7 +4400,8 @@ EMSCRIPTEN_KEEPALIVE int ottd_snapshot_json(char *out, int capacity)
 		json = "{\"meta\":{\"protocol\":1,\"tick\":0,\"hash\":\"0x0000000000000000\",\"sequence\":0},"
 			"\"economy\":null,\"map\":null,\"counts\":{\"companies\":0,\"towns\":0,\"industries\":0,"
 			"\"stations\":0,\"vehicles\":0},\"config\":null,\"warnings\":[],\"companies\":[],"
-			"\"towns\":[],\"industries\":[],\"stations\":[],\"vehicles\":[],\"news\":[],\"events\":[]}";
+			"\"towns\":[],\"industries\":[],\"stations\":[],\"vehicles\":[],\"subsidies\":[],"
+			"\"news\":[],\"events\":[]}";
 	} else {
 		BuildWorldJson(json, width, height);
 	}

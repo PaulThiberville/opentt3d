@@ -17,6 +17,7 @@ import type {
   CompanySnapshot,
   EngineCommand,
   EngineDriver,
+  TownActionKind,
   WorldSnapshot,
 } from '../engine/protocol';
 import { TILE_FLAG } from '../engine/protocol';
@@ -97,6 +98,14 @@ import {
   type LockstepGameDriver,
 } from './networkRunner';
 import { describeSelection } from './selection';
+import { describeBankruptcyAlert, describeFinanceView } from './financeView';
+import {
+  bankruptcyWarning,
+  financeCommand,
+  loanCapacity,
+  townActionCommand,
+  townActionCost,
+} from '../game/economyRules';
 import {
   describePlacePanel,
   industryAtTile,
@@ -105,7 +114,13 @@ import {
 } from './placeView';
 import { describeDepotPanel, describeVehiclePanel } from './vehicleView';
 import type { GameSettings } from './settings';
-import type { GameOverSummary, NetworkStatusView, PlaceTarget, SessionOverview } from './types';
+import type {
+  FinanceHistoryPoint,
+  GameOverSummary,
+  NetworkStatusView,
+  PlaceTarget,
+  SessionOverview,
+} from './types';
 
 export interface LoadToken {
   cancelled: boolean;
@@ -288,6 +303,10 @@ export class GameSession {
   private lastTarget: WorldTarget | null = null;
   /** Dépôt ouvert par un clic (id stable de `snapshot.depots`). */
   private openDepot: number | null = null;
+  /** Panneau finances (#165) : échantillons client pour le graphique. */
+  private financeHistory: FinanceHistoryPoint[] = [];
+  private lastFinanceSampleAt = 0;
+  private bankruptcyMonthsAnnounced = -1;
   /** Véhicule dont la tournée attend un clic sur une gare/dépôt. */
   private orderPickingFor: number | null = null;
   private hudTimer = 0;
@@ -1137,6 +1156,10 @@ export class GameSession {
       onClosePlace: () => this.clearSelection(),
       onToggleAudio: () => this.toggleAudioMute(),
       onPhotoMode: () => this.togglePhotoMode(),
+      onToggleFinances: () => this.toggleFinances(),
+      onIncreaseLoan: () => this.adjustLoan('increase_loan'),
+      onDecreaseLoan: () => this.adjustLoan('decrease_loan'),
+      onTownAction: (townId, action) => this.runTownAction(townId, action),
     });
   }
 
@@ -1509,6 +1532,11 @@ export class GameSession {
     }
     if (vehicle) depot = null;
     const place = vehicle || depot ? null : describePlacePanel(snapshot, selection);
+    const company = this.localCompanySnapshot();
+    if (company) this.sampleFinanceHistory(company.money, company.value);
+    const finance = describeFinanceView(snapshot, companyId, this.financeHistory);
+    const bankruptcyAlert = describeBankruptcyAlert(snapshot, companyId);
+    this.announceBankruptcy(company);
     hud.update({
       snapshot,
       fps: game.getFps(),
@@ -1518,12 +1546,101 @@ export class GameSession {
       depot,
       vehicle,
       place,
+      finance,
+      bankruptcyAlert,
       quality: this.quality,
       following: world.isFollowing(),
       drawCalls: world.getDrawCalls(),
       controlsLocked: this.isNetwork,
       networkStatus: this.networkStatus(),
     });
+  }
+
+  /** Échantillonne trésorerie et valeur pour le graphique (max 60 points). */
+  private sampleFinanceHistory(money: number, value: number): void {
+    const now =
+      typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? performance.now()
+        : Date.now();
+    if (now - this.lastFinanceSampleAt < 2_000) return;
+    this.lastFinanceSampleAt = now;
+    this.financeHistory.push({ money, value });
+    if (this.financeHistory.length > 60) this.financeHistory.shift();
+  }
+
+  /** Signale chaque nouveau mois de trésorerie négative sans spammer. */
+  private announceBankruptcy(company: CompanySnapshot | null): void {
+    if (!company) return;
+    const months = bankruptcyWarning(company).months;
+    if (months > this.bankruptcyMonthsAnnounced) {
+      const alert = describeBankruptcyAlert(this.game?.getLatestSnapshot() ?? null);
+      if (alert) this.hud?.notify(alert.tone === 'error' ? 'error' : 'warning', alert.text);
+    }
+    this.bankruptcyMonthsAnnounced = months;
+  }
+
+  /** Ouvre/ferme le panneau finances (#165). */
+  toggleFinances(): void {
+    this.hud?.toggleFinances();
+    this.refreshHud();
+  }
+
+  /** Emprunt ou remboursement d'un pas, borné par le snapshot. */
+  private adjustLoan(action: 'increase_loan' | 'decrease_loan'): void {
+    const game = this.game;
+    const companyId = this.localCompanyId();
+    if (!game || companyId === null) {
+      this.hud?.notify('warning', t('finance.noCompany'));
+      return;
+    }
+    const snapshot = game.getLatestSnapshot();
+    const company = snapshot?.companies.find((item) => item.id === companyId) ?? null;
+    const capacity = loanCapacity(company, snapshot?.economy ?? null);
+    if (action === 'increase_loan' && !capacity.canIncrease) {
+      this.hud?.notify('warning', t('finance.loan.blocked'));
+      return;
+    }
+    if (action === 'decrease_loan' && !capacity.canDecrease) {
+      this.hud?.notify('warning', t('finance.loan.blocked'));
+      return;
+    }
+    const amount = action === 'increase_loan' ? capacity.increaseAmount : capacity.decreaseAmount;
+    game.issueCommand(financeCommand(companyId, action, amount));
+    if (this.isNetwork) {
+      this.hud?.notify('info', t('finance.networkPending'));
+      return;
+    }
+    game.refresh();
+    this.refreshHud();
+  }
+
+  /** Action municipale depuis le panneau ville (#166). */
+  private runTownAction(townId: number, action: TownActionKind): void {
+    const game = this.game;
+    const companyId = this.localCompanyId();
+    if (!game || companyId === null) {
+      this.hud?.notify('warning', t('finance.noCompany'));
+      return;
+    }
+    const snapshot = game.getLatestSnapshot();
+    const town = snapshot?.towns.find((item) => item.id === townId) ?? null;
+    const cost = town ? townActionCost(town, action) : null;
+    if (cost === null) {
+      this.hud?.notify('warning', t('authority.reason.unavailable'));
+      return;
+    }
+    game.issueCommand(townActionCommand(companyId, townId, action));
+    if (this.isNetwork) {
+      this.hud?.notify('info', t('finance.networkPending'));
+      return;
+    }
+    game.refresh();
+    const after = game.getLatestSnapshot();
+    const company = after?.companies.find((item) => item.id === companyId);
+    if (company && company.money < cost) {
+      this.hud?.notify('warning', t('authority.reason.insufficientFunds'));
+    }
+    this.refreshHud();
   }
 
   private applySelection(target: WorldTarget | null): void {

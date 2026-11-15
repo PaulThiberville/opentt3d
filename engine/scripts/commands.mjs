@@ -839,6 +839,12 @@ async function runScenario(label) {
       { type: 'vehicle', action: 'refit', vehicle: busBuy.vehicleId, model: 'mail' },
       8,
     ],
+    ['action financière inconnue', { type: 'finance', action: 'inconnue', company: companyId }, 3],
+    [
+      'action municipale inconnue',
+      { type: 'town_action', action: 'inconnue', company: companyId, town: 0 },
+      3,
+    ],
     [
       'entreprise inconnue',
       { type: 'build', tool: 'road', company: 14, from: { x: roadSite.x, y: roadSite.y + 3 } },
@@ -868,6 +874,82 @@ async function runScenario(label) {
     `tick JSON ${finalState.meta.tick} ≠ tick carte ${finalMap.header.tick}`,
   );
   const finalHash = hashHex(api.engine);
+
+  /* --- Prêts et autorité locale (#165/#166) --------------------------- */
+  /* Ces commandes s'exécutent après la capture du hash de référence : elles
+   * vérifient le pont sans modifier le scénario de déterminisme historique. */
+  const economyState = json.read();
+  assert(
+    typeof economyState.economy.interestRate === 'number',
+    'snapshot : economy.interestRate absent',
+  );
+  assert(typeof economyState.economy.inflation === 'number', 'snapshot : economy.inflation absent');
+  assert(Array.isArray(economyState.subsidies), 'snapshot : tableau « subsidies » absent');
+  const financeBefore = localCompany(economyState);
+  assert(
+    typeof financeBefore.maxLoan === 'number' && financeBefore.maxLoan > financeBefore.loan,
+    `prêt : plafond ${financeBefore.maxLoan} incohérent`,
+  );
+  const loanAmount = 50_000;
+  const loanReply = record(
+    'emprunt',
+    run({
+      type: 'finance',
+      action: 'increase_loan',
+      company: companyId,
+      amount: loanAmount,
+    }),
+  );
+  expectOk(loanReply, 'emprunt');
+  const afterLoan = json.read();
+  const financeAfter = localCompany(afterLoan);
+  assert(
+    financeAfter.loan === financeBefore.loan + loanAmount,
+    `emprunt : dette ${financeAfter.loan} au lieu de ${financeBefore.loan + loanAmount}`,
+  );
+  assert(
+    financeAfter.money === financeBefore.money + loanAmount,
+    `emprunt : trésorerie ${financeAfter.money} au lieu de ${financeBefore.money + loanAmount}`,
+  );
+  expectOk(
+    record(
+      'remboursement',
+      run({
+        type: 'finance',
+        action: 'decrease_loan',
+        company: companyId,
+        amount: loanAmount,
+      }),
+    ),
+    'remboursement',
+  );
+
+  const town = afterLoan.towns[0];
+  assert(town, 'snapshot : aucune ville pour tester l’autorité locale');
+  assert(town.authority !== undefined, 'snapshot : autorité locale absente');
+  const townActionReply = record(
+    'action municipale',
+    run({ type: 'town_action', action: 'fund_roads', company: companyId, town: town.id }),
+  );
+  expectOk(townActionReply, 'action municipale');
+  assert(
+    typeof townActionReply.cost === 'number' && townActionReply.cost > 0,
+    `action municipale : coût ${townActionReply.cost} incohérent`,
+  );
+  const afterTownAction = json.read();
+  assert(
+    afterTownAction.towns[0]?.authority?.actions.fund_roads.available === false,
+    'action municipale : toujours disponible dans le même mois',
+  );
+  assert(
+    afterTownAction.subsidies.every(
+      (subsidy) =>
+        typeof subsidy.cargo === 'string' &&
+        typeof subsidy.remainingMonths === 'number' &&
+        (subsidy.awardedTo === null || typeof subsidy.awardedTo === 'number'),
+    ),
+    'snapshot : entrée de subvention mal formée',
+  );
 
   const roadTiles = countKind(finalMap, TILE_KIND.road) - countKind(initialMap, TILE_KIND.road);
   const railTiles = countKind(finalMap, TILE_KIND.rail) - countKind(initialMap, TILE_KIND.rail);
