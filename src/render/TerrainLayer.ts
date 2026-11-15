@@ -17,10 +17,12 @@
  * La haute qualité subdivise chaque tuile (2×2) pour adoucir la silhouette ;
  * la moyenne garde exactement le budget de triangles d'avant #122.
  *
- * L'eau est un second maillage par chunk, plaqué exactement un demi-niveau
- * au-dessus du lit (aucun recouvrement coplanaire, donc aucun z-fighting). Le
- * shader mélange la teinte selon la profondeur mesurée à la côte, anime la
- * houle et les reflets, et dessine une écume déterministe sur les berges.
+ * L'eau est un second maillage par chunk. Sa surface est posée just sous le
+ * dessus de la tuile et le lit est creusé d'un demi-niveau : l'eau reste donc
+ * sous les routes, ponts et quais voisins, sans recouvrement coplanaire ni
+ * z-fighting. Le shader mélange la teinte selon la profondeur mesurée à la
+ * côte, anime la houle et les reflets, et dessine une écume déterministe sur
+ * les berges.
  */
 
 import * as THREE from 'three';
@@ -48,10 +50,15 @@ import {
 import {
   WATER_SHADER_CONSTANTS,
   buildShoreFields,
+  buildWaterHeightFields,
+  sampleCornerField,
   sampleField,
+  waterBedHeight,
+  waterDepthAt,
   waterDepthFactor,
   waterSurfaceHeight,
   type ShoreFields,
+  type WaterHeightFields,
 } from './waterSurface';
 
 export const CHUNK_SIZE = TERRAIN_CHUNK_SIZE;
@@ -172,7 +179,10 @@ export class TerrainLayer {
   private previous: MapArrays | null = null;
   /** Champs de distance côte/terre, recalculés uniquement si les types changent. */
   private shoreFields: ShoreFields | null = null;
+  /** Lit/surface par tuile, recalculés dès qu'un type ou une hauteur change. */
+  private heightFields: WaterHeightFields | null = null;
   private kindSnapshot: Uint8Array | null = null;
+  private heightSnapshot: Uint8Array | null = null;
   private groundMaterial: THREE.MeshLambertMaterial;
   private waterMaterial: THREE.MeshPhongMaterial;
   private waterTime: { value: number } | null = null;
@@ -258,7 +268,7 @@ ${SKIN_SHADER_CONSTANTS}`,
   float skinMacro = skinNoise( vSkinWorld.xz * 0.11 + 4.7 ) - 0.5;
   float skinMeso = skinNoise( vSkinWorld.xz * 0.37 - 1.9 ) - 0.5;
   float skinFine = ( skinNoise( vSkinWorld.xz * 1.15 + 9.3 ) - 0.5 ) * skinFade;
-  float skinSubmerged = step( 0.0005, vWaterDepth );
+  float skinSubmerged = smoothstep( 0.0, 0.08, vWaterDepth );
   float skinLand = 1.0 - skinSubmerged;
 
   // Bruit de pente : les transitions ne suivent pas des courbes de niveau.
@@ -324,7 +334,7 @@ ${SKIN_SHADER_CONSTANTS}`,
   float bumpSlope = clamp( 1.0 - normalize( vSkinNormal ).y, 0.0, 1.0 );
   float bumpFade = ( 1.0 - smoothstep( 38.0, 130.0, vSkinDistance ) )
     * ( 1.0 - smoothstep( 0.34, 0.78, bumpSlope ) )
-    * ( 1.0 - step( 0.0005, vWaterDepth ) );
+    * ( 1.0 - smoothstep( 0.0, 0.08, vWaterDepth ) );
   float bumpHeight = skinNoise( vSkinWorld.xz * 2.6 ) * 0.55
     + skinNoise( vSkinWorld.xz * 6.1 + 5.0 ) * 0.32
     + skinNoise( vSkinWorld.xz * 0.85 + 2.0 ) * 0.13;
@@ -342,7 +352,7 @@ ${SKIN_SHADER_CONSTANTS}`,
   totalEmissiveRadiance += vNightGlow * uNight;`,
         );
     };
-    this.groundMaterial.customProgramCacheKey = () => 'opentt3d-terrain-skin-v3';
+    this.groundMaterial.customProgramCacheKey = () => 'opentt3d-terrain-skin-v4';
     this.waterMaterial = this.createWaterMaterial();
     // Fond océanique : masque la découpe de la carte et donne une île crédible.
     this.oceanGeometry = new THREE.PlaneGeometry(1, 1);
@@ -350,7 +360,9 @@ ${SKIN_SHADER_CONSTANTS}`,
     this.oceanMaterial = new THREE.MeshBasicMaterial({ color: WATER_DEEP_COLOUR, fog: true });
     this.ocean = new THREE.Mesh(this.oceanGeometry, this.oceanMaterial);
     this.ocean.name = 'ocean-backdrop';
-    this.ocean.position.y = -0.08;
+    // Sous le lit de l'eau : le fond opaque ne doit jamais masquer la
+    // bathymétrie réelle à travers la surface transparente.
+    this.ocean.position.y = waterBedHeight(0) - 0.25;
     this.ocean.frustumCulled = false;
     this.group.add(this.ocean);
     this.setQuality('medium');
@@ -386,10 +398,12 @@ ${SKIN_SHADER_CONSTANTS}`,
       // (le test de profondeur reste actif pour ne pas traverser les ponts).
       transparent: true,
       depthWrite: false,
-      // Marge de profondeur pour les cas rasant la surface (berges, ponts).
+      // Biais poussé *derrière* le terrain : à profondeur égale, c'est toujours
+      // la terre sèche qui gagne. Le lit étant 0,62 sous la surface, ce biais
+      // ne sert qu'aux cas extrêmes (arêtes rasant la surface).
       polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
     });
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = this.waterTime ?? { value: 0 };
@@ -500,12 +514,12 @@ ${SKIN_NOISE_GLSL}`,
     const sizeChanged = !this.map || this.map.width !== map.width || this.map.height !== map.height;
     this.map = map;
     if (sizeChanged) {
-      this.refreshShoreFields(map);
+      this.refreshDerivedFields(map);
       this.disposeChunks();
       this.chunksX = Math.ceil(map.width / CHUNK_SIZE);
       this.chunksY = Math.ceil(map.height / CHUNK_SIZE);
       this.ocean.scale.set(map.width * 6, 1, map.height * 6);
-      this.ocean.position.set(map.width / 2, -0.08, map.height / 2);
+      this.ocean.position.set(map.width / 2, waterBedHeight(0) - 0.25, map.height / 2);
       this.previous = null;
       this.subdivision = this.resolveSubdivision();
       this.rebuildAll();
@@ -522,7 +536,7 @@ ${SKIN_NOISE_GLSL}`,
       return;
     }
     this.map = map;
-    this.refreshShoreFields(map);
+    this.refreshDerivedFields(map);
     const previous = this.previous;
     for (let cy = 0; cy < this.chunksY; cy += 1) {
       for (let cx = 0; cx < this.chunksX; cx += 1) {
@@ -535,24 +549,43 @@ ${SKIN_NOISE_GLSL}`,
   }
 
   /**
-   * Recalcule les champs de distance côte/terre uniquement si un type de tuile
-   * a changé. Un simple snapshot de hauteurs ne les invalide pas.
+   * Recalcule les champs dérivés de la carte.
+   *
+   * - distances côte/terre : uniquement si un type de tuile a changé ;
+   * - lit et surface : si un type **ou une hauteur** a changé, car une tuile
+   *   d'eau creusée ou remblayée doit déplacer sa surface sans z-fighting.
    */
-  private refreshShoreFields(map: MapSnapshot): void {
-    const previous = this.kindSnapshot;
-    let same = previous !== null && previous.length === map.kind.length;
-    if (same && previous) {
+  private refreshDerivedFields(map: MapSnapshot): void {
+    const previousKinds = this.kindSnapshot;
+    const previousHeights = this.heightSnapshot;
+    let kindsSame = previousKinds !== null && previousKinds.length === map.kind.length;
+    let heightsSame = previousHeights !== null && previousHeights.length === map.heightMap.length;
+    let waterChanged = false;
+    if (kindsSame || heightsSame) {
       for (let index = 0; index < map.kind.length; index += 1) {
-        if (map.kind[index] !== previous[index]) {
-          same = false;
-          break;
+        const kind = map.kind[index] ?? 0;
+        if (kindsSame && kind !== previousKinds?.[index]) {
+          kindsSame = false;
+          const wasWater = isWaterKind(tileKindFromIndex(previousKinds?.[index] ?? 0));
+          const isWater = isWaterKind(tileKindFromIndex(kind));
+          if (wasWater !== isWater) waterChanged = true;
         }
+        if (heightsSame && map.heightMap[index] !== previousHeights?.[index]) heightsSame = false;
+        if (!kindsSame && !heightsSame && waterChanged) break;
       }
     }
-    if (same) return;
-    this.shoreFields = buildShoreFields(map);
-    this.kindSnapshot = map.kind.slice();
-    this.shoreFieldBuilds += 1;
+    if (kindsSame && heightsSame) return;
+    // Le lit dépend des types (eau ou sec) autant que des hauteurs ; une route
+    // posée sur la terre ferme ne doit pas réallouer trois champs.
+    if (waterChanged || !heightsSame || !this.heightFields) {
+      this.heightFields = buildWaterHeightFields(map);
+    }
+    if (!kindsSame) {
+      this.shoreFields = buildShoreFields(map);
+      this.kindSnapshot = map.kind.slice();
+      this.shoreFieldBuilds += 1;
+    }
+    this.heightSnapshot = map.heightMap.slice();
   }
 
   /**
@@ -597,7 +630,8 @@ ${SKIN_NOISE_GLSL}`,
     const map = this.map;
     if (!map) return;
     const shoreFields = this.shoreFields;
-    if (!shoreFields) return;
+    const heightFields = this.heightFields;
+    if (!shoreFields || !heightFields) return;
     this.chunksBuilt += 1;
     const key = cy * this.chunksX + cx;
     const existing = this.chunks.get(key);
@@ -640,7 +674,6 @@ ${SKIN_NOISE_GLSL}`,
     const haloGlowR = new Float32Array(haloW * haloH);
     const haloGlowG = new Float32Array(haloW * haloH);
     const haloGlowB = new Float32Array(haloW * haloH);
-    const haloWater = new Uint8Array(haloW * haloH);
     const rgb = { r: 0, g: 0, b: 0 };
     for (let hy = 0; hy < haloH; hy += 1) {
       const ty = clamp(y0 + hy - 1, 0, map.height - 1);
@@ -666,7 +699,6 @@ ${SKIN_NOISE_GLSL}`,
         haloR[slot] = rgb.r;
         haloG[slot] = rgb.g;
         haloB[slot] = rgb.b;
-        haloWater[slot] = isWaterKind(kind) ? 1 : 0;
         const glow = NIGHT_GLOW[kind];
         haloGlowR[slot] = glow?.[0] ?? 0;
         haloGlowG[slot] = glow?.[1] ?? 0;
@@ -674,8 +706,11 @@ ${SKIN_NOISE_GLSL}`,
       }
     }
 
-    const heightAt = (x: number, z: number): number =>
-      sampleHeightWorld(map, clamp(x, 0, map.width), clamp(z, 0, map.height));
+    // Lit rendu : les tuiles d'eau sont creusées, les autres gardent leur
+    // dessus. L'échantillonnage est identique à `sampleHeightWorld` (mêmes
+    // coins, même bilinéaire), donc aucune couture aux jonctions de chunks.
+    const bedAt = (x: number, z: number): number =>
+      sampleCornerField(heightFields.bed, map.width, map.height, x, z);
 
     let vertex = 0;
     for (let gz = 0; gz < nz; gz += 1) {
@@ -719,7 +754,7 @@ ${SKIN_NOISE_GLSL}`,
           (haloB[i01] ?? 0) * w01 +
           (haloB[i11] ?? 0) * w11;
 
-        const height = heightAt(x, z);
+        const height = bedAt(x, z);
         const base = vertex * 3;
         positions[base] = x;
         positions[base + 1] = height;
@@ -748,26 +783,19 @@ ${SKIN_NOISE_GLSL}`,
 
         // AO locale : un creux (sommet plus bas que ses voisins) s'assombrit.
         const average =
-          (heightAt(x - AO_STEP, z) +
-            heightAt(x + AO_STEP, z) +
-            heightAt(x, z - AO_STEP) +
-            heightAt(x, z + AO_STEP)) *
+          (bedAt(x - AO_STEP, z) +
+            bedAt(x + AO_STEP, z) +
+            bedAt(x, z - AO_STEP) +
+            bedAt(x, z + AO_STEP)) *
           0.25;
         const concavity = Math.max(0, average - height);
         occlusion[vertex] = Math.max(0.58, 1 - concavity * 0.85);
 
-        // Distance à l'eau et profondeur sous la surface : la plage et le lit
-        // suivent la côte sans ajouter le moindre triangle.
+        // Distance à l'eau pour la plage, et profondeur réelle du lit sous la
+        // surface voisine. Une tuile sèche (route, quai, berge) renvoie 0 :
+        // elle ne reçoit jamais la teinte du fond sous-marin.
         shoreValues[vertex] = sampleField(shoreFields.landDistance, map.width, map.height, x, z);
-        const submerged = Math.max(
-          haloWater[i00] ?? 0,
-          haloWater[i10] ?? 0,
-          haloWater[i01] ?? 0,
-          haloWater[i11] ?? 0,
-        );
-        waterDepths[vertex] = submerged
-          ? waterDepthFactor(sampleField(shoreFields.waterDistance, map.width, map.height, x, z))
-          : 0;
+        waterDepths[vertex] = waterDepthAt(heightFields, map.width, map.height, x, z, height);
         vertex += 1;
       }
     }
@@ -793,7 +821,7 @@ ${SKIN_NOISE_GLSL}`,
       }
     }
 
-    const normals = this.computeChunkNormals(map, x0, y0, nx, nz, invSubdivision);
+    const normals = this.computeChunkNormals(map, heightFields, x0, y0, nx, nz, invSubdivision);
 
     const groundGeometry = new THREE.BufferGeometry();
     groundGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -888,6 +916,7 @@ ${SKIN_NOISE_GLSL}`,
    */
   private computeChunkNormals(
     map: MapSnapshot,
+    heightFields: WaterHeightFields,
     x0: number,
     y0: number,
     nx: number,
@@ -903,7 +932,13 @@ ${SKIN_NOISE_GLSL}`,
         const x = clamp(x0 + (hx - 1) * invSubdivision, 0, map.width);
         const offset = (hz * haloNx + hx) * 3;
         haloPositions[offset] = x;
-        haloPositions[offset + 1] = sampleHeightWorld(map, x, z);
+        haloPositions[offset + 1] = sampleCornerField(
+          heightFields.bed,
+          map.width,
+          map.height,
+          x,
+          z,
+        );
         haloPositions[offset + 2] = z;
       }
     }
@@ -1031,6 +1066,8 @@ ${SKIN_NOISE_GLSL}`,
     this.map = null;
     this.previous = null;
     this.shoreFields = null;
+    this.heightFields = null;
     this.kindSnapshot = null;
+    this.heightSnapshot = null;
   }
 }
