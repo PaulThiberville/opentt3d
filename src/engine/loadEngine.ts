@@ -61,6 +61,9 @@ export interface EmscriptenModule {
   _ottd_command?(jsonPointer: number, out: number, capacity: number): number;
   _ottd_command_result?(): number;
   _ottd_company_id?(): number;
+  _ottd_save_size?(): number;
+  _ottd_save?(out: number, capacity: number): number;
+  _ottd_load?(data: number, length: number): number;
   _ottd_last_error(): number;
   _ottd_shutdown(): void;
   /** Libération optionnelle du runtime Emscripten. */

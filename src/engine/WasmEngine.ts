@@ -8,12 +8,10 @@
  * `step()` ne peut pas corrompre l'état déjà lu.
  *
  * Limitations assumées en v1 (le pont ne les expose pas encore) :
- *  - `save()`/`load()` : voir #61 ;
  *  - commandes de construction et de véhicules : voir #11.
  *
- * Les options de partie (climat, année, IA, difficulté) sont transmises via
- * `ottd_new_game_ex` ; si ce build ne l'expose pas, le pilote retombe sur
- * l'ancien `ottd_new_game` et signale les options non appliquées.
+ * `save()`/`load()` utilisent le conteneur OT3S du pont. Les options de partie
+ * (climat, année, IA, difficulté) sont transmises via `ottd_new_game_ex`.
  */
 
 import {
@@ -409,12 +407,40 @@ export class WasmEngine implements EngineDriver {
   }
 
   async save(): Promise<Uint8Array> {
-    throw new Error('WasmEngine.save : la sauvegarde WASM n’est pas encore disponible (#61).');
+    const module = this.requireModule();
+    if (typeof module._ottd_save_size !== 'function' || typeof module._ottd_save !== 'function') {
+      throw new Error('WasmEngine.save : ce build du pont n’expose pas la sauvegarde.');
+    }
+    const size = module._ottd_save_size();
+    if (size < 0) throw new Error(this.bridgeError('ottd_save_size', size));
+    const pointer = module._malloc(size);
+    try {
+      const written = module._ottd_save(pointer, size);
+      if (written < 0) throw new Error(this.bridgeError('ottd_save', written));
+      return module.HEAPU8.slice(pointer, pointer + written);
+    } finally {
+      module._free(pointer);
+    }
   }
 
   async load(data: Uint8Array): Promise<void> {
-    void data;
-    throw new Error('WasmEngine.load : le chargement WASM n’est pas encore disponible (#61).');
+    const module = this.requireModule();
+    if (typeof module._ottd_load !== 'function') {
+      throw new Error('WasmEngine.load : ce build du pont n’expose pas le chargement.');
+    }
+    if (data.length === 0) throw new Error('WasmEngine.load : sauvegarde vide.');
+    const pointer = module._malloc(data.length);
+    try {
+      module.HEAPU8.set(data, pointer);
+      const code = module._ottd_load(pointer, data.length);
+      if (code !== 0) throw new Error(this.bridgeError('ottd_load', code));
+      this.inGame = true;
+      this.tick = module._ottd_tick();
+      this.pendingNews = [];
+      this.warnings = [];
+    } finally {
+      module._free(pointer);
+    }
   }
 
   status(): EngineStatus {

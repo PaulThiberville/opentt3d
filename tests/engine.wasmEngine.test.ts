@@ -234,14 +234,36 @@ describe('WasmEngine : chargement et cycle de vie', () => {
       from: { x: 1, y: 2 },
       to: { x: 5, y: 2 },
     });
-    expect(engine.status().warnings?.[0]).toContain('#11');
+    expect(engine.status().warnings?.[0]).toContain('Commandes indisponibles');
     expect(warnings.length).toBe(1);
   });
 
-  it('expose save/load comme indisponibles (#61)', async () => {
+  it('refuse save/load si le build ne les expose pas', async () => {
     const { engine } = await createGame();
-    await expect(engine.save()).rejects.toThrow(/#61/);
-    await expect(engine.load(new Uint8Array(4))).rejects.toThrow(/#61/);
+    await expect(engine.save()).rejects.toThrow(/n’expose pas la sauvegarde/);
+    await expect(engine.load(new Uint8Array(4))).rejects.toThrow(/n’expose pas le chargement/);
+  });
+
+  it('sérialise et recharge via le pont', async () => {
+    const { engine, fake } = await createGame();
+    let loaded: Uint8Array | null = null;
+    Object.assign(fake, {
+      _ottd_save_size: () => 4,
+      _ottd_save: (pointer: number) => {
+        fake.HEAPU8.set([1, 2, 3, 4], pointer);
+        return 4;
+      },
+      _ottd_load: (pointer: number, length: number) => {
+        loaded = fake.HEAPU8.slice(pointer, pointer + length);
+        return 0;
+      },
+    });
+
+    const bytes = await engine.save();
+    expect([...bytes]).toEqual([1, 2, 3, 4]);
+    await engine.load(new Uint8Array([9, 8, 7]));
+    expect(loaded).not.toBeNull();
+    expect([...(loaded as unknown as Uint8Array)]).toEqual([9, 8, 7]);
   });
 
   it('formate le hash 64 bits en hexadécimal non signé', async () => {
