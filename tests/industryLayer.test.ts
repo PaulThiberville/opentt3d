@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from 'vitest';
+import * as THREE from 'three';
 import type { Mesh } from 'three';
 import type { IndustrySnapshot, MapSnapshot } from '../src/engine/protocol';
 import { TILE_KIND_INDEX } from '../src/engine/protocol';
@@ -242,6 +243,28 @@ describe('IndustryLayer', () => {
     layer.setQuality('high');
     expect(layer.detailLevel).toBe(2);
     expect(meshNames(layer).includes('industry-smoke')).toBe(true);
+    layer.dispose();
+  });
+
+  it('bascule les archétypes lointains en silhouette simplifiée', async () => {
+    const snapshot = await mockSnapshot();
+    if (!snapshot.map) throw new Error('carte manquante');
+    const initial = snapshot.industries[0];
+    if (!initial) throw new Error('industrie manquante');
+    const layer = new IndustryLayer();
+    layer.build(snapshot.industries, snapshot.map, 'medium');
+    expect(layer.coarseLods).toBe(0);
+    const detailedTriangles = triangleCount(layer);
+    const detailedGeometry = (layer.group.children[0] as Mesh).geometry;
+    layer.update(0.1, new THREE.Vector3(initial.x, 40, initial.y));
+    expect(layer.coarseLods).toBe(0);
+    expect((layer.group.children[0] as Mesh).geometry).toBe(detailedGeometry);
+    layer.update(0.1, new THREE.Vector3(initial.x + 2_000, 40, initial.y + 2_000));
+    expect(layer.coarseLods).toBeGreaterThan(0);
+    expect(triangleCount(layer)).toBeLessThan(detailedTriangles);
+    layer.update(0.1, new THREE.Vector3(initial.x, 40, initial.y));
+    expect(layer.coarseLods).toBe(0);
+    expect((layer.group.children[0] as Mesh).geometry).toBe(detailedGeometry);
     layer.dispose();
   });
 
