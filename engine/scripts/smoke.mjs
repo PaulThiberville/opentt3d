@@ -96,12 +96,16 @@ function readError(api) {
 }
 
 function snapshot(engine) {
-  const capacity = 1024;
-  const pointer = engine._malloc(capacity);
+  // Le JSON contient désormais les entités : on interroge d'abord la taille
+  // requise (out = nullptr), puis on alloue exactement ce qu'il faut.
+  const required = engine._ottd_snapshot_json(0, 0);
+  if (required <= 0) fail(`ottd_snapshot_json a retourné ${required}`);
+  const pointer = engine._malloc(required);
   try {
-    const required = engine._ottd_snapshot_json(pointer, capacity);
-    if (required <= 0) fail(`ottd_snapshot_json a retourné ${required}`);
-    if (required > capacity) fail(`snapshot trop grand : ${required} octets`);
+    const written = engine._ottd_snapshot_json(pointer, required);
+    if (written !== required) {
+      fail(`ottd_snapshot_json a écrit ${written} octets au lieu de ${required}`);
+    }
     return JSON.parse(engine.UTF8ToString(pointer));
   } finally {
     engine._free(pointer);
@@ -137,7 +141,7 @@ async function run(label) {
   const initial = waitForMap(api, MAP_SIZE, MAP_SIZE);
   log(
     `[${label}] carte ${initial.map.width}×${initial.map.height} générée ` +
-      `(tick ${initial.tick}, ${initial.towns} villes, ${initial.industries} industries)`,
+      `(tick ${initial.meta.tick}, ${initial.counts.towns} villes, ${initial.counts.industries} industries)`,
   );
 
   const tickBeforeZeroStep = api.engine._ottd_tick();
@@ -177,9 +181,11 @@ async function run(label) {
   );
   const memoryMiB = (api.engine.HEAPU8.byteLength / (1024 * 1024)).toFixed(1);
   log(
-    `[${label}] tick=${state.tick} date=${state.date.day}/${state.date.month + 1}/${state.date.year} ` +
-      `entreprises=${state.companies} villes=${state.towns} véhicules=${state.vehicles} ` +
-      `gares=${state.stations} industries=${state.industries} mémoire=${memoryMiB} Mio`,
+    `[${label}] tick=${state.meta.tick} ` +
+      `date=${state.economy.day}/${state.economy.month + 1}/${state.economy.year} ` +
+      `entreprises=${state.counts.companies} villes=${state.counts.towns} ` +
+      `véhicules=${state.counts.vehicles} gares=${state.counts.stations} ` +
+      `industries=${state.counts.industries} mémoire=${memoryMiB} Mio`,
   );
   log(`[${label}] hash=${hash} (total ${elapsed} ms)`);
 
@@ -199,8 +205,8 @@ if (first.hash !== second.hash) {
       `  instance-2 : ${JSON.stringify(second.state)}`,
   );
 }
-if (first.state.tick !== second.state.tick) {
-  fail(`ticks différents : ${first.state.tick} ≠ ${second.state.tick}`);
+if (first.state.meta.tick !== second.state.meta.tick) {
+  fail(`ticks différents : ${first.state.meta.tick} ≠ ${second.state.meta.tick}`);
 }
 
 log(`\n✅ Déterminisme vérifié : ${first.hash} sur deux instances indépendantes.`);
