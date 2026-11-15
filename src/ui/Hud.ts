@@ -51,6 +51,7 @@ export class Hud {
   private toolbar: Toolbar;
   private help: HelpPanel;
   private toasts: Toasts;
+  private networkStatus: HTMLDivElement;
   private errorOverlay: HTMLDivElement;
   private errorTitle: HTMLHeadingElement;
   private errorMessage: HTMLParagraphElement;
@@ -92,6 +93,11 @@ export class Hud {
 
     this.help = new HelpPanel();
     this.toasts = new Toasts();
+    this.networkStatus = el('div', {
+      className: 'hud-net',
+      attrs: { role: 'status', 'aria-live': 'polite' },
+    });
+    this.networkStatus.hidden = true;
 
     this.errorOverlay = el('div', {
       className: 'hud-overlay hud-error',
@@ -118,6 +124,7 @@ export class Hud {
       this.toolbar.element,
       this.help.element,
       this.toasts.element,
+      this.networkStatus,
       this.errorOverlay,
     );
     mount.append(this.root);
@@ -127,11 +134,23 @@ export class Hud {
 
   update(state: HudState): void {
     this.topBar.update(state);
+    this.updateNetworkStatus(state);
     this.selectionPanel.update(state.selection, state.following);
     this.minimap.setSnapshot(state.snapshot);
     this.minimap.setSelection(state.selection?.selection ?? null);
     this.refreshNewsBadge();
     if (this.newsFeed.isOpen()) this.renderNewsList();
+  }
+
+  private updateNetworkStatus(state: HudState): void {
+    const status = state.networkStatus;
+    if (!status) {
+      this.networkStatus.hidden = true;
+      return;
+    }
+    this.networkStatus.hidden = false;
+    this.networkStatus.textContent = status.text;
+    this.networkStatus.dataset.tone = status.tone;
   }
 
   updateCamera(view: CameraView, aspect: number): void {
