@@ -17,6 +17,14 @@ export interface QualitySettings {
   antialias: boolean;
   shadows: boolean;
   shadowMapSize: number;
+  /** Rayon du filtre PCF (en texels) : plus grand = ombre plus douce. */
+  shadowRadius: number;
+  /** Biais de profondeur négatif pour éviter l'acné d'ombre. */
+  shadowBias: number;
+  /** Décalage le long de la normale, robuste sur les pentes. */
+  shadowNormalBias: number;
+  /** Demi-largeur de la caméra d'ombre autour du point visé (en tuiles). */
+  shadowFrustum: number;
   /** Distance de la caméra et du brouillard (en tuiles). */
   drawDistance: number;
   fogNear: number;
@@ -45,6 +53,10 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualitySettings> = {
     antialias: false,
     shadows: false,
     shadowMapSize: 512,
+    shadowRadius: 1,
+    shadowBias: -0.0008,
+    shadowNormalBias: 0.55,
+    shadowFrustum: 60,
     drawDistance: 420,
     fogNear: 180,
     treeDensity: 0.5,
@@ -63,6 +75,10 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualitySettings> = {
     antialias: true,
     shadows: false,
     shadowMapSize: 1024,
+    shadowRadius: 2,
+    shadowBias: -0.0006,
+    shadowNormalBias: 0.45,
+    shadowFrustum: 80,
     drawDistance: 620,
     fogNear: 260,
     treeDensity: 0.8,
@@ -77,10 +93,14 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualitySettings> = {
   high: {
     level: 'high',
     label: 'Haute',
-    pixelRatioCap: 2,
+    pixelRatioCap: 1.5,
     antialias: true,
     shadows: true,
     shadowMapSize: 2048,
+    shadowRadius: 2.6,
+    shadowBias: -0.0004,
+    shadowNormalBias: 0.35,
+    shadowFrustum: 100,
     drawDistance: 900,
     fogNear: 320,
     treeDensity: 1,
@@ -131,6 +151,18 @@ export function resolveRenderSize(
     bufferWidth: Math.floor(width * pixelRatio),
     bufferHeight: Math.floor(height * pixelRatio),
   };
+}
+
+/**
+ * Demi-largeur de la caméra d'ombre : elle s'élargit quand la caméra recule
+ * pour couvrir la zone visible, sans dépasser un plafond qui rendrait les
+ * texels trop grossiers. Une seule cascade « ajustée » remplace les cascades
+ * complètes, trop coûteuses sur une carte entière.
+ */
+export function resolveShadowFrustum(baseFrustum: number, cameraDistance: number): number {
+  const base = Number.isFinite(baseFrustum) && baseFrustum > 0 ? baseFrustum : 80;
+  const distance = Number.isFinite(cameraDistance) && cameraDistance > 0 ? cameraDistance : 0;
+  return Math.min(base * 1.65, base + distance * 0.32);
 }
 
 export function nextQuality(level: QualityLevel): QualityLevel {
