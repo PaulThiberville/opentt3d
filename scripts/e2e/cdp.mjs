@@ -588,6 +588,11 @@ export class CdpPage {
       Escape: { code: 'Escape', keyCode: 27 },
       Enter: { code: 'Enter', keyCode: 13 },
       Space: { code: 'Space', keyCode: 32 },
+      Tab: { code: 'Tab', keyCode: 9 },
+      ArrowLeft: { code: 'ArrowLeft', keyCode: 37 },
+      ArrowRight: { code: 'ArrowRight', keyCode: 39 },
+      Home: { code: 'Home', keyCode: 36 },
+      End: { code: 'End', keyCode: 35 },
     };
     const info = codes[key];
     if (!info) throw new Error(`Touche non gérée : ${key}`);
