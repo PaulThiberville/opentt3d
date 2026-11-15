@@ -1475,8 +1475,8 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 		/* Autorité locale : note et coûts des actions disponibles pour
 		 * l'entreprise locale (#166). Une action hors masque reste exposée
 		 * avec `available: false` pour que l'UI explique son indisponibilité. */
-		const TownActions mask = Company::IsValidID(_local_company)
-			? GetMaskOfTownActions(_local_company, t) : TownActions{};
+		TownActions mask{};
+		if (Company::IsValidID(_local_company)) mask = GetMaskOfTownActions(_local_company, t);
 		out += ",\"authority\":{\"rating\":";
 		out += fmt::format("{}", rating);
 		out += ",\"actions\":{";
