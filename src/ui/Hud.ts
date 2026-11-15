@@ -15,12 +15,14 @@ import { el } from './dom';
 import { t } from './i18n';
 import { formatShortGameDate, type GameDateLike } from './format';
 import { NewsQueue, type NewsKind } from './news';
+import type { NetworkAlertView } from './netlobby';
 import type { CameraView, HudState, SelectionSummary } from './types';
 import { BuildHint } from './hud/BuildHint';
 import { BuildOptions } from './hud/BuildOptions';
 import { DepotPanel } from './hud/DepotPanel';
 import { HelpPanel } from './hud/HelpPanel';
 import { Minimap } from './hud/Minimap';
+import { NetworkAlert } from './hud/NetworkAlert';
 import { NewsFeed } from './hud/NewsFeed';
 import { SelectionPanel } from './hud/SelectionPanel';
 import { Toasts } from './hud/Toasts';
@@ -85,6 +87,7 @@ export class Hud {
   private help: HelpPanel;
   private toasts: Toasts;
   private networkStatus: HTMLDivElement;
+  private networkAlert: NetworkAlert;
   private errorOverlay: HTMLDivElement;
   private errorTitle: HTMLHeadingElement;
   private errorMessage: HTMLParagraphElement;
@@ -189,6 +192,7 @@ export class Hud {
       attrs: { role: 'status', 'aria-live': 'polite' },
     });
     this.networkStatus.hidden = true;
+    this.networkAlert = new NetworkAlert();
 
     this.errorOverlay = el('div', {
       className: 'hud-overlay hud-error',
@@ -229,6 +233,7 @@ export class Hud {
       this.help.element,
       this.toasts.element,
       this.networkStatus,
+      this.networkAlert.element,
       this.errorOverlay,
     );
     mount.append(this.root);
@@ -320,6 +325,11 @@ export class Hud {
   /** Message éphémère non archivé dans le flux. */
   notify(kind: NewsKind, text: string): void {
     this.toasts.push(kind, text);
+  }
+
+  /** Bandeau explicite de pause coopérative réseau (#39). */
+  setNetworkAlert(view: NetworkAlertView | null): void {
+    this.networkAlert.update(view);
   }
 
   /** Reflète l'outil de construction armé dans la barre du bas. */
@@ -436,6 +446,7 @@ export class Hud {
     this.selectionPanel.dispose();
     this.newsFeed.dispose();
     this.toasts.dispose();
+    this.networkAlert.dispose();
     this.buildHint.dispose();
     this.buildOptions.dispose();
     this.buildOptions.element.remove();

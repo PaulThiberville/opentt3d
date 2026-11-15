@@ -48,7 +48,13 @@ import {
   type VehicleOrder,
 } from '../game/vehicleRules';
 import type { StartInfo } from '../net/lobby-types';
-import { NET_TICK_MS, createNetSession, type NetSession, type NetUpdate } from '../net/session';
+import {
+  NET_TICK_MS,
+  createNetSession,
+  type NetNotice,
+  type NetSession,
+  type NetUpdate,
+} from '../net/session';
 import { Renderer } from '../render/Renderer';
 import { WorldView, type WorldTarget } from '../render/WorldView';
 import { CinematicIntro } from '../render/cinematicIntro';
@@ -65,6 +71,7 @@ import { BuildController } from './buildController';
 import { describeBuildPlan } from './buildHint';
 import { prefersReducedMotion } from './dom';
 import type { NewGameOptions } from './gameOptions';
+import { t } from './i18n';
 import { formatGameDate, formatMoney } from './format';
 import { t } from './i18n';
 import type { BuildToolId } from './hud/Toolbar';
@@ -77,6 +84,7 @@ import {
 } from './saveFormat';
 import {
   describeNetworkStatus,
+  describePeerLossAlert,
   localCompanyForStart,
   mapStartInfoToGameOptions,
   networkControlsLocked,
@@ -102,6 +110,24 @@ export class LoadCancelledError extends Error {
   constructor() {
     super('Chargement annulé.');
     this.name = 'LoadCancelledError';
+  }
+}
+
+/** Traduit un diagnostic réseau (#39) ; repli sur le message du protocole. */
+function translateNotice(notice: NetNotice): string {
+  switch (notice.code) {
+    case 'host-migration':
+      return t('net.notice.host-migration');
+    case 'host-unreachable':
+      return t('net.notice.host-unreachable');
+    case 'host-yield':
+      return t('net.notice.host-yield');
+    case 'peer-resumed':
+      return t('net.notice.peer-resumed');
+    case 'transport-error':
+      return t('net.notice.transport-error', { detail: notice.detail ?? notice.message });
+    default:
+      return notice.message;
   }
 }
 
@@ -247,6 +273,8 @@ export class GameSession {
   private peerNames: Record<string, string> = {};
   private networkWarnings: string[] = [];
   private networkLostNotified = false;
+  private networkAlertKey = '';
+  private remoteLostPeers = new Set<string>();
   private lastNetworkNoticeAt = -Infinity;
   private lastNetworkSaveAt = 0;
   private networkSavePending = false;
@@ -616,14 +644,35 @@ export class GameSession {
     const session = this.netSession;
     if (!session) return;
     session.onDesync(() => {
-      this.hud?.notify('warning', 'Divergence détectée : resynchronisation avec l’hôte…');
+      this.hud?.notify('warning', t('net.notice.desync'));
       // Le runner vient de recharger un tick plus avancé : rafraîchit la vue
       // sans attendre le prochain snapshot périodique.
       this.game?.refresh();
     });
     session.onChat(({ player, text }) => {
-      const name = this.network?.players.find((item) => item.player === player)?.name ?? 'Joueur';
+      const name =
+        this.network?.players.find((item) => item.player === player)?.name ?? t('net.chatFallback');
       this.hud?.notify('info', `${name} : ${text}`);
+    });
+    session.onPeerState(({ peerId, player, state, reason }) => {
+      const name =
+        this.peerNames[peerId] ??
+        this.network?.players.find((item) => item.player === player)?.name ??
+        t('net.pair', { id: peerId.slice(0, 6) });
+      if (state === 'disconnected') {
+        this.remoteLostPeers.add(peerId);
+        this.hud?.notify('warning', t('net.status.peerLost', { who: name }));
+      } else {
+        this.remoteLostPeers.delete(peerId);
+        if (state === 'left' && reason === 'expelled') {
+          this.hud?.notify('info', t('net.notice.peer-resumed'));
+        }
+      }
+      // Force the banner to re-evaluate on the next frame.
+      this.networkAlertKey = '';
+    });
+    session.onNotice((notice) => {
+      this.hud?.notify(notice.level === 'error' ? 'error' : notice.level, translateNotice(notice));
     });
   }
 
@@ -1242,6 +1291,7 @@ export class GameSession {
       world.update(delta, { ...game.getInterpolation(), alpha: session.alpha(now) });
       this.refreshNetworkSave(now, session.stats().isHost);
       this.checkNetworkState();
+      this.refreshNetworkAlert(now);
     } else {
       game.advance(delta);
       world.update(delta, game.getInterpolation());
@@ -1319,10 +1369,50 @@ export class GameSession {
     const stats = session.stats();
     if (!stats.lost) return;
     this.networkLostNotified = true;
-    this.hud?.notify('error', 'Hôte perdu : la session réseau est interrompue.');
-    this.callbacks.onNetworkLost?.(
-      'L’hôte a disparu et aucun autre joueur n’a pu prendre le relais. La partie réseau est arrêtée.',
-    );
+    this.hud?.notify('error', t('net.lost.hud'));
+    this.callbacks.onNetworkLost?.(t('net.lost.reason'));
+  }
+
+  /**
+   * Bandeau de pause coopérative (#39). L'hôte voit les actions « continuer »
+   * et « attendre » ; les invités voient la décision en cours. Aucun timer :
+   * le compte à rebours est recalculé depuis l'horloge de session.
+   */
+  private refreshNetworkAlert(now: number): void {
+    const session = this.netSession;
+    const hud = this.hud;
+    if (!session || !hud) return;
+    const stats = session.stats();
+    const pause = session.peerLossPause();
+    const update = this.lastNetUpdate;
+    const peerIds =
+      pause?.peerIds ?? (update?.reason === 'peer-lost' ? [...this.remoteLostPeers] : []);
+    if (peerIds.length === 0) {
+      if (this.networkAlertKey !== '') {
+        this.networkAlertKey = '';
+        hud.setNetworkAlert(null);
+      }
+      return;
+    }
+    const seconds = pause ? Math.max(0, Math.ceil((pause.expiresAt - now) / 1000)) : 0;
+    const view = describePeerLossAlert({
+      isHost: stats.isHost,
+      names: this.peerNames,
+      peerIds,
+      seconds,
+      onContinue: () => {
+        session.resumeAfterPeerLoss();
+        this.networkAlertKey = '';
+      },
+      onWait: () => {
+        session.waitForPeers();
+        this.networkAlertKey = '';
+      },
+    });
+    const key = `${view.title}|${view.detail}|${view.actions.length}`;
+    if (key === this.networkAlertKey) return;
+    this.networkAlertKey = key;
+    hud.setNetworkAlert(view);
   }
 
   private networkStatus(): NetworkStatusView | null {
@@ -1340,6 +1430,11 @@ export class GameSession {
       names: this.peerNames,
       playersOnline: Object.keys(this.network?.peers ?? {}).length,
       lost: stats.lost,
+      ...(update?.reason === undefined ? {} : { reason: update.reason }),
+      peers: stats.peers,
+      loss: stats.loss,
+      turnDelay: stats.turnDelay,
+      term: stats.term,
     });
   }
 
