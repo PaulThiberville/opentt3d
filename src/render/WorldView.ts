@@ -19,6 +19,7 @@ import { IndustryLayer } from './IndustryLayer';
 import { Picking, type PickResult } from './Picking';
 import { SignalLayer } from './SignalLayer';
 import { TerrainLayer } from './TerrainLayer';
+import { TrackLayer } from './TrackLayer';
 import { VegetationLayer } from './VegetationLayer';
 import { VehicleLayer } from './VehicleLayer';
 import { phaseFromEconomy, sunState } from './dayNight';
@@ -55,6 +56,7 @@ export interface WorldViewOptions {
 
 export class WorldView {
   readonly terrain = new TerrainLayer();
+  readonly tracks = new TrackLayer();
   readonly cityLayer = new CityLayer();
   readonly industries = new IndustryLayer();
   readonly vegetation = new VegetationLayer();
@@ -103,6 +105,7 @@ export class WorldView {
     this.onBuildCancel = options.onBuildCancel;
 
     this.scene.add(this.terrain.group);
+    this.scene.add(this.tracks.group);
     this.scene.add(this.cityLayer.group);
     this.scene.add(this.industries.group);
     this.scene.add(this.vegetation.group);
@@ -139,8 +142,13 @@ export class WorldView {
     const map = snapshot.map;
     if (map) {
       const first = !this.mapApplied;
-      if (first) this.terrain.setMap(map);
-      else this.terrain.applyDelta(map);
+      if (first) {
+        this.terrain.setMap(map);
+        this.tracks.setMap(map, snapshot.stations);
+      } else {
+        this.terrain.applyDelta(map);
+        this.tracks.applyDelta(map, snapshot.stations);
+      }
       this.currentMap = map;
       this.cityLayer.build(snapshot.towns, map);
       this.industries.build(snapshot.industries, map, this.quality);
@@ -166,6 +174,7 @@ export class WorldView {
   /** Diffuse le facteur nuit aux couches qui ont un rendu nocturne. */
   private applyNight(amount: number): void {
     this.terrain.setNight(amount);
+    this.tracks.setNight(amount);
     this.vehicles.setNight(amount);
     this.cityLayer.setNight(amount);
   }
@@ -181,6 +190,7 @@ export class WorldView {
 
     this.controller.update(deltaSeconds);
     this.terrain.update(deltaSeconds);
+    this.tracks.update(this.camera.position);
     this.vegetation.update(deltaSeconds);
     this.cityLayer.update(this.camera.position);
     this.industries.update(deltaSeconds, this.camera.position);
@@ -339,6 +349,7 @@ export class WorldView {
 
   private applyQuality(level: QualityLevel): void {
     this.terrain.setQuality(level);
+    this.tracks.setQuality(level);
     this.cityLayer.setQuality(level);
     this.cityLayer.setShadows(level === 'high');
     this.cityLayer.setNightLights(qualitySettings(level).nightWindows);
@@ -390,13 +401,22 @@ export class WorldView {
     return this.depots.count;
   }
 
+  getTrackChunkCount(): number {
+    return this.tracks.chunkCount;
+  }
+
+  getTrackTriangleCount(): number {
+    return this.tracks.triangleCount;
+  }
+
   getDrawCalls(): number {
     return (
       this.vehicles.drawCallCount +
       this.cityLayer.drawCallCount +
       this.vegetation.drawCallCount +
       this.industries.drawCallCount +
-      this.depots.drawCallCount
+      this.depots.drawCallCount +
+      this.tracks.drawCallCount
     );
   }
 
@@ -409,6 +429,7 @@ export class WorldView {
     this.scene.remove(this.picking.group);
     this.picking.dispose();
     this.scene.remove(this.terrain.group);
+    this.scene.remove(this.tracks.group);
     this.scene.remove(this.cityLayer.group);
     this.scene.remove(this.industries.group);
     this.scene.remove(this.vegetation.group);
@@ -417,6 +438,7 @@ export class WorldView {
     this.scene.remove(this.depots.group);
     this.scene.remove(this.buildOverlay.group);
     this.terrain.dispose();
+    this.tracks.dispose();
     this.cityLayer.dispose();
     this.industries.dispose();
     this.vegetation.dispose();
