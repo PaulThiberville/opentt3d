@@ -8,10 +8,11 @@
  * façade à `Game` pour que le rendu suive des ticks déjà séquencés par
  * `NetSession`, sans jamais avancer le moteur de son côté.
  *
- * La sauvegarde réseau est volontairement limitée à ce que le moteur sait
- * sérialiser. En mode mock, `save()` est synchrone dans les faits : le cache
- * est rafraîchi juste après la demande et `load()` applique la sauvegarde
- * immédiatement. Le transfert de sauvegarde complet reste l'objet de #38.
+ * Depuis #93, le moteur WASM expose `saveSync`/`loadSync` : la sauvegarde
+ * réseau est alors réellement synchrone et correspond au tick courant, ce que
+ * le resync et le join exigent. Le mock conserve son chemin historique (cache
+ * rempli en microtâche) car son `save()` ne publie pas encore de variante
+ * synchrone.
  */
 
 import type { EngineCommand, EngineDriver, WorldSnapshot } from '../engine/protocol';
@@ -19,8 +20,22 @@ import { decodeBase64, encodeBase64 } from '../game/base64';
 import type { Runner } from '../net/session';
 import type { Command } from '../net/types';
 
+/** Moteurs capables de sérialiser/recharger sans promesse (WASM, #93). */
+export interface SyncSaveEngine {
+  saveSync(): Uint8Array;
+  loadSync(data: Uint8Array): void;
+}
+
+/** Vrai si le pilote expose la paire synchrone attendue par le lockstep. */
+export function isSyncSaveEngine(engine: EngineDriver): engine is EngineDriver & SyncSaveEngine {
+  const candidate = engine as unknown as Partial<SyncSaveEngine>;
+  return typeof candidate.saveSync === 'function' && typeof candidate.loadSync === 'function';
+}
+
 export interface EngineRunner extends Runner {
   readonly driver: EngineDriver;
+  /** Vrai si `serialize()`/`load()` sont synchrones et exacts (WASM). */
+  readonly synchronous: boolean;
   /** Force une sauvegarde et renvoie le format texte du runner. */
   saveNow(): Promise<string>;
 }
@@ -35,7 +50,7 @@ function isLocalOnly(command: EngineCommand): boolean {
   return command.type === 'pause' || command.type === 'speed';
 }
 
-function parseSave(text: string): Uint8Array {
+function parseEnvelope(text: string): SaveEnvelope {
   let envelope: SaveEnvelope;
   try {
     const parsed = JSON.parse(text) as unknown;
@@ -51,7 +66,11 @@ function parseSave(text: string): Uint8Array {
   } catch {
     throw new Error('Sauvegarde réseau illisible.');
   }
-  return decodeBase64(envelope.data);
+  return envelope;
+}
+
+function parseSave(text: string): Uint8Array {
+  return decodeBase64(parseEnvelope(text).data);
 }
 
 /**
@@ -60,6 +79,7 @@ function parseSave(text: string): Uint8Array {
  * réseau (elles sont désactivées dans l'UI).
  */
 export function createEngineRunner(engine: EngineDriver): EngineRunner {
+  const synchronous = isSyncSaveEngine(engine);
   let cached: SaveEnvelope | null = null;
   let saving: Promise<SaveEnvelope> | null = null;
 
@@ -98,36 +118,60 @@ export function createEngineRunner(engine: EngineDriver): EngineRunner {
     }
   }
 
+  function serialize(): string {
+    if (synchronous && isSyncSaveEngine(engine)) {
+      const tick = engine.status().tick;
+      const envelope: SaveEnvelope = { tick, data: encodeBase64(engine.saveSync()) };
+      cached = envelope;
+      return JSON.stringify(envelope);
+    }
+    const tick = engine.status().tick;
+    if (cached && cached.tick === tick) return JSON.stringify(cached);
+    // La sauvegarde mock s'exécute immédiatement ; le cache est prêt à la
+    // microtâche suivante. Entre-temps, on renvoie la dernière sauvegarde
+    // connue plutôt que de bloquer la boucle.
+    void refresh().catch((error: unknown) => {
+      console.warn('[net:runner] sauvegarde impossible', error);
+    });
+    return cached ? JSON.stringify(cached) : '';
+  }
+
+  function load(data: string): void {
+    if (typeof data !== 'string' || data.length === 0) {
+      throw new Error('Resynchronisation impossible : aucune sauvegarde reçue.');
+    }
+    if (synchronous && isSyncSaveEngine(engine)) {
+      const envelope = parseEnvelope(data);
+      const bytes = decodeBase64(envelope.data);
+      engine.loadSync(bytes);
+      const tick = engine.status().tick;
+      if (tick !== envelope.tick) {
+        throw new Error(
+          `Sauvegarde réseau incohérente : tick ${tick} chargé, ${envelope.tick} annoncé.`,
+        );
+      }
+      cached = envelope;
+      return;
+    }
+    const bytes = parseSave(data);
+    // `MockEngine.load` applique son état de façon synchrone avant de rendre
+    // la promesse.
+    void engine.load(bytes).catch((error: unknown) => {
+      console.warn('[net:runner] chargement de sauvegarde impossible', error);
+    });
+    const envelope = parseEnvelope(data);
+    cached = envelope;
+  }
+
   return {
     driver: engine,
+    synchronous,
     tick: () => engine.status().tick,
     step,
     hash: () => engine.hash(),
-    serialize: () => {
-      const tick = engine.status().tick;
-      if (cached && cached.tick === tick) return JSON.stringify(cached);
-      // La sauvegarde mock s'exécute immédiatement ; le cache est prêt à la
-      // microtâche suivante. Entre-temps, on renvoie la dernière sauvegarde
-      // connue plutôt que de bloquer la boucle.
-      void refresh().catch((error: unknown) => {
-        console.warn('[net:runner] sauvegarde impossible', error);
-      });
-      return cached ? JSON.stringify(cached) : '';
-    },
-    load: (data: string) => {
-      if (typeof data !== 'string' || data.length === 0) {
-        throw new Error('Resynchronisation impossible : aucune sauvegarde reçue.');
-      }
-      const bytes = parseSave(data);
-      // `MockEngine.load` applique son état de façon synchrone avant de rendre
-      // la promesse. Le mode réseau de cette vague est mock uniquement.
-      void engine.load(bytes).catch((error: unknown) => {
-        console.warn('[net:runner] chargement de sauvegarde impossible', error);
-      });
-      const envelope = JSON.parse(data) as SaveEnvelope;
-      cached = envelope;
-    },
-    saveNow: async () => JSON.stringify(await refresh()),
+    serialize,
+    load,
+    saveNow: async () => (synchronous ? serialize() : JSON.stringify(await refresh())),
   };
 }
 
