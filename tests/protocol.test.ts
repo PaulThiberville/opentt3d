@@ -4,6 +4,7 @@ import {
   PROTOCOL_VERSION,
   TILE_FLAG,
   TILE_KIND_INDEX,
+  TRACK_BIT_CROSSING_RAIL,
   type CompanySnapshot,
   type MapSnapshot,
   type WorldSnapshot,
@@ -75,6 +76,14 @@ describe('protocole moteur v1', () => {
     for (const flag of flags) {
       expect(flag & (flag - 1)).toBe(0);
     }
+  });
+
+  it('ajoute les types d’ouvrages #158/#159 à la fin de l’index', () => {
+    expect(TILE_KIND_INDEX.lock).toBe(19);
+    expect(TILE_KIND_INDEX.aqueduct).toBe(20);
+    expect(TILE_KIND_INDEX.crossing).toBe(21);
+    expect(TRACK_BIT_CROSSING_RAIL).toBe(16);
+    expect(TRACK_BIT_CROSSING_RAIL & 0x0f).toBe(0);
   });
 
   it('construit un snapshot vide conforme', () => {

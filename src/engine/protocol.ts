@@ -31,7 +31,10 @@ export type TileKind =
   | 'airport'
   | 'dock'
   | 'canal'
-  | 'river';
+  | 'river'
+  | 'lock'
+  | 'aqueduct'
+  | 'crossing';
 
 /** Index stable de TileKind, utilisé dans les tableaux binaires du snapshot. */
 export const TILE_KIND_INDEX: Record<TileKind, number> = {
@@ -54,6 +57,9 @@ export const TILE_KIND_INDEX: Record<TileKind, number> = {
   dock: 16,
   canal: 17,
   river: 18,
+  lock: 19,
+  aqueduct: 20,
+  crossing: 21,
 };
 
 export const TILE_FLAG = {
@@ -66,6 +72,13 @@ export const TILE_FLAG = {
   SIGNAL: 1 << 6,
   ELECTRIFIED: 1 << 7,
 } as const;
+
+/**
+ * Bit de `trackBits` réservé aux passages à niveau : il mémorise le réseau
+ * d'origine (0 = route, 1 = rail). Les quatre bits bas restent l'axe de la
+ * voie, comme pour les autres tuiles du mock.
+ */
+export const TRACK_BIT_CROSSING_RAIL = 1 << 4;
 
 /**
  * Carte brute. Les tableaux ont tous `width * height` entrées, indexés
@@ -372,7 +385,21 @@ export type EngineCommand =
   | { type: 'console'; command: string }
   | {
       type: 'build';
-      tool: 'road' | 'rail' | 'station' | 'depot' | 'signal' | 'bridge' | 'tunnel' | 'clear';
+      tool:
+        | 'road'
+        | 'rail'
+        | 'station'
+        | 'depot'
+        | 'signal'
+        | 'bridge'
+        | 'tunnel'
+        | 'clear'
+        | 'terraform'
+        | 'tree'
+        | 'canal'
+        | 'lock'
+        | 'aqueduct'
+        | 'crossing';
       company: CompanyId;
       /** Points en coordonnées tuiles, arrondis par le pont. */
       from: { x: number; y: number };

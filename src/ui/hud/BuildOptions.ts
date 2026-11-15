@@ -9,6 +9,8 @@
 import {
   STATION_MAX_LENGTH,
   STATION_MAX_PLATFORMS,
+  TERRAFORM_MAX_SIZE,
+  TREE_MAX_SIZE,
   cloneBuildSettings,
   type BuildDirection,
   type BuildSettings,
@@ -77,7 +79,14 @@ export class BuildOptions {
   private render(): void {
     const tool = this.tool;
     this.element.replaceChildren();
-    if (tool !== 'station' && tool !== 'depot' && tool !== 'signal') {
+    if (
+      tool !== 'station' &&
+      tool !== 'depot' &&
+      tool !== 'signal' &&
+      tool !== 'terraform' &&
+      tool !== 'tree' &&
+      tool !== 'lock'
+    ) {
       this.element.hidden = true;
       return;
     }
@@ -88,12 +97,70 @@ export class BuildOptions {
         ? t('build.title.station')
         : tool === 'depot'
           ? t('build.title.depot')
-          : t('build.title.signal');
+          : tool === 'signal'
+            ? t('build.title.signal')
+            : tool === 'terraform'
+              ? t('build.title.terraform')
+              : tool === 'tree'
+                ? t('build.title.tree')
+                : t('build.title.lock');
     this.element.append(el('span', { className: 'hud-build-options-title', text: title }));
 
     if (tool === 'station') this.renderStation();
     else if (tool === 'depot') this.renderDepot();
-    else this.renderSignal();
+    else if (tool === 'signal') this.renderSignal();
+    else if (tool === 'terraform') this.renderTerraform();
+    else if (tool === 'tree') this.renderTree();
+    else this.renderLock();
+  }
+
+  private renderTerraform(): void {
+    const terraform = this.settings.terraform;
+    this.element.append(
+      this.segmented(
+        [
+          { id: 'up', label: t('build.terraform.up') },
+          { id: 'down', label: t('build.terraform.down') },
+        ],
+        terraform.direction,
+        (direction) => {
+          this.commit({
+            ...this.settings,
+            terraform: { ...terraform, direction: direction === 'down' ? 'down' : 'up' },
+          });
+        },
+        'terraform-direction',
+        'build.terraformDirection',
+      ),
+      this.stepper(
+        t('build.size'),
+        terraform.size,
+        1,
+        TERRAFORM_MAX_SIZE,
+        'terraform-size',
+        (value) => this.commit({ ...this.settings, terraform: { ...terraform, size: value } }),
+      ),
+    );
+  }
+
+  private renderTree(): void {
+    const tree = this.settings.tree;
+    this.element.append(
+      this.stepper(t('build.size'), tree.size, 1, TREE_MAX_SIZE, 'tree-size', (value) =>
+        this.commit({ ...this.settings, tree: { ...tree, size: value } }),
+      ),
+    );
+  }
+
+  private renderLock(): void {
+    const lock = this.settings.lock;
+    this.element.append(
+      el('span', {
+        className: 'hud-build-options-note',
+        text: t('build.lockNote'),
+      }),
+      this.directionButton(lock.direction ?? 'ne'),
+    );
   }
 
   private renderStation(): void {

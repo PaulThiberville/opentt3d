@@ -201,7 +201,9 @@ export class BuildOverlay {
       plan.tool === 'road' ||
       plan.tool === 'rail' ||
       plan.tool === 'clear' ||
-      plan.tool === 'signal';
+      plan.tool === 'signal' ||
+      plan.tool === 'canal' ||
+      plan.tool === 'aqueduct';
     geometry.setDrawRange(0, showPathLine ? count : 0);
     const attribute = geometry.getAttribute('position') as THREE.BufferAttribute;
     attribute.needsUpdate = true;
@@ -221,7 +223,13 @@ export class BuildOverlay {
     map: MapSnapshot,
     rect: { left: number; top: number; right: number; bottom: number },
   ): void {
-    if (plan.tool === 'road' || plan.tool === 'rail' || plan.tool === 'clear') {
+    if (
+      plan.tool === 'road' ||
+      plan.tool === 'rail' ||
+      plan.tool === 'clear' ||
+      plan.tool === 'canal' ||
+      plan.tool === 'aqueduct'
+    ) {
       this.outline.visible = false;
       return;
     }

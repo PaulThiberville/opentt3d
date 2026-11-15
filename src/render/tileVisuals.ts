@@ -44,6 +44,9 @@ export const TILE_COLOURS: Record<TileKind, number> = {
   dock: 0x67593f,
   canal: 0x2a5d80,
   river: 0x2d6a8e,
+  lock: 0x2c5c7c,
+  aqueduct: 0x7a7164,
+  crossing: 0x393c40,
 };
 
 /** Palette des couleurs d'entreprise OpenTTD (index 0..15). */

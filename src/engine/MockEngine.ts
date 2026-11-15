@@ -16,6 +16,7 @@ import {
   PROTOCOL_VERSION,
   TILE_FLAG,
   TILE_KIND_INDEX,
+  TRACK_BIT_CROSSING_RAIL,
   type CompanySnapshot,
   type DepotSnapshot,
   type EconomySnapshot,
@@ -49,10 +50,16 @@ import {
 import {
   BUILD_TOOL_LABELS,
   directionToIndex,
+  planAqueduct,
   planBuild,
+  planCanal,
+  planCrossing,
   planDepot,
+  planLock,
   planSignal,
   planStation,
+  planTerraform,
+  planTree,
 } from '../game/buildRules';
 import { stationFootprint } from '../game/buildRules';
 import {
@@ -61,9 +68,12 @@ import {
   type BuildDirection,
   type BuildTransport,
   type DepotSettings,
+  type LockSettings,
   type SignalSettings,
   type SignalTrack,
   type StationSettings,
+  type TerraformSettings,
+  type TreeSettings,
 } from '../game/buildRules';
 import {
   MAX_VEHICLE_ORDERS,
@@ -1811,6 +1821,29 @@ function signalSettingsFromCommand(command: Extract<EngineCommand, { type: 'buil
   };
 }
 
+function terraformSettingsFromCommand(
+  command: Extract<EngineCommand, { type: 'build' }>,
+): TerraformSettings {
+  const direction =
+    optionText(command.options, 'direction') === 'down' ||
+    optionText(command.options, 'mode') === 'down' ||
+    optionBool(command.options, 'down', false)
+      ? 'down'
+      : 'up';
+  return {
+    direction,
+    size: optionInt(command.options, 'size', 1),
+  };
+}
+
+function treeSettingsFromCommand(command: Extract<EngineCommand, { type: 'build' }>): TreeSettings {
+  return { size: optionInt(command.options, 'size', 1) };
+}
+
+function lockSettingsFromCommand(command: Extract<EngineCommand, { type: 'build' }>): LockSettings {
+  return { direction: parseBuildDirection(command.options?.direction) };
+}
+
 function nearestTownName(world: MockWorld, x: number, y: number): string {
   let best: MockTown | null = null;
   let bestDistance = Infinity;
@@ -1970,6 +2003,209 @@ function applySignal(
   );
 }
 
+function applyTerraform(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+  settings: TerraformSettings,
+): void {
+  const plan = planTerraform({
+    map: mapSnapshotView(world),
+    from: command.from,
+    ...(command.to ? { to: command.to } : {}),
+    settings,
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid) {
+    addNews(world, 'error', `Terrassement impossible : ${plan.reason ?? 'terrain refusé.'}`);
+    return;
+  }
+  const delta = settings.direction === 'down' ? -1 : 1;
+  for (const tile of plan.tiles) {
+    const height = Math.max(0, Math.min(15, (world.heightMap[tile.index] ?? 0) + delta));
+    world.heightMap[tile.index] = height;
+    if (world.kind[tile.index] === K.trees) world.kind[tile.index] = K.grass;
+    world.trackBits[tile.index] = 0;
+  }
+  computeSlopes(world);
+  updateVehiclesTransforms(world);
+  completeBuild(
+    world,
+    company,
+    plan.cost,
+    `Terrassement : ${plan.tiles.length} tuile(s) ${delta > 0 ? 'surélevée(s)' : 'abaissée(s)'}.`,
+  );
+}
+
+function applyTrees(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+  settings: TreeSettings,
+): void {
+  const plan = planTree({
+    map: mapSnapshotView(world),
+    from: command.from,
+    ...(command.to ? { to: command.to } : {}),
+    settings,
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid) {
+    addNews(world, 'error', `Plantation impossible : ${plan.reason ?? 'terrain refusé.'}`);
+    return;
+  }
+  for (const tile of plan.tiles) {
+    world.kind[tile.index] = K.trees;
+    world.owner[tile.index] = command.company;
+    world.trackBits[tile.index] = 0;
+    world.flags[tile.index] = 0;
+  }
+  completeBuild(world, company, plan.cost, `${plan.tiles.length} tuile(s) plantée(s) en arbres.`);
+}
+
+function applyCanal(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+): void {
+  const axis = command.options?.axis === 'y' ? 'y' : 'x';
+  const plan = planCanal({
+    map: mapSnapshotView(world),
+    from: command.from,
+    ...(command.to ? { to: command.to } : {}),
+    axis,
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid) {
+    addNews(world, 'error', `Canal impossible : ${plan.reason ?? 'tracé refusé.'}`);
+    return;
+  }
+  const level = Math.max(0, Math.min(15, plan.waterLevel ?? 0));
+  for (const tile of plan.tiles) {
+    world.kind[tile.index] = K.canal;
+    world.heightMap[tile.index] = level;
+    world.owner[tile.index] = command.company;
+    world.flags[tile.index] = TILE_FLAG.WATER;
+    world.trackBits[tile.index] = tile.connections;
+  }
+  computeSlopes(world);
+  updateVehiclesTransforms(world);
+  completeBuild(
+    world,
+    company,
+    plan.cost,
+    `Canal : ${plan.tiles.length} tuile(s) pour ${Math.round(plan.cost)} £.`,
+  );
+}
+
+function applyLock(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+  settings: LockSettings,
+): void {
+  const plan = planLock({
+    map: mapSnapshotView(world),
+    from: command.from,
+    settings,
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid) {
+    addNews(world, 'error', `Écluse impossible : ${plan.reason ?? 'tuile refusée.'}`);
+    return;
+  }
+  const tile = plan.tiles[0];
+  if (!tile) return;
+  world.kind[tile.index] = K.lock;
+  world.heightMap[tile.index] = Math.max(0, Math.min(15, plan.lock?.upper ?? tile.height));
+  world.owner[tile.index] = command.company;
+  world.flags[tile.index] = TILE_FLAG.WATER;
+  world.trackBits[tile.index] = tile.connections;
+  computeSlopes(world);
+  updateVehiclesTransforms(world);
+  completeBuild(world, company, plan.cost, `Écluse construite pour ${Math.round(plan.cost)} £.`);
+}
+
+function applyAqueduct(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+): void {
+  if (!command.to) {
+    addNews(world, 'error', 'Aqueduc impossible : indiquez la tuile d’arrivée.');
+    return;
+  }
+  const plan = planAqueduct({
+    map: mapSnapshotView(world),
+    from: command.from,
+    to: command.to,
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid) {
+    addNews(world, 'error', `Aqueduc impossible : ${plan.reason ?? 'tracé refusé.'}`);
+    return;
+  }
+  const level = Math.max(0, Math.min(15, plan.aqueduct?.level ?? plan.waterLevel ?? 0));
+  const last = plan.tiles.length - 1;
+  for (let i = 0; i < plan.tiles.length; i += 1) {
+    const tile = plan.tiles[i];
+    if (!tile) continue;
+    if (i === 0 || i === last) {
+      world.kind[tile.index] = K.canal;
+      world.heightMap[tile.index] = level;
+      world.flags[tile.index] = TILE_FLAG.WATER;
+    } else {
+      world.kind[tile.index] = K.aqueduct;
+      world.flags[tile.index] = TILE_FLAG.WATER | TILE_FLAG.BRIDGE;
+      world.trackBits[tile.index] = level;
+    }
+    world.owner[tile.index] = command.company;
+  }
+  computeSlopes(world);
+  updateVehiclesTransforms(world);
+  completeBuild(
+    world,
+    company,
+    plan.cost,
+    `Aqueduc : ${plan.tiles.length} tuiles pour ${Math.round(plan.cost)} £.`,
+  );
+}
+
+function applyCrossing(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+): void {
+  const plan = planCrossing({
+    map: mapSnapshotView(world),
+    from: command.from,
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid) {
+    addNews(world, 'error', `Passage à niveau impossible : ${plan.reason ?? 'voie refusée.'}`);
+    return;
+  }
+  const tile = plan.tiles[0];
+  if (!tile) return;
+  const rail = plan.crossing?.network === 'rail';
+  world.kind[tile.index] = K.crossing;
+  world.trackBits[tile.index] = (tile.connections & 0x0f) | (rail ? TRACK_BIT_CROSSING_RAIL : 0);
+  world.owner[tile.index] = command.company;
+  world.flags[tile.index] = 0;
+  completeBuild(
+    world,
+    company,
+    plan.cost,
+    `Passage à niveau construit pour ${Math.round(plan.cost)} £.`,
+  );
+}
+
 /**
  * Applique une commande de construction. Le mock rejoue les règles partagées
  * (`buildRules.ts`) avant de toucher la carte : une commande invalide ne change
@@ -1997,6 +2233,30 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
   }
   if (command.tool === 'signal') {
     applySignal(world, command, company);
+    return;
+  }
+  if (command.tool === 'terraform') {
+    applyTerraform(world, command, company, terraformSettingsFromCommand(command));
+    return;
+  }
+  if (command.tool === 'tree') {
+    applyTrees(world, command, company, treeSettingsFromCommand(command));
+    return;
+  }
+  if (command.tool === 'canal') {
+    applyCanal(world, command, company);
+    return;
+  }
+  if (command.tool === 'lock') {
+    applyLock(world, command, company, lockSettingsFromCommand(command));
+    return;
+  }
+  if (command.tool === 'aqueduct') {
+    applyAqueduct(world, command, company);
+    return;
+  }
+  if (command.tool === 'crossing') {
+    applyCrossing(world, command, company);
     return;
   }
   if (command.tool !== 'road' && command.tool !== 'rail' && command.tool !== 'clear') {
@@ -2027,12 +2287,26 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
 
   for (const tile of plan.tiles) {
     if (tool === 'clear') {
-      // Un pont démoli laisse apparaître l'eau qu'il franchissait.
       const wasBridge = ((world.flags[tile.index] ?? 0) & TILE_FLAG.BRIDGE) !== 0;
-      world.kind[tile.index] = wasBridge ? K.water : K.grass;
-      world.flags[tile.index] = wasBridge ? TILE_FLAG.WATER : 0;
-      world.owner[tile.index] = COMPANY_NONE;
-      world.trackBits[tile.index] = 0;
+      const current = world.kind[tile.index] ?? K.grass;
+      const bits = world.trackBits[tile.index] ?? 0;
+      if (current === K.crossing) {
+        // Un passage à niveau rend la voie d'origine (route ou rail).
+        world.kind[tile.index] = (bits & TRACK_BIT_CROSSING_RAIL) !== 0 ? K.rail : K.road;
+        world.trackBits[tile.index] = bits & 0x0f;
+      } else if (current === K.aqueduct) {
+        // Le tablier disparaît : le val reste sec sous l'ouvrage.
+        world.kind[tile.index] = K.grass;
+        world.trackBits[tile.index] = 0;
+        world.owner[tile.index] = COMPANY_NONE;
+        world.flags[tile.index] = 0;
+      } else {
+        // Un pont démoli laisse apparaître l'eau qu'il franchissait.
+        world.kind[tile.index] = wasBridge ? K.water : K.grass;
+        world.trackBits[tile.index] = 0;
+        world.owner[tile.index] = COMPANY_NONE;
+        world.flags[tile.index] = wasBridge ? TILE_FLAG.WATER : 0;
+      }
       const x = tile.index % world.width;
       const y = Math.floor(tile.index / world.width);
       world.depots = world.depots.filter(

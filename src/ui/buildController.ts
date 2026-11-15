@@ -14,10 +14,16 @@ import {
   cloneBuildSettings,
   createBuildSettings,
   nextDirection,
+  planAqueduct,
   planBuild,
+  planCanal,
+  planCrossing,
   planDepot,
+  planLock,
   planSignal,
   planStation,
+  planTerraform,
+  planTree,
   type BuildPlan,
   type BuildPoint,
   type BuildSettings,
@@ -99,6 +105,8 @@ export class BuildController {
       this.settings.station.direction = nextDirection(this.settings.station.direction);
     } else if (this.tool === 'depot') {
       this.settings.depot.direction = nextDirection(this.settings.depot.direction ?? 'se');
+    } else if (this.tool === 'lock') {
+      this.settings.lock.direction = nextDirection(this.settings.lock.direction ?? 'ne');
     } else {
       return false;
     }
@@ -223,6 +231,22 @@ export class BuildController {
         ...(to ? { to } : {}),
         axis,
       });
+    } else if (tool === 'terraform') {
+      plan = planTerraform({
+        ...shared,
+        settings: this.settings.terraform,
+        ...(to ? { to } : {}),
+      });
+    } else if (tool === 'tree') {
+      plan = planTree({ ...shared, settings: this.settings.tree, ...(to ? { to } : {}) });
+    } else if (tool === 'canal') {
+      plan = planCanal({ ...shared, ...(to ? { to } : {}), axis });
+    } else if (tool === 'lock') {
+      plan = planLock({ ...shared, settings: this.settings.lock });
+    } else if (tool === 'aqueduct') {
+      plan = planAqueduct({ ...shared, to: to ?? from });
+    } else if (tool === 'crossing') {
+      plan = planCrossing({ ...shared });
     } else {
       plan = planBuild({
         ...shared,

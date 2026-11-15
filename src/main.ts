@@ -1164,8 +1164,21 @@ function exposeDebug(current: GameSession): void {
     get buildSettings() {
       return current.getBuildSettings();
     },
-    setBuildTool: (tool: 'road' | 'rail' | 'clear' | 'station' | 'depot' | 'signal') =>
-      current.setBuildTool(tool),
+    setBuildTool: (
+      tool:
+        | 'road'
+        | 'rail'
+        | 'clear'
+        | 'station'
+        | 'depot'
+        | 'signal'
+        | 'terraform'
+        | 'tree'
+        | 'canal'
+        | 'lock'
+        | 'aqueduct'
+        | 'crossing',
+    ) => current.setBuildTool(tool),
     session: current,
     screens,
     endGame: (reason: string) => current.endGame(reason),

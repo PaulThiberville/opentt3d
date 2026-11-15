@@ -17,6 +17,7 @@ import { CameraController } from './CameraController';
 import { CityLayer } from './CityLayer';
 import { DepotLayer } from './DepotLayer';
 import { IndustryLayer } from './IndustryLayer';
+import { InfrastructureLayer } from './InfrastructureLayer';
 import { Picking, type PickResult } from './Picking';
 import { SignalLayer } from './SignalLayer';
 import { TerrainLayer } from './TerrainLayer';
@@ -73,6 +74,7 @@ export class WorldView {
   readonly vehicles = new VehicleLayer();
   readonly signals = new SignalLayer();
   readonly depots = new DepotLayer();
+  readonly infrastructure = new InfrastructureLayer();
   readonly atmosphere = new AtmosphereLayer();
 
   private scene: THREE.Scene;
@@ -135,6 +137,7 @@ export class WorldView {
     this.scene.add(this.vehicles.group);
     this.scene.add(this.signals.group);
     this.scene.add(this.depots.group);
+    this.scene.add(this.infrastructure.group);
     this.scene.add(this.atmosphere.group);
     this.scene.add(this.buildOverlay.group);
 
@@ -170,9 +173,11 @@ export class WorldView {
       if (first) {
         this.terrain.setMap(map);
         this.tracks.setMap(map, snapshot.stations);
+        this.infrastructure.setMap(map);
       } else {
         this.terrain.applyDelta(map);
         this.tracks.applyDelta(map, snapshot.stations);
+        this.infrastructure.applyDelta(map);
       }
       this.currentMap = map;
       this.cityLayer.build(snapshot.towns, map);
@@ -209,6 +214,7 @@ export class WorldView {
     this.cityLayer.setNight(amount);
     this.industries.setNight(amount);
     this.depots.setNight(amount);
+    this.infrastructure.setNight(amount);
     this.atmosphere.setNight(amount);
   }
 
@@ -498,6 +504,14 @@ export class WorldView {
     return this.depots.count;
   }
 
+  getInfrastructureCounts(): { locks: number; aqueducts: number; crossings: number } {
+    return {
+      locks: this.infrastructure.lockCount,
+      aqueducts: this.infrastructure.aqueductCount,
+      crossings: this.infrastructure.crossingCount,
+    };
+  }
+
   getTrackChunkCount(): number {
     return this.tracks.chunkCount;
   }
@@ -535,6 +549,7 @@ export class WorldView {
     this.scene.remove(this.vehicles.group);
     this.scene.remove(this.signals.group);
     this.scene.remove(this.depots.group);
+    this.scene.remove(this.infrastructure.group);
     this.scene.remove(this.atmosphere.group);
     this.scene.remove(this.buildOverlay.group);
     this.terrain.dispose();
@@ -545,6 +560,7 @@ export class WorldView {
     this.vehicles.dispose();
     this.signals.dispose();
     this.depots.dispose();
+    this.infrastructure.dispose();
     this.atmosphere.dispose();
     this.buildOverlay.dispose();
     this.renderVehicles = [];

@@ -21,6 +21,12 @@ const TOOL_LABEL_KEYS: Record<BuildTool, TranslationKey> = {
   station: 'toolbar.station.label',
   depot: 'toolbar.depot.label',
   signal: 'toolbar.signal.label',
+  terraform: 'toolbar.terraform.label',
+  tree: 'toolbar.tree.label',
+  canal: 'toolbar.canal.label',
+  lock: 'toolbar.lock.label',
+  aqueduct: 'toolbar.aqueduct.label',
+  crossing: 'toolbar.crossing.label',
 };
 
 const TOOL_HINT_KEYS: Record<BuildTool, TranslationKey> = {
@@ -30,6 +36,12 @@ const TOOL_HINT_KEYS: Record<BuildTool, TranslationKey> = {
   station: 'build.hint.station',
   depot: 'build.hint.depot',
   signal: 'build.hint.signal',
+  terraform: 'build.hint.terraform',
+  tree: 'build.hint.tree',
+  canal: 'build.hint.canal',
+  lock: 'build.hint.lock',
+  aqueduct: 'build.hint.aqueduct',
+  crossing: 'build.hint.crossing',
 };
 
 function countLabel(plan: BuildPlan): string {
