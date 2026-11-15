@@ -220,8 +220,8 @@ if [[ ${BASELINE} -eq 0 ]]; then
   rm -f "${WASM_DIR}/opentt3d-engine.js" "${WASM_DIR}/opentt3d-engine.wasm" "${WASM_DIR}/opentt3d-engine.data"
 fi
 
-log "emmake make -j${JOBS}"
-run_tool "${WASM_DIR}" emmake make -j"${JOBS}"
+log "emmake make -j${JOBS} openttd"
+run_tool "${WASM_DIR}" emmake make -j"${JOBS}" openttd
 
 if [[ ${BASELINE} -eq 1 ]]; then
   ls -lh "${WASM_DIR}"/openttd.html "${WASM_DIR}"/openttd.js "${WASM_DIR}"/openttd.wasm 2>/dev/null || true
