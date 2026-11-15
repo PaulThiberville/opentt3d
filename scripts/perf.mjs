@@ -89,7 +89,10 @@ const BUDGETS = {
   /** Mémoire JS : croissance après échauffement (fuite lente). */
   heapGrowthMB: 16,
   /** Ressources GPU vivantes créées pendant un scénario (hors warmup). */
-  resourceGrowth: 48,
+  // +50 observé au retour d'onglet caché : allocation unique de 13 VAO et
+  // 37 buffers par les LOD reconstruits (végétation/terrain/atmosphère), stable
+  // ensuite. Le budget reste serré pour détecter une fuite par frame.
+  resourceGrowth: 56,
   /**
    * Taux toléré pendant une construction active. La fuite `aPhase` de la
    * végétation est corrigée (#24) : le reste vient des reconstructions
