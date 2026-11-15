@@ -1,0 +1,23 @@
+From: OpenTT3D <dev@opentt3d.local>
+Subject: [PATCH 2/2] emscripten: rendre la main apres l'initialisation
+
+Sous __EMSCRIPTEN__, openttd_main ne doit pas appeler PostMainLoop() :
+le pont conserve l'etat et pompe la boucle tick par tick.
+
+--- a/src/openttd.cpp
++++ b/src/openttd.cpp
+@@ -810,8 +810,14 @@
+ 
+ 	VideoDriver::GetInstance()->MainLoop();
+ 
++#ifdef __EMSCRIPTEN__
++	/* OpenTT3D : le pont WebAssembly pilote la boucle tick par tick et garde
++	 * l'état du jeu vivant entre deux appels JavaScript. */
++	return 0;
++#else
+ 	PostMainLoop();
+ 	return 0;
++#endif
+ }
+ 
+ void HandleExitGameRequest()

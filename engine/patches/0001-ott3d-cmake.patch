@@ -1,0 +1,78 @@
+From: OpenTT3D <dev@opentt3d.local>
+Subject: [PATCH 1/2] build: option OPTION_OTT3D_BRIDGE (module ES6 headless)
+
+Ajoute une option CMake desactivee par defaut. Quand elle est active :
+- compile engine/bridge/ottd_bridge.cpp et web_v.cpp dans openttd_lib ;
+- produit un module ES6 (createOpenTT3DEngine) au lieu du shell HTML ;
+- n'embarque que les basesets/langue, pas la documentation ni les scripts IA.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -376,6 +376,7 @@
+     # only ship the English language.
+     target_link_libraries(WASM::WASM INTERFACE "--preload-file ${CMAKE_BINARY_DIR}/baseset@/baseset")
+     target_link_libraries(WASM::WASM INTERFACE "--preload-file ${CMAKE_BINARY_DIR}/lang/english.lng@/lang/english.lng")
++    if(NOT OPTION_OTT3D_BRIDGE)
+     target_link_libraries(WASM::WASM INTERFACE "--preload-file ${CMAKE_SOURCE_DIR}/bin/ai@/ai")
+     target_link_libraries(WASM::WASM INTERFACE "--preload-file ${CMAKE_SOURCE_DIR}/bin/game@/game")
+     # Documentation files for the in-game text file viewer
+@@ -396,16 +397,41 @@
+     target_link_libraries(WASM::WASM INTERFACE "--preload-file ${CMAKE_SOURCE_DIR}/docs/multiplayer.md@/docs/multiplayer.md")
+     target_link_libraries(WASM::WASM INTERFACE "--preload-file ${CMAKE_SOURCE_DIR}/docs/savegame_format.md@/docs/savegame_format.md")
+     target_link_libraries(WASM::WASM INTERFACE "--preload-file ${CMAKE_SOURCE_DIR}/docs/symbol_server.md@/docs/symbol_server.md")
++    endif()
+ 
+-    # We use IDBFS for persistent storage.
+-    target_link_libraries(WASM::WASM INTERFACE "-lidbfs.js")
++    if(OPTION_OTT3D_BRIDGE)
++        # OpenTT3D : module ES6 headless piloté depuis Node ou le navigateur.
++        # Les sources du pont vivent dans engine/bridge ; aucun fichier n'est
++        # ajouté au dépôt upstream.
++        target_include_directories(openttd_lib PRIVATE ${CMAKE_SOURCE_DIR}/src)
++        target_sources(openttd_lib PRIVATE
++            ${CMAKE_SOURCE_DIR}/../../bridge/ottd_bridge.cpp
++            ${CMAKE_SOURCE_DIR}/../../bridge/web_v.cpp
++        )
+ 
+-    # Use custom pre-js and shell.html.
+-    target_link_libraries(WASM::WASM INTERFACE "--pre-js ${CMAKE_SOURCE_DIR}/os/emscripten/pre.js")
+-    target_link_libraries(WASM::WASM INTERFACE "--shell-file ${CMAKE_SOURCE_DIR}/os/emscripten/shell.html")
++        target_link_libraries(WASM::WASM INTERFACE "-sMODULARIZE=1")
++        target_link_libraries(WASM::WASM INTERFACE "-sEXPORT_ES6=1")
++        target_link_libraries(WASM::WASM INTERFACE "-sEXPORT_NAME=createOpenTT3DEngine")
++        target_link_libraries(WASM::WASM INTERFACE "-sENVIRONMENT=node,web")
++        target_link_libraries(WASM::WASM INTERFACE "-sINVOKE_RUN=0")
++        target_link_libraries(WASM::WASM INTERFACE "-sFORCE_FILESYSTEM=1")
++        target_link_libraries(WASM::WASM INTERFACE "-sSTACK_SIZE=8388608")
++        target_link_libraries(WASM::WASM INTERFACE "-sEXPORTED_FUNCTIONS='[\"_main\",\"_em_openttd_add_server\",\"_ottd_boot\",\"_ottd_new_game\",\"_ottd_step\",\"_ottd_tick\",\"_ottd_hash\",\"_ottd_last_error\",\"_ottd_snapshot_json\",\"_ottd_shutdown\",\"_malloc\",\"_free\"]'")
++        target_link_libraries(WASM::WASM INTERFACE "-sEXPORTED_RUNTIME_METHODS='[\"cwrap\",\"UTF8ToString\",\"stringToUTF8\",\"lengthBytesUTF8\",\"FS\"]'")
+ 
+-    # Build the .html (which builds the .js, .wasm, and .data too).
+-    set_target_properties(openttd PROPERTIES SUFFIX ".html")
++        # Sortie JS + WASM + DATA dans le même dossier (public/engine).
++        set_target_properties(openttd PROPERTIES SUFFIX ".js" OUTPUT_NAME "opentt3d-engine")
++    else()
++        # We use IDBFS for persistent storage.
++        target_link_libraries(WASM::WASM INTERFACE "-lidbfs.js")
++
++        # Use custom pre-js and shell.html.
++        target_link_libraries(WASM::WASM INTERFACE "--pre-js ${CMAKE_SOURCE_DIR}/os/emscripten/pre.js")
++        target_link_libraries(WASM::WASM INTERFACE "--shell-file ${CMAKE_SOURCE_DIR}/os/emscripten/shell.html")
++
++        # Build the .html (which builds the .js, .wasm, and .data too).
++        set_target_properties(openttd PROPERTIES SUFFIX ".html")
++    endif()
+     target_link_libraries(openttd WASM::WASM)
+ endif()
+ 
+
+--- a/cmake/Options.cmake
++++ b/cmake/Options.cmake
+@@ -55,6 +55,7 @@
+     option(OPTION_FORCE_COLORED_OUTPUT "Always produce ANSI-colored output (GNU/Clang only)." OFF)
+ 
+     option(OPTION_DEDICATED "Build dedicated server only (no GUI)" OFF)
++    option(OPTION_OTT3D_BRIDGE "OpenTT3D: headless WebAssembly bridge" OFF)
+     option(OPTION_INSTALL_FHS "Install with Filesystem Hierarchy Standard folders" ${DEFAULT_OPTION_INSTALL_FHS})
+     option(OPTION_USE_ASSERTS "Use assertions; leave enabled for nightlies, betas, and RCs" OFF)
+     option(OPTION_USE_NSIS "Use NSIS to create windows installer; enable only for stable releases" OFF)
