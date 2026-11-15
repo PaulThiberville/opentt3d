@@ -11,6 +11,8 @@
  * développement quand les artefacts sont absents.
  */
 
+import type { AudioEngine } from '../audio/AudioEngine';
+import { SessionAudio } from '../audio/sessionAudio';
 import type { EngineCommand, EngineDriver, WorldSnapshot } from '../engine/protocol';
 import { TILE_FLAG } from '../engine/protocol';
 import { MockEngine } from '../engine/MockEngine';
@@ -159,6 +161,11 @@ export interface GameSessionOptions {
   loadedGame?: LoadedGameInput;
   /** Autosave : intervalles réels/ticks, ou `false` pour désactiver. */
   autosave?: AutosaveConfig | false;
+  /**
+   * Moteur audio partagé avec l'application (déverrouillé au premier geste).
+   * Sans lui, la session crée et libère son propre moteur.
+   */
+  audio?: AudioEngine;
 }
 
 const HUD_REFRESH_SECONDS = 0.2;
@@ -193,6 +200,8 @@ export class GameSession {
   private settings: GameSettings;
   private callbacks: GameSessionCallbacks;
   private engineModuleUrl: string;
+  private sharedAudio: AudioEngine | null;
+  private audio: SessionAudio | null = null;
 
   private engine: EngineDriver | null = null;
   private game: Game | null = null;
@@ -253,6 +262,7 @@ export class GameSession {
     }
     this.settings = options.settings;
     this.callbacks = options.callbacks;
+    this.sharedAudio = options.audio ?? null;
     this.quality = this.config.quality;
     this.engineMode = this.network
       ? this.network.settings.engine
@@ -405,6 +415,11 @@ export class GameSession {
     this.buildController = this.createBuildController();
     this.world = this.createWorld(this.renderer);
     this.hud = this.createHud();
+    this.audio = new SessionAudio({
+      ...(this.sharedAudio ? { engine: this.sharedAudio } : {}),
+      quality: this.quality,
+      settings: this.settings,
+    });
     this.attachEvents(game);
     this.attachListeners();
     this.createEngineBadge();
@@ -791,12 +806,15 @@ export class GameSession {
       onRemoveOrder: (vehicleId, index) => this.removeOrder(vehicleId, index),
       onMoveOrder: (vehicleId, index, delta) => this.moveOrder(vehicleId, index, delta),
       onCloseVehicle: () => this.clearSelection(),
+      onToggleAudio: () => this.toggleAudioMute(),
     });
   }
 
   private attachEvents(game: Game): void {
+    this.audio?.attach(game);
     game.events.on('snapshot', ({ snapshot }) => {
       this.world?.applySnapshot(snapshot);
+      this.audio?.ingestSnapshot(snapshot, this.world?.getMap() ?? null);
       this.monitorGameOver(snapshot);
     });
     game.events.on('notify', ({ kind, text, tick }) => {
@@ -879,6 +897,7 @@ export class GameSession {
 
   private handleContextLost = (event: Event): void => {
     event.preventDefault();
+    this.audio?.play('ui.error');
     this.hud?.showError(
       'Contexte WebGL perdu',
       'Le pilote graphique a interrompu le rendu. Rechargez la page pour reprendre la partie.',
@@ -910,6 +929,11 @@ export class GameSession {
       game.advance(delta);
       world.update(delta, game.getInterpolation());
     }
+
+    const pose = world.getCameraController().getPose();
+    this.audio?.setListener({ x: pose.target.x, z: pose.target.z, yaw: pose.yaw });
+    this.audio?.setPaused(game.isPaused());
+    this.audio?.frame(delta);
 
     this.checkAutosave(game.getTick());
 
@@ -1019,6 +1043,8 @@ export class GameSession {
     const world = this.world;
     const hud = this.hud;
     if (!game || !world || !hud) return;
+    this.audio?.setPaused(game.isPaused());
+    hud.setAudioMuted(this.audio?.isMuted ?? this.sharedAudio?.isMuted ?? false);
     const snapshot = game.getLatestSnapshot();
     const map = world.getMap();
     const selection = game.getSelection();
@@ -1552,16 +1578,34 @@ export class GameSession {
     this.quality = level;
     this.renderer?.setQuality(level);
     this.world?.setQuality(level);
+    this.audio?.setQuality(level);
     this.refreshHud();
   }
 
   applySettings(settings: GameSettings): void {
     this.settings = settings;
     this.setQuality(settings.quality);
+    this.audio?.setSettings(settings);
   }
 
   getSettings(): GameSettings {
     return { ...this.settings };
+  }
+
+  /** Moteur audio effectif (partagé, ou propre à la session). */
+  get audioEngine(): AudioEngine | null {
+    return this.audio?.audioEngine ?? this.sharedAudio;
+  }
+
+  get audioMuted(): boolean {
+    return this.audio?.isMuted ?? this.sharedAudio?.isMuted ?? false;
+  }
+
+  /** Bouton mute du HUD : l'état est reflété immédiatement. */
+  toggleAudioMute(): boolean {
+    const muted = this.audio?.toggleMuted() ?? this.sharedAudio?.toggleMuted() ?? false;
+    this.hud?.setAudioMuted(muted);
+    return muted;
   }
 
   cycleQuality(): void {
@@ -1615,6 +1659,7 @@ export class GameSession {
   endGame(reason: string, title = 'Fin de partie'): void {
     if (this.gameOverShown || this.disposed) return;
     this.gameOverShown = true;
+    this.audio?.play('alert');
     this.callbacks.onGameOver(this.getGameOverSummary(title, reason));
   }
 
@@ -1632,6 +1677,8 @@ export class GameSession {
     window.removeEventListener('keydown', this.handleKeyDown);
     this.canvas.removeEventListener('webglcontextlost', this.handleContextLost);
     this.renderer?.stop();
+    this.audio?.dispose();
+    this.audio = null;
     this.hud?.dispose();
     this.world?.dispose();
     this.renderer?.dispose();

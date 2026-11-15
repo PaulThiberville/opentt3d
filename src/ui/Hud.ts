@@ -50,6 +50,8 @@ export interface HudCallbacks {
   onRemoveOrder: (vehicleId: number, index: number) => void;
   onMoveOrder: (vehicleId: number, index: number, delta: -1 | 1) => void;
   onCloseVehicle: () => void;
+  /** Coupe ou rétablit le son (bouton minimal de la barre supérieure). */
+  onToggleAudio?: () => void;
 }
 
 export interface HudNewsInput {
@@ -67,6 +69,7 @@ export class Hud {
 
   private callbacks: HudCallbacks;
   private topBar: TopBar;
+  private audioButton: HTMLButtonElement;
   private selectionPanel: SelectionPanel;
   private depotPanel: DepotPanel;
   private vehiclePanel: VehiclePanel;
@@ -95,6 +98,23 @@ export class Hud {
       onToggleHelp: () => this.toggleHelp(),
       onOpenSettings: () => this.callbacks.onOpenSettings(),
     });
+
+    // Bouton mute minimal : ajouté à la barre d'outils existante sans modifier
+    // `TopBar`, pour limiter les conflits avec les autres vagues UI.
+    this.audioButton = el('button', {
+      className: 'hud-button hud-audio-button',
+      text: '🔊',
+      attrs: {
+        type: 'button',
+        title: 'Couper le son',
+        'aria-label': 'Couper le son',
+        'aria-pressed': 'false',
+      },
+    });
+    this.audioButton.addEventListener('click', () => this.callbacks.onToggleAudio?.());
+    this.audioButton.hidden = this.callbacks.onToggleAudio === undefined;
+    const tools = this.topBar.element.querySelector('.hud-tools');
+    (tools ?? this.topBar.element).append(this.audioButton);
 
     this.selectionPanel = new SelectionPanel({
       onClear: () => this.callbacks.onClearSelection(),
@@ -243,6 +263,15 @@ export class Hud {
   /** Reflète l'outil de construction armé dans la barre du bas. */
   setBuildTool(tool: BuildToolId | null): void {
     this.toolbar.setActive(tool);
+  }
+
+  /** Met à jour le bouton mute (état réel du moteur audio). */
+  setAudioMuted(muted: boolean): void {
+    this.audioButton.textContent = muted ? '🔇' : '🔊';
+    this.audioButton.title = muted ? 'Rétablir le son' : 'Couper le son';
+    this.audioButton.setAttribute('aria-label', this.audioButton.title);
+    this.audioButton.setAttribute('aria-pressed', muted ? 'true' : 'false');
+    this.audioButton.classList.toggle('is-active', muted);
   }
 
   /** Affiche le coût estimé et le motif d'invalidité au-dessus de la barre. */
