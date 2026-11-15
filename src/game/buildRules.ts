@@ -18,9 +18,17 @@ import {
   TILE_KIND_INDEX,
   type EngineCommand,
   type MapSnapshot,
+  type RailType,
+  type SignalDirection,
+  type SignalKind,
+  type SignalTrack,
   type TileKind,
 } from '../engine/protocol';
 import { MAX_HEIGHT_LEVEL, TILE_KINDS, tileIndex } from './mapGrid';
+import { RAIL_TYPE_SURCHARGE, RAIL_TYPE_CONVERT_COST, parseRailType } from './railRules';
+import { SIGNAL_CONVERT_COST, SIGNAL_KIND_COST, SIGNAL_REMOVE_COST } from './signalRules';
+
+export type { SignalTrack };
 
 export type BuildTool =
   | 'road'
@@ -29,6 +37,8 @@ export type BuildTool =
   | 'station'
   | 'depot'
   | 'signal'
+  | 'unsignal'
+  | 'convert'
   | 'terraform'
   | 'tree'
   | 'canal'
@@ -55,8 +65,10 @@ export type BuildTransport = 'rail' | 'road';
  */
 export type BuildDirection = 'ne' | 'se' | 'sw' | 'nw';
 
-/** Voie choisie quand une tuile porte plusieurs voies (signal). */
-export type SignalTrack = 'x' | 'y' | 'upper' | 'lower' | 'left' | 'right';
+/** Réglages d'une voie ferrée neuve ou convertie (#157). */
+export interface RailSettings {
+  type: RailType;
+}
 
 export interface StationSettings {
   kind: BuildTransport;
@@ -76,8 +88,12 @@ export interface DepotSettings {
 }
 
 export interface SignalSettings {
-  type: 'block';
+  type: SignalKind;
   track: SignalTrack | null;
+  /** Sens du signal : unique (défaut) ou bidirectionnel. */
+  direction: SignalDirection;
+  /** Un signal tous les N tuiles lors d'un glissement (1..8). */
+  spacing: number;
 }
 
 /** Terrassement : sens et taille du carré posé au survol (#158). */
@@ -104,6 +120,7 @@ export interface BuildSettings {
   terraform: TerraformSettings;
   tree: TreeSettings;
   lock: LockSettings;
+  rail: RailSettings;
 }
 
 export const STATION_MAX_PLATFORMS = 8;
@@ -121,7 +138,18 @@ export const DEPOT_COST: Record<BuildTransport, number> = {
 };
 
 /** Signal de bloc simple (pose sur une voie existante). */
-export const SIGNAL_COST = 320;
+export const SIGNAL_COST = SIGNAL_KIND_COST.block;
+
+/** Coût de base d'une tuile de rail classique, hors surcoût de type. */
+export const RAIL_COST_PER_TILE = 400;
+
+export function railBuildCost(type: RailType): number {
+  return RAIL_COST_PER_TILE + RAIL_TYPE_SURCHARGE[type];
+}
+
+export function railConvertCost(type: RailType): number {
+  return RAIL_TYPE_CONVERT_COST[type];
+}
 
 /** Terrassement (#158) : coût de base par tuile et par niveau. */
 export const TERRAFORM_COST_PER_TILE = 120;
@@ -202,10 +230,11 @@ export function createBuildSettings(): BuildSettings {
       driveThrough: false,
     },
     depot: { kind: 'rail', direction: null },
-    signal: { type: 'block', track: null },
+    signal: { type: 'block', track: null, direction: 'one-way', spacing: 1 },
     terraform: { direction: 'up', size: 1 },
     tree: { size: 1 },
     lock: { direction: null },
+    rail: { type: 'rail' },
   };
 }
 
@@ -218,6 +247,7 @@ export function cloneBuildSettings(settings: BuildSettings): BuildSettings {
     terraform: { ...settings.terraform },
     tree: { ...settings.tree },
     lock: { ...settings.lock },
+    rail: { ...settings.rail },
   };
 }
 
@@ -261,6 +291,8 @@ export const BUILD_TOOL_LABELS: Record<BuildTool, string> = {
   lock: 'Écluse',
   aqueduct: 'Aqueduc',
   crossing: 'Passage à niveau',
+  unsignal: 'Retirer signal',
+  convert: 'Type de rail',
 };
 
 export interface BuildPlanTile {
@@ -306,6 +338,8 @@ export interface BuildPlan {
   crossing?: { network: BuildTransport; axis: BuildAxis };
   /** Niveau d'eau visé par un canal ou un aqueduc (demi-niveaux). */
   waterLevel?: number;
+  /** Type de rail posé ou visé par une conversion (#157). */
+  railType?: RailType;
 }
 
 export interface BuildPlanOptions {
@@ -319,6 +353,8 @@ export interface BuildPlanOptions {
   /** Trésorerie disponible : permet d'annoncer un manque de fonds. */
   budget?: number;
   maxTiles?: number;
+  /** Type de rail pour l'outil `rail` (#157), `rail` par défaut. */
+  railType?: RailType;
 }
 
 /** Coordonnée de tuile entière, bornée à la carte par l'appelant. */
@@ -440,8 +476,9 @@ function occupancyReason(kind: TileKind, tool: BuildTool): string | null {
   }
 }
 
-function tileCost(tool: PathBuildTool, heightDelta: number): number {
+function tileCost(tool: PathBuildTool, heightDelta: number, railType: RailType = 'rail'): number {
   const slope = tool === 'clear' ? 0 : Math.abs(heightDelta) * BUILD_SLOPE_COST;
+  if (tool === 'rail') return railBuildCost(railType) + slope;
   return BUILD_COST_PER_TILE[tool] + slope;
 }
 
@@ -457,6 +494,7 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
   const to = buildTile(options.to ?? options.from);
   const axis = options.axis ?? axisForDrag(from, to);
   const maxTiles = Math.max(1, options.maxTiles ?? MAX_BUILD_TILES);
+  const railType: RailType = tool === 'rail' ? (options.railType ?? 'rail') : 'rail';
   const empty: BuildPlan = {
     tool,
     from,
@@ -466,6 +504,7 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     cost: 0,
     valid: false,
     reason: null,
+    ...(tool === 'rail' ? { railType } : {}),
   };
 
   if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
@@ -503,7 +542,7 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     }
 
     const heightDelta = previousHeight === null ? 0 : height - previousHeight;
-    const costOfTile = tileCost(tool, heightDelta);
+    const costOfTile = tileCost(tool, heightDelta, railType);
     cost += costOfTile;
 
     let tileReason = occupancyReason(kind, tool);
@@ -548,6 +587,7 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     cost,
     valid: reason === null,
     reason,
+    ...(tool === 'rail' ? { railType } : {}),
   };
 }
 
@@ -591,11 +631,14 @@ export function commandFromPlan(
     };
   }
   if (plan.tool === 'signal') {
+    const settings = plan.signal;
     return {
       ...base,
       options: {
-        type: 'block',
-        ...(plan.signal?.track ? { track: plan.signal.track } : {}),
+        type: settings?.type ?? 'block',
+        direction: settings?.direction ?? 'one-way',
+        spacing: settings?.spacing ?? 1,
+        ...(settings?.track ? { track: settings.track } : {}),
       },
     };
   }
@@ -635,6 +678,21 @@ export function commandFromPlan(
       options: {
         axis: plan.axis,
         order: plan.axis === 'y' ? 'vertical' : 'horizontal',
+      },
+    };
+  }
+  if (plan.tool === 'unsignal') {
+    return { ...base, options: {} };
+  }
+  if (plan.tool === 'convert') {
+    return { ...base, options: { railType: plan.railType ?? 'rail' } };
+  }
+  if (plan.tool === 'rail') {
+    return {
+      ...base,
+      options: {
+        axis: plan.axis,
+        ...(plan.railType && plan.railType !== 'rail' ? { railType: plan.railType } : {}),
       },
     };
   }
@@ -776,7 +834,7 @@ export interface SignalPlanOptions extends InfrastructureOptions {
 }
 
 function emptyInfrastructurePlan(
-  tool: 'station' | 'depot' | 'signal',
+  tool: 'station' | 'depot' | 'signal' | 'unsignal' | 'convert',
   from: BuildPoint,
   to: BuildPoint,
   axis: BuildAxis,
@@ -929,7 +987,7 @@ function traceSignalTiles(
   return { points, axis };
 }
 
-/** Plan d'un ou plusieurs signaux de bloc le long d'une voie existante. */
+/** Plan d'un ou plusieurs signaux le long d'une voie existante. */
 export function planSignal(options: SignalPlanOptions): BuildPlan {
   const map = options.map;
   const from = buildTile(options.from);
@@ -937,6 +995,79 @@ export function planSignal(options: SignalPlanOptions): BuildPlan {
   const traced = traceSignalTiles(from, to);
   const axis = traced?.axis ?? options.axis ?? 'x';
   const plan = emptyInfrastructurePlan('signal', from, to, axis);
+  const settings: SignalSettings = {
+    ...options.settings,
+    spacing: Math.max(1, Math.min(8, Math.round(options.settings.spacing || 1))),
+  };
+  plan.signal = { ...settings };
+
+  if (!traced) {
+    return { ...plan, reason: 'Un alignement de signaux doit suivre X ou Y.' };
+  }
+  if (traced.points.length > MAX_BUILD_TILES) {
+    return {
+      ...plan,
+      reason: `Trop de signaux (${traced.points.length}, ${MAX_BUILD_TILES} maximum).`,
+    };
+  }
+
+  let reason: string | null = null;
+  let cost = 0;
+  for (let i = 0; i < traced.points.length; i += 1) {
+    const point = traced.points[i];
+    if (!point) continue;
+    // Densité : un signal toutes les `spacing` tuiles en partant du début.
+    if (i % settings.spacing !== 0) continue;
+    if (!inBounds(map, point.x, point.y)) {
+      reason = reason ?? 'Signal hors de la carte.';
+      continue;
+    }
+    const index = tileIndex(point.x, point.y, map.width);
+    const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    const height = map.heightMap[index] ?? 0;
+    const owner = map.owner[index] ?? COMPANY_NONE;
+    const existing = map.signalData?.[index] ?? 0;
+    let tileReason: string | null = null;
+    if (kind !== 'rail') tileReason = 'Un signal exige une voie ferrée sur la tuile.';
+    else if (
+      options.company !== undefined &&
+      options.company !== COMPANY_NONE &&
+      owner !== options.company
+    ) {
+      tileReason = 'La voie appartient à une autre entreprise.';
+    }
+    if (tileReason) reason = reason ?? tileReason;
+    const costOfTile = existing !== 0 ? SIGNAL_CONVERT_COST : SIGNAL_KIND_COST[settings.type];
+    cost += costOfTile;
+    plan.tiles.push({
+      x: point.x,
+      y: point.y,
+      index,
+      kind,
+      height,
+      ground: height * 0.5,
+      connections: map.trackBits[index] ?? 0,
+      cost: costOfTile,
+    });
+  }
+
+  if (plan.tiles.length === 0 && !reason) {
+    reason = 'Aucun signal à poser sur ce tracé.';
+  }
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  return { ...plan, cost, valid: reason === null, reason };
+}
+
+/** Plan de retrait d'un ou plusieurs signaux (la voie reste en place). */
+export function planRemoveSignal(options: SignalPlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const to = buildTile(options.to ?? options.from);
+  const traced = traceSignalTiles(from, to);
+  const axis = traced?.axis ?? options.axis ?? 'x';
+  const plan = emptyInfrastructurePlan('unsignal', from, to, axis);
   plan.signal = { ...options.settings };
 
   if (!traced) {
@@ -960,9 +1091,12 @@ export function planSignal(options: SignalPlanOptions): BuildPlan {
     const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
     const height = map.heightMap[index] ?? 0;
     const owner = map.owner[index] ?? COMPANY_NONE;
+    const hasSignal =
+      (map.signalData?.[index] ?? 0) !== 0 || ((map.flags[index] ?? 0) & (1 << 6)) !== 0;
     let tileReason: string | null = null;
     if (kind !== 'rail') tileReason = 'Un signal exige une voie ferrée sur la tuile.';
     else if (
+      hasSignal &&
       options.company !== undefined &&
       options.company !== COMPANY_NONE &&
       owner !== options.company
@@ -970,7 +1104,10 @@ export function planSignal(options: SignalPlanOptions): BuildPlan {
       tileReason = 'La voie appartient à une autre entreprise.';
     }
     if (tileReason) reason = reason ?? tileReason;
-    cost += SIGNAL_COST;
+    // Les tuiles sans signal sont traversées sans frais : un glissement peut
+    // couvrir une voie dont seuls certains nœuds portent un signal.
+    if (!hasSignal) continue;
+    cost += SIGNAL_REMOVE_COST;
     plan.tiles.push({
       x: point.x,
       y: point.y,
@@ -979,10 +1116,84 @@ export function planSignal(options: SignalPlanOptions): BuildPlan {
       height,
       ground: height * 0.5,
       connections: map.trackBits[index] ?? 0,
-      cost: SIGNAL_COST,
+      cost: SIGNAL_REMOVE_COST,
     });
   }
 
+  if (plan.tiles.length === 0 && !reason) {
+    reason = 'Aucun signal à retirer sur ce tracé.';
+  }
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  return { ...plan, cost, valid: reason === null, reason };
+}
+
+/** Options de conversion d'un tronçon vers un autre type de rail. */
+export interface ConvertRailPlanOptions extends InfrastructureOptions {
+  railType: RailType;
+  to?: BuildPoint;
+  axis?: BuildAxis;
+}
+
+/**
+ * Plan de conversion d'un tronçon existant (#157) : toutes les tuiles doivent
+ * être des voies de l'entreprise, et au moins une doit changer de type.
+ */
+export function planConvertRail(options: ConvertRailPlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const to = buildTile(options.to ?? options.from);
+  const axis = options.axis ?? axisForDrag(from, to);
+  const plan = emptyInfrastructurePlan('convert', from, to, axis);
+  const target = options.railType;
+  plan.railType = target;
+
+  if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
+    return { ...plan, reason: 'Tracé hors de la carte.' };
+  }
+  const points = traceBuildPath(from, to, axis);
+  if (points.length > MAX_BUILD_TILES) {
+    return {
+      ...plan,
+      reason: `Tronçon trop long (${points.length} tuiles, ${MAX_BUILD_TILES} maximum).`,
+    };
+  }
+
+  const costPerTile = railConvertCost(target);
+  let reason: string | null = null;
+  let cost = 0;
+  let changed = false;
+  for (const point of points) {
+    const index = tileIndex(point.x, point.y, map.width);
+    const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    const height = map.heightMap[index] ?? 0;
+    const owner = map.owner[index] ?? COMPANY_NONE;
+    const current = parseRailType(map.railTypes?.[index]) ?? 'rail';
+    let tileReason: string | null = null;
+    if (kind !== 'rail') tileReason = 'La conversion exige une voie ferrée.';
+    else if (
+      options.company !== undefined &&
+      options.company !== COMPANY_NONE &&
+      owner !== options.company
+    ) {
+      tileReason = 'La voie appartient à une autre entreprise.';
+    }
+    if (tileReason) reason = reason ?? tileReason;
+    if (current !== target) changed = true;
+    cost += costPerTile;
+    plan.tiles.push({
+      x: point.x,
+      y: point.y,
+      index,
+      kind,
+      height,
+      ground: height * 0.5,
+      connections: map.trackBits[index] ?? 0,
+      cost: costPerTile,
+    });
+  }
+  if (!reason && !changed) reason = 'Ce tronçon est déjà de ce type.';
   if (!reason && options.budget !== undefined && cost > options.budget) {
     reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
   }

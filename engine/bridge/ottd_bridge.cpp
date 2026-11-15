@@ -857,10 +857,11 @@ uint64_t ComputeStateHash()
  *   8  length        u32 (= tile_count)
  */
 static constexpr uint32_t OTTD_MAP_MAGIC = 0x314D544F; ///< "OTM1" en little-endian.
-static constexpr uint16_t OTTD_MAP_VERSION = 1;
+/* v2 : ajout de la couche `signalData` (#156), lisible par le frontend. */
+static constexpr uint16_t OTTD_MAP_VERSION = 2;
 static constexpr uint16_t OTTD_MAP_HEADER_SIZE = 64;
 static constexpr uint16_t OTTD_MAP_DIRECTORY_ENTRY_SIZE = 12;
-static constexpr uint8_t OTTD_MAP_LAYER_COUNT = 6;
+static constexpr uint8_t OTTD_MAP_LAYER_COUNT = 7;
 static constexpr uint32_t OTTD_MAP_DATA_OFFSET = OTTD_MAP_HEADER_SIZE + OTTD_MAP_LAYER_COUNT * OTTD_MAP_DIRECTORY_ENTRY_SIZE;
 
 enum MapLayer : uint8_t {
@@ -870,6 +871,7 @@ enum MapLayer : uint8_t {
 	MAP_LAYER_SLOPE = 4,
 	MAP_LAYER_FLAGS = 5,
 	MAP_LAYER_TRACK = 6,
+	MAP_LAYER_SIGNAL = 7,
 };
 
 /* Index stables de `TILE_KIND_INDEX` dans src/engine/protocol.ts. */
@@ -1084,6 +1086,60 @@ uint8_t TileFlags(Tile tile, uint8_t snow_line)
 	}
 
 	return flags;
+}
+
+/**
+ * Encode les bits de signal d'une tuile (#156).
+ *
+ * Disposition, alignée sur `src/game/signalRules.ts` :
+ *   bits 0..2 : type (1 bloc, 2 path/PBS, 3 entrée, 4 sortie, 5 combiné)
+ *   bit 3     : 1 = bidirectionnel
+ *   bits 4..5 : état (0 vert, 1 rouge, 2 jaune — OpenTTD n'émet que 0/1)
+ *   bit 6     : 1 = sémaphore
+ *
+ * Une tuile peut porter des signaux de types différents selon la voie ; le
+ * rendu n'affiche qu'un mât par tuile, on choisit donc la première voie
+ * pourvue d'un signal dans l'ordre stable de `Track`.
+ */
+uint8_t PackSignalData(Tile tile)
+{
+	if (!IsPlainRailTile(tile) || !HasSignals(tile)) return 0;
+	const uint8_t present = static_cast<uint8_t>(GetPresentSignals(tile));
+	if (present == 0) return 0;
+
+	static constexpr Track kTracks[] = {
+		TRACK_X, TRACK_Y, TRACK_UPPER, TRACK_LOWER, TRACK_LEFT, TRACK_RIGHT,
+	};
+	Track track = INVALID_TRACK;
+	for (const Track candidate : kTracks) {
+		if ((present & SignalOnTrack(candidate)) != 0) {
+			track = candidate;
+			break;
+		}
+	}
+	if (track == INVALID_TRACK) return 0;
+
+	uint8_t kind = 0;
+	switch (GetSignalType(tile, track)) {
+		case SIGTYPE_BLOCK: kind = 1; break;
+		case SIGTYPE_PBS:
+		case SIGTYPE_PBS_ONEWAY: kind = 2; break;
+		case SIGTYPE_ENTRY: kind = 3; break;
+		case SIGTYPE_EXIT: kind = 4; break;
+		case SIGTYPE_COMBO: kind = 5; break;
+		default: return 0;
+	}
+
+	const uint8_t both = ((present & 0x3) == 0x3 || (present & 0xC) == 0xC) ? 1 : 0;
+	const uint32_t states = GetSignalStates(tile);
+	uint8_t aspect = 0; /* vert par défaut */
+	for (int bit = 0; bit < 8; bit++) {
+		if ((present & (1U << bit)) == 0) continue;
+		aspect = (states & (1U << bit)) != 0 ? 0 : 1;
+		break;
+	}
+	const uint8_t semaphore = GetSignalVariant(tile, track) == SIG_SEMAPHORE ? 1 : 0;
+	return static_cast<uint8_t>(kind | (both << 3) | (aspect << 4) | (semaphore << 6));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1613,9 +1669,15 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 
 		out += fmt::format(
 			"{{\"id\":{},\"company\":{},\"kind\":\"{}\",\"x\":{},\"y\":{},\"direction\":{},"
-			"\"width\":1,\"height\":1}}",
+			"\"width\":1,\"height\":1",
 			d->index.base(), ProtocolOwner(GetTileOwner(d->xy)), kind,
 			TileX(d->xy), TileY(d->xy), DepotDirection(d->xy));
+		if (std::string_view(kind) == "rail") {
+			out += ",\"railType\":\"";
+			out += RailTypeName(GetRailType(d->xy));
+			out += "\"";
+		}
+		out += "}";
 	}
 	out.push_back(']');
 
@@ -2279,6 +2341,91 @@ RailType SelectRailType(CompanyID company)
 	return INVALID_RAILTYPE;
 }
 
+/** Nom protocole d'un type de rail (#157). */
+const char *RailTypeName(RailType type)
+{
+	switch (type) {
+		case RAILTYPE_RAIL: return "rail";
+		case RAILTYPE_ELECTRIC: return "electrified";
+		case RAILTYPE_MONO: return "monorail";
+		case RAILTYPE_MAGLEV: return "maglev";
+		default: return "rail";
+	}
+}
+
+/** Lit un nom de type de rail protocole (`rail`, `electric`, `mono`, `maglev`). */
+bool ParseRailTypeName(std::string_view name, RailType &out)
+{
+	if (name == "rail" || name == "normal" || name == "classique") {
+		out = RAILTYPE_RAIL;
+		return true;
+	}
+	if (name == "electrified" || name == "electric" || name == "electrifie" ||
+			name == "électrifié" || name == "elrail") {
+		out = RAILTYPE_ELECTRIC;
+		return true;
+	}
+	if (name == "monorail" || name == "mono") {
+		out = RAILTYPE_MONO;
+		return true;
+	}
+	if (name == "maglev") {
+		out = RAILTYPE_MAGLEV;
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Type de rail demandé par une commande, ou type par défaut de l'entreprise.
+ * `options.railType` accepte aussi les alias `type` et `rail`.
+ */
+RailType RequestedRailType(CompanyID company, const JsonValue *options, bool &ok)
+{
+	ok = true;
+	RailType type = SelectRailType(company);
+	const std::string name = LowerAscii(OptionString(options, "railType",
+			OptionString(options, "rail_type", OptionString(options, "rail", ""))));
+	if (name.empty()) return type;
+	if (!ParseRailTypeName(name, type)) {
+		ok = false;
+		return INVALID_RAILTYPE;
+	}
+	if (!ValParamRailType(type) || !HasRailTypeAvail(company, type)) {
+		ok = false;
+		return INVALID_RAILTYPE;
+	}
+	return type;
+}
+
+/** Libellé d'un type de signal (#156). */
+bool ParseSignalTypeName(std::string_view name, SignalType &type, SignalVariant &variant,
+		bool one_way)
+{
+	variant = SIG_ELECTRIC;
+	if (name == "block" || name == "bloc") {
+		type = SIGTYPE_BLOCK;
+		return true;
+	}
+	if (name == "path" || name == "pbs") {
+		type = one_way ? SIGTYPE_PBS_ONEWAY : SIGTYPE_PBS;
+		return true;
+	}
+	if (name == "entry" || name == "entree" || name == "entrée") {
+		type = SIGTYPE_ENTRY;
+		return true;
+	}
+	if (name == "exit" || name == "sortie") {
+		type = SIGTYPE_EXIT;
+		return true;
+	}
+	if (name == "combo" || name == "combine" || name == "combiné") {
+		type = SIGTYPE_COMBO;
+		return true;
+	}
+	return false;
+}
+
 /** Libellé lisible d'un moteur (nom personnalisé ou nom NewGRF). */
 std::string EngineName(EngineID engine)
 {
@@ -2497,9 +2644,11 @@ bool BuildRail(CompanyID company, const JsonValue &root, CommandReply &reply)
 		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
 	}
 	const JsonValue *options = root.Find("options");
-	const RailType rail_type = SelectRailType(company);
-	if (rail_type == INVALID_RAILTYPE) {
-		return FailWith(reply, "NO_RAIL_TYPE", "Aucun type de voie disponible pour cette entreprise.");
+	bool rail_type_ok = true;
+	const RailType rail_type = RequestedRailType(company, options, rail_type_ok);
+	if (!rail_type_ok || rail_type == INVALID_RAILTYPE) {
+		return FailWith(reply, "NO_RAIL_TYPE",
+				"Type de voie indisponible pour cette entreprise (rail, électrifié, monorail, maglev).");
 	}
 
 	std::string order = LowerAscii(OptionString(options, "order", "horizontal"));
@@ -2580,9 +2729,11 @@ bool BuildStation(CompanyID company, const JsonValue &root, CommandReply &reply)
 			kind == "routiere" || kind == "routière";
 
 	if (rail) {
-		const RailType rail_type = SelectRailType(company);
-		if (rail_type == INVALID_RAILTYPE) {
-			return FailWith(reply, "NO_RAIL_TYPE", "Aucun type de voie disponible pour cette entreprise.");
+		bool rail_type_ok = true;
+		const RailType rail_type = RequestedRailType(company, options, rail_type_ok);
+		if (!rail_type_ok || rail_type == INVALID_RAILTYPE) {
+			return FailWith(reply, "NO_RAIL_TYPE",
+					"Type de voie indisponible pour cette entreprise (rail, électrifié, monorail, maglev).");
 		}
 
 		Axis axis = AXIS_X;
@@ -2708,9 +2859,11 @@ bool BuildDepot(CompanyID company, const JsonValue &root, CommandReply &reply)
 	if (direction == INVALID_DIAGDIR) direction = DIAGDIR_SE;
 
 	if (rail) {
-		const RailType rail_type = SelectRailType(company);
-		if (rail_type == INVALID_RAILTYPE) {
-			return FailWith(reply, "NO_RAIL_TYPE", "Aucun type de voie disponible pour cette entreprise.");
+		bool rail_type_ok = true;
+		const RailType rail_type = RequestedRailType(company, options, rail_type_ok);
+		if (!rail_type_ok || rail_type == INVALID_RAILTYPE) {
+			return FailWith(reply, "NO_RAIL_TYPE",
+					"Type de voie indisponible pour cette entreprise (rail, électrifié, monorail, maglev).");
 		}
 		CommandCost test = RunCompanyCommand<CMD_BUILD_TRAIN_DEPOT>(
 				company, tile, true, tile, rail_type, direction);
@@ -2755,11 +2908,30 @@ bool BuildSignal(CompanyID company, const JsonValue &root, CommandReply &reply)
 		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
 	}
 	const JsonValue *options = root.Find("options");
-	const std::string type = LowerAscii(OptionString(options, "type", "block"));
-	if (type != "block" && type != "bloc") {
-		return FailWith(reply, "NOT_SUPPORTED",
-				"Seuls les signaux de bloc sont supportés (« options.type » = block).");
+
+	/* Sens : unique par défaut, `direction` ou `both` peut demander deux sens. */
+	const std::string direction = LowerAscii(OptionString(options, "direction", "both"));
+	bool one_way = true;
+	if (direction == "one-way" || direction == "oneway" || direction == "single" ||
+			direction == "sens-unique" || direction == "unique") {
+		one_way = true;
+	} else if (direction == "both" || direction == "two-way" || direction == "twoway" ||
+			direction == "bidirectional" || direction == "bidirectionnel") {
+		one_way = false;
+	} else {
+		return FailWith(reply, "INVALID_PARAMETER",
+				"« options.direction » doit valoir one-way ou both.");
 	}
+	if (OptionBool(options, "both", false)) one_way = false;
+
+	const std::string type_name = LowerAscii(OptionString(options, "type", OptionString(options, "kind", "block")));
+	SignalType signal_type = SIGTYPE_BLOCK;
+	SignalVariant signal_variant = SIG_ELECTRIC;
+	if (!ParseSignalTypeName(type_name, signal_type, signal_variant, one_way)) {
+		return FailWith(reply, "INVALID_PARAMETER",
+				"« options.type » inconnu (block, path, entry, exit, combo).");
+	}
+	if (OptionBool(options, "semaphore", false)) signal_variant = SIG_SEMAPHORE;
 
 	std::vector<TileIndex> tiles;
 	if (has_to) {
@@ -2769,6 +2941,16 @@ bool BuildSignal(CompanyID company, const JsonValue &root, CommandReply &reply)
 		MakeLPath(from_x, from_y, to_x, to_y, false, tiles);
 	} else {
 		tiles.push_back(TileXY(from_x, from_y));
+	}
+
+	/* Densité : un signal toutes les N tuiles, comme le glissement OpenTTD. */
+	const int spacing = std::max(1, std::min(8, OptionInt(options, "spacing", 1)));
+	if (spacing > 1) {
+		std::vector<TileIndex> spaced;
+		for (size_t i = 0; i < tiles.size(); i += static_cast<size_t>(spacing)) {
+			spaced.push_back(tiles[i]);
+		}
+		tiles = std::move(spaced);
 	}
 
 	/* Choix de la voie : unique, sinon `options.track` tranche. */
@@ -2799,18 +2981,23 @@ bool BuildSignal(CompanyID company, const JsonValue &root, CommandReply &reply)
 		tracks.push_back(track);
 	}
 
+	/* Un seul signal est construit par tuile : `num_dir_cycle` alterne le côté
+	 * pour obtenir un sens unique, 0 laisse le signal bidirectionnel. */
+	const uint8_t dir_cycle = (one_way && !IsPbsSignal(signal_type)) ? 1 : 0;
 	for (size_t i = 0; i < tiles.size(); i++) {
+		const bool existing = HasSignalOnTrack(tiles[i], tracks[i]);
 		CommandCost test = RunCompanyCommand<CMD_BUILD_SINGLE_SIGNAL>(
-				company, tiles[i], true, tiles[i], tracks[i], SIGTYPE_BLOCK, SIG_ELECTRIC,
-				false, false, false, SIGTYPE_BLOCK, SIGTYPE_BLOCK, 0, 0);
+				company, tiles[i], true, tiles[i], tracks[i], signal_type, signal_variant,
+				existing, false, false, SIGTYPE_BLOCK, SIGTYPE_BLOCK, dir_cycle, 0);
 		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction de signal refusée.");
 	}
 
 	Money spent = 0;
 	for (size_t i = 0; i < tiles.size(); i++) {
+		const bool existing = HasSignalOnTrack(tiles[i], tracks[i]);
 		CommandCost result = RunCompanyCommand<CMD_BUILD_SINGLE_SIGNAL>(
-				company, tiles[i], false, tiles[i], tracks[i], SIGTYPE_BLOCK, SIG_ELECTRIC,
-				false, false, false, SIGTYPE_BLOCK, SIGTYPE_BLOCK, 0, 0);
+				company, tiles[i], false, tiles[i], tracks[i], signal_type, signal_variant,
+				existing, false, false, SIGTYPE_BLOCK, SIGTYPE_BLOCK, dir_cycle, 0);
 		if (result.Failed()) {
 			reply.cost = spent;
 			reply.tiles = static_cast<int>(i);
@@ -2821,7 +3008,137 @@ bool BuildSignal(CompanyID company, const JsonValue &root, CommandReply &reply)
 
 	reply.cost = spent;
 	reply.tiles = static_cast<int>(tiles.size());
-	return Succeed(reply, fmt::format("{} signal(aux) de bloc construit(s).", tiles.size()));
+	return Succeed(reply, fmt::format("{} signal(aux) {} construit(s).", tiles.size(), type_name));
+}
+
+/**
+ * Retire les signaux d'un alignement sans toucher à la voie (#156).
+ * Utilise `CMD_REMOVE_SINGLE_SIGNAL`, qui facture la démolition du signal.
+ */
+bool BuildUnsignal(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const JsonValue *options = root.Find("options");
+
+	std::vector<TileIndex> tiles;
+	if (has_to) {
+		if (from_x != to_x && from_y != to_y) {
+			return FailWith(reply, "INVALID_PARAMETER", "Un alignement de signaux doit suivre x ou y.");
+		}
+		MakeLPath(from_x, from_y, to_x, to_y, false, tiles);
+	} else {
+		tiles.push_back(TileXY(from_x, from_y));
+	}
+
+	Track forced_track = INVALID_TRACK;
+	const std::string track_name = LowerAscii(OptionString(options, "track", ""));
+	if (!track_name.empty() && !ParseTrackName(track_name, forced_track)) {
+		return FailWith(reply, "INVALID_PARAMETER", "« options.track » inconnu (x, y, upper, lower, left, right).");
+	}
+
+	std::vector<Track> tracks;
+	tracks.reserve(tiles.size());
+	for (const TileIndex tile : tiles) {
+		if (!IsPlainRailTile(tile) || !HasSignals(tile)) {
+			return FailWith(reply, "NO_SIGNAL", "Aucun signal à retirer sur cette tuile.");
+		}
+		const uint8_t present = static_cast<uint8_t>(GetPresentSignals(tile));
+		Track track = forced_track;
+		if (track == INVALID_TRACK) {
+			static constexpr Track kTracks[] = {
+				TRACK_X, TRACK_Y, TRACK_UPPER, TRACK_LOWER, TRACK_LEFT, TRACK_RIGHT,
+			};
+			uint8_t count = 0;
+			for (const Track candidate : kTracks) {
+				if ((present & SignalOnTrack(candidate)) == 0) continue;
+				track = candidate;
+				count++;
+			}
+			if (count != 1) {
+				return FailWith(reply, "AMBIGUOUS_TRACK",
+						"Plusieurs voies portent un signal : précisez « options.track ».");
+			}
+		} else if ((present & SignalOnTrack(track)) == 0) {
+			return FailWith(reply, "NO_SIGNAL", "La voie demandée ne porte pas de signal.");
+		}
+		tracks.push_back(track);
+	}
+
+	for (size_t i = 0; i < tiles.size(); i++) {
+		CommandCost test = RunCompanyCommand<CMD_REMOVE_SINGLE_SIGNAL>(
+				company, tiles[i], true, tiles[i], tracks[i]);
+		if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Retrait de signal refusé.");
+	}
+
+	Money spent = 0;
+	for (size_t i = 0; i < tiles.size(); i++) {
+		CommandCost result = RunCompanyCommand<CMD_REMOVE_SINGLE_SIGNAL>(
+				company, tiles[i], false, tiles[i], tracks[i]);
+		if (result.Failed()) {
+			reply.cost = spent;
+			reply.tiles = static_cast<int>(i);
+			return FailFromCommand(reply, result, "COMMAND_FAILED", "Retrait de signal interrompu.");
+		}
+		spent += result.GetCost();
+	}
+
+	reply.cost = spent;
+	reply.tiles = static_cast<int>(tiles.size());
+	return Succeed(reply, fmt::format("{} signal(aux) retiré(s).", tiles.size()));
+}
+
+/**
+ * Convertit un tronçon vers un autre type de rail (#157) via `CMD_CONVERT_RAIL`.
+ * Chaque tuile est testée avant toute exécution : une erreur laisse la carte
+ * strictement inchangée.
+ */
+bool BuildConvertRail(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	const JsonValue *options = root.Find("options");
+	bool rail_type_ok = true;
+	const RailType rail_type = RequestedRailType(company, options, rail_type_ok);
+	if (!rail_type_ok || rail_type == INVALID_RAILTYPE) {
+		return FailWith(reply, "NO_RAIL_TYPE",
+				"Type de rail indisponible (rail, électrifié, monorail, maglev).");
+	}
+
+	const std::string order = LowerAscii(OptionString(options, "order", "horizontal"));
+	const bool vertical_first = order == "vertical" || order == "y";
+	std::vector<TileIndex> tiles;
+	MakeLPath(from_x, from_y, to_x, to_y, vertical_first, tiles);
+
+	for (const TileIndex tile : tiles) {
+		CommandCost test = RunCompanyCommand<CMD_CONVERT_RAIL>(
+				company, tile, true, tile, tile, rail_type, false);
+		if (test.Failed()) {
+			return FailFromCommand(reply, test, "COMMAND_FAILED",
+					"Conversion refusée : aucune tuile convertie.");
+		}
+	}
+
+	Money spent = 0;
+	for (const TileIndex tile : tiles) {
+		CommandCost result = RunCompanyCommand<CMD_CONVERT_RAIL>(
+				company, tile, false, tile, tile, rail_type, false);
+		if (result.Failed()) {
+			reply.cost = spent;
+			return FailFromCommand(reply, result, "COMMAND_FAILED", "Conversion interrompue.");
+		}
+		spent += result.GetCost();
+	}
+
+	reply.cost = spent;
+	reply.tiles = static_cast<int>(tiles.size());
+	return Succeed(reply, fmt::format("{} tuile(s) convertie(s) en {}.", tiles.size(), RailTypeName(rail_type)));
 }
 
 bool BuildClear(CompanyID company, const JsonValue &root, CommandReply &reply)
@@ -3148,6 +3465,8 @@ bool DispatchBuild(CompanyID company, const JsonValue &root, CommandReply &reply
 	if (tool == "station" || tool == "gare") return BuildStation(company, root, reply);
 	if (tool == "depot" || tool == "depot_road" || tool == "depot_rail") return BuildDepot(company, root, reply);
 	if (tool == "signal" || tool == "signaux") return BuildSignal(company, root, reply);
+	if (tool == "unsignal" || tool == "remove_signal" || tool == "remove-signal") return BuildUnsignal(company, root, reply);
+	if (tool == "convert" || tool == "railtype" || tool == "convert_rail") return BuildConvertRail(company, root, reply);
 	if (tool == "clear" || tool == "demolish" || tool == "demolition") return BuildClear(company, root, reply);
 	if (tool == "terraform" || tool == "terrassement" || tool == "land") return BuildTerraform(company, root, reply);
 	if (tool == "tree" || tool == "trees" || tool == "arbre" || tool == "arbres") return BuildTree(company, root, reply);
@@ -4615,7 +4934,7 @@ EMSCRIPTEN_KEEPALIVE int ottd_snapshot_map(uint8_t *out, int capacity)
 	/* Répertoire et pointeurs de section. */
 	static constexpr uint8_t layer_ids[OTTD_MAP_LAYER_COUNT] = {
 		MAP_LAYER_KIND, MAP_LAYER_HEIGHT, MAP_LAYER_OWNER,
-		MAP_LAYER_SLOPE, MAP_LAYER_FLAGS, MAP_LAYER_TRACK,
+		MAP_LAYER_SLOPE, MAP_LAYER_FLAGS, MAP_LAYER_TRACK, MAP_LAYER_SIGNAL,
 	};
 
 	uint8_t *sections[OTTD_MAP_LAYER_COUNT];
@@ -4638,6 +4957,7 @@ EMSCRIPTEN_KEEPALIVE int ottd_snapshot_map(uint8_t *out, int capacity)
 	uint8_t *slope = sections[3];
 	uint8_t *flags = sections[4];
 	uint8_t *track = sections[5];
+	uint8_t *signal = sections[6];
 
 	const uint8_t snow_line = GetSnowLine();
 
@@ -4650,6 +4970,7 @@ EMSCRIPTEN_KEEPALIVE int ottd_snapshot_map(uint8_t *out, int capacity)
 		slope[index] = static_cast<uint8_t>(GetTileSlope(tile));
 		flags[index] = TileFlags(tile, snow_line);
 		track[index] = tile.m8();
+		signal[index] = PackSignalData(tile);
 	}
 
 	return static_cast<int>(total);

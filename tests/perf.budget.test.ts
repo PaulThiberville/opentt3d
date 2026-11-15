@@ -17,6 +17,7 @@ import type { IndustrySnapshot, MapSnapshot } from '../src/engine/protocol';
 import { TILE_FLAG, TILE_KIND_INDEX } from '../src/engine/protocol';
 import { MockEngine } from '../src/engine/MockEngine';
 import type { RenderVehicle } from '../src/game/vehicleInterpolation';
+import { CatenaryLayer } from '../src/render/CatenaryLayer';
 import { CityLayer } from '../src/render/CityLayer';
 import { DepotLayer } from '../src/render/DepotLayer';
 import { IndustryLayer } from '../src/render/IndustryLayer';
@@ -610,6 +611,29 @@ describe('budgets des couches instanciées', () => {
       // Un dépôt route = un corps + une livrée.
       expect(used).toBe(512 * 2);
       expect(layer.drawCallCount).toBe(2);
+    } finally {
+      layer.dispose();
+    }
+  });
+
+  it('les caténaires tiennent dans deux InstancedMesh bornés', () => {
+    const layer = new CatenaryLayer();
+    const map = makeMap(64, 64, (fixture) => {
+      for (let x = 1; x < 60; x += 1) {
+        const index = 32 * 64 + x;
+        fixture.kind[index] = TILE_KIND_INDEX.rail;
+        fixture.flags[index] = TILE_FLAG.ELECTRIFIED;
+      }
+    });
+    layer.setMap(map);
+    try {
+      expect(layer.countPosts).toBeGreaterThan(0);
+      expect(layer.countPosts).toBeLessThanOrEqual(8192);
+      expect(layer.countWires).toBeLessThanOrEqual(16384);
+      expect(layer.group.children.length).toBe(2);
+      expect(
+        layer.group.children.every((child) => (child as THREE.InstancedMesh).isInstancedMesh),
+      ).toBe(true);
     } finally {
       layer.dispose();
     }

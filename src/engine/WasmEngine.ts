@@ -28,6 +28,8 @@ import {
   type EngineLoadOptions,
 } from './loadEngine';
 import { parseWorldJson } from './worldJson';
+import { deriveRailTypes } from '../game/railRules';
+import { signalsFromMap } from '../game/signalRules';
 import {
   type CompanyId,
   type EngineCommand,
@@ -366,6 +368,8 @@ export class WasmEngine implements EngineDriver {
     }
 
     world.map = decoded.map;
+    world.map.railTypes = deriveRailTypes(world.map);
+    world.signals = signalsFromMap(world.map);
     this.tick = world.meta.tick;
     if (this.pendingNews.length > 0) {
       world.news = [...world.news, ...this.pendingNews].slice(-50);

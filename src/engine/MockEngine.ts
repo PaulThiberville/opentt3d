@@ -27,6 +27,8 @@ import {
   type IndustrySnapshot,
   type MapSnapshot,
   type NewGameOptions,
+  type RailType,
+  type SignalDirection,
   type StationSnapshot,
   type SubsidySnapshot,
   type TownActionKind,
@@ -53,9 +55,11 @@ import {
   planAqueduct,
   planBuild,
   planCanal,
+  planConvertRail,
   planCrossing,
   planDepot,
   planLock,
+  planRemoveSignal,
   planSignal,
   planStation,
   planTerraform,
@@ -75,8 +79,21 @@ import {
   type TerraformSettings,
   type TreeSettings,
 } from '../game/buildRules';
+import { RAIL_TYPE_INDEX, RAIL_TYPE_LABELS, parseRailType } from '../game/railRules';
+import {
+  SIGNAL_KIND_LABELS,
+  decodeSignalBits,
+  encodeSignalBits,
+  parseSignalDirection,
+  parseSignalKind,
+  signalBlockTiles,
+  signalAspectForBlock,
+  signalsFromMap,
+  withSignalAspect,
+} from '../game/signalRules';
 import {
   MAX_VEHICLE_ORDERS,
+  modelCompatibleWithRail,
   vehicleModel,
   type DepotKind,
   type VehicleOrder,
@@ -237,6 +254,8 @@ interface MockDepot {
   direction: number;
   width: number;
   height: number;
+  /** Type de rail d'un dépôt ferroviaire (#157). */
+  railType?: RailType;
 }
 
 interface MockNews {
@@ -272,6 +291,12 @@ interface MockWorld {
   slope: Uint8Array;
   flags: Uint8Array;
   trackBits: Uint8Array;
+  /** Type de rail par tuile (#157). */
+  railTypes: Uint8Array;
+  /** Bits de signal par tuile (#156), voir `signalRules.ts`. */
+  signalData: Uint8Array;
+  /** Nombre de tuiles portant un signal (accélère les snapshots sans signal). */
+  signalCount: number;
 
   companies: MockCompany[];
   towns: MockTown[];
@@ -316,6 +341,10 @@ interface SerializedWorld {
   slope: string;
   flags: string;
   trackBits: string;
+  /** Absents des sauvegardes mock antérieures à #156/#157. */
+  railTypes?: string;
+  signalData?: string;
+  signalCount?: number;
   companies: (Omit<MockCompany, 'maxLoan' | 'monthsOfBankruptcy' | 'interestPaid'> & {
     maxLoan?: number;
     monthsOfBankruptcy?: number;
@@ -622,6 +651,8 @@ class WorldBuilder {
   readonly owner: Uint8Array;
   readonly flags: Uint8Array;
   readonly trackBits: Uint8Array;
+  readonly railTypes: Uint8Array;
+  readonly signalData: Uint8Array;
 
   readonly companies: MockCompany[];
   readonly towns: MockTown[] = [];
@@ -645,6 +676,8 @@ class WorldBuilder {
     this.owner = new Uint8Array(size).fill(COMPANY_NONE);
     this.flags = new Uint8Array(size);
     this.trackBits = new Uint8Array(size);
+    this.railTypes = new Uint8Array(size);
+    this.signalData = new Uint8Array(size);
     this.companies = [];
 
     /* Entreprises humaines (#99) : une par profil fourni, ids 0..n-1. Sans
@@ -1155,6 +1188,7 @@ class WorldBuilder {
       direction: 0,
       width: 1,
       height: 1,
+      ...(kind === 'rail' ? { railType: 'rail' as const } : {}),
     };
     this.depots.push(depot);
     return depot;
@@ -1529,6 +1563,9 @@ class WorldBuilder {
       slope: new Uint8Array(this.width * this.height),
       flags: this.flags,
       trackBits: this.trackBits,
+      railTypes: this.railTypes,
+      signalData: this.signalData,
+      signalCount: 0,
       companies: this.companies,
       towns: this.towns,
       industries: this.industries,
@@ -1594,6 +1631,7 @@ function legacyDepots(world: MockWorld): MockDepot[] {
         direction: 0,
         width: 1,
         height: 1,
+        ...(kind === 'rail' ? { railType: 'rail' as const } : {}),
       });
       world.trackBits[index] = (world.trackBits[index] ?? 0) & ~LEGACY_DEPOT_TRACK_BIT;
     }
@@ -1665,6 +1703,8 @@ function mapSnapshotView(world: MockWorld): MapSnapshot {
     slope: world.slope,
     flags: world.flags,
     trackBits: world.trackBits,
+    railTypes: world.railTypes,
+    signalData: world.signalData,
   };
 }
 
@@ -1801,22 +1841,31 @@ function signalSettingsFromCommand(command: Extract<EngineCommand, { type: 'buil
   error: string | null;
 } {
   const options = command.options;
-  const type = optionText(options, 'type') ?? 'block';
-  if (type !== 'block' && type !== 'bloc') {
+  const typeText = optionText(options, 'type') ?? optionText(options, 'kind') ?? 'block';
+  const type = parseSignalKind(typeText);
+  if (!type) {
     return {
-      settings: { type: 'block', track: null },
-      error: 'Seuls les signaux de bloc sont supportés (« options.type » = block).',
+      settings: { type: 'block', track: null, direction: 'one-way', spacing: 1 },
+      error: '« options.type » inconnu (block, path, entry, exit, combo).',
     };
   }
   const rawTrack = optionText(options, 'track');
   if (rawTrack && !SIGNAL_TRACKS.includes(rawTrack as SignalTrack)) {
     return {
-      settings: { type: 'block', track: null },
+      settings: { type, track: null, direction: 'one-way', spacing: 1 },
       error: '« options.track » inconnu (x, y, upper, lower, left, right).',
     };
   }
+  const directionText = optionText(options, 'direction');
+  const direction: SignalDirection = parseSignalDirection(directionText) ?? 'both';
+  const spacing = Math.max(1, Math.min(8, optionInt(options, 'spacing', 1)));
   return {
-    settings: { type: 'block', track: (rawTrack as SignalTrack | undefined) ?? null },
+    settings: {
+      type,
+      track: (rawTrack as SignalTrack | undefined) ?? null,
+      direction,
+      spacing,
+    },
     error: null,
   };
 }
@@ -1842,6 +1891,18 @@ function treeSettingsFromCommand(command: Extract<EngineCommand, { type: 'build'
 
 function lockSettingsFromCommand(command: Extract<EngineCommand, { type: 'build' }>): LockSettings {
   return { direction: parseBuildDirection(command.options?.direction) };
+}
+
+function railTypeFromCommand(
+  command: Extract<EngineCommand, { type: 'build' }>,
+  fallback: RailType = 'rail',
+): RailType {
+  return (
+    parseRailType(command.options?.railType) ??
+    parseRailType(command.options?.type) ??
+    parseRailType(command.options?.rail) ??
+    fallback
+  );
 }
 
 function nearestTownName(world: MockWorld, x: number, y: number): string {
@@ -1893,6 +1954,7 @@ function applyStation(
     world.owner[tile.index] = command.company;
     world.trackBits[tile.index] = tile.connections;
     world.flags[tile.index] = 0;
+    writeSignalData(world, tile.index, 0);
   }
   const footprint = stationFootprint(plan.station ?? settings);
   const resolved = plan.station ?? settings;
@@ -1931,6 +1993,7 @@ function applyDepot(
   company: MockCompany,
 ): void {
   const settings = depotSettingsFromCommand(command);
+  const railType = settings.kind === 'rail' ? railTypeFromCommand(command) : 'rail';
   const plan = planDepot({
     map: mapSnapshotView(world),
     from: command.from,
@@ -1946,6 +2009,11 @@ function applyDepot(
     world.kind[tile.index] = settings.kind === 'rail' ? K.rail : K.road;
     world.owner[tile.index] = command.company;
     world.trackBits[tile.index] = tile.connections;
+    writeSignalData(world, tile.index, 0);
+    if (settings.kind === 'rail') {
+      world.railTypes[tile.index] = RAIL_TYPE_INDEX[railType];
+      world.flags[tile.index] = railType === 'electrified' ? TILE_FLAG.ELECTRIFIED : 0;
+    }
   }
   const depot = plan.tiles[0];
   if (depot) {
@@ -1960,6 +2028,7 @@ function applyDepot(
       direction: directionToIndex(plan.depot?.direction ?? settings.direction ?? 'se'),
       width: 1,
       height: 1,
+      ...(settings.kind === 'rail' ? { railType } : {}),
     });
   }
   completeBuild(
@@ -1992,14 +2061,91 @@ function applySignal(
     addNews(world, 'error', `Construction impossible : ${plan.reason ?? 'signal refusé.'}`);
     return;
   }
+  let converted = 0;
   for (const tile of plan.tiles) {
+    const previous = world.signalData[tile.index] ?? 0;
+    if (previous !== 0) converted += 1;
+    const bits = encodeSignalBits({
+      kind: parsed.settings.type,
+      direction: parsed.settings.direction,
+      aspect: previous !== 0 ? (decodeSignalBits(previous)?.aspect ?? 'green') : 'green',
+      semaphore: previous !== 0 ? (decodeSignalBits(previous)?.semaphore ?? false) : false,
+    });
+    writeSignalData(world, tile.index, bits);
     world.flags[tile.index] = (world.flags[tile.index] ?? 0) | TILE_FLAG.SIGNAL;
+  }
+  const localLabel =
+    parsed.settings.type === 'block'
+      ? 'de bloc'
+      : `de type ${SIGNAL_KIND_LABELS[parsed.settings.type].toLowerCase()}`;
+  const message =
+    converted > 0
+      ? `${plan.tiles.length} signal(aux) ${localLabel} posé(s), ${converted} converti(s).`
+      : `${plan.tiles.length} signal(aux) ${localLabel} construit(s).`;
+  completeBuild(world, company, plan.cost, message);
+}
+
+function applyUnsignal(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+): void {
+  const settings: SignalSettings = {
+    type: 'block',
+    track: null,
+    direction: 'one-way',
+    spacing: 1,
+  };
+  const plan = planRemoveSignal({
+    map: mapSnapshotView(world),
+    from: command.from,
+    ...(command.to ? { to: command.to } : {}),
+    settings,
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid) {
+    addNews(world, 'error', `Démolition impossible : ${plan.reason ?? 'signal refusé.'}`);
+    return;
+  }
+  for (const tile of plan.tiles) {
+    writeSignalData(world, tile.index, 0);
+    world.flags[tile.index] = (world.flags[tile.index] ?? 0) & ~TILE_FLAG.SIGNAL;
+  }
+  completeBuild(world, company, plan.cost, `${plan.tiles.length} signal(aux) retiré(s).`);
+}
+
+function applyConvertRail(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+): void {
+  const target = railTypeFromCommand(command);
+  const plan = planConvertRail({
+    map: mapSnapshotView(world),
+    from: command.from,
+    ...(command.to ? { to: command.to } : {}),
+    railType: target,
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid) {
+    addNews(world, 'error', `Conversion impossible : ${plan.reason ?? 'type de rail refusé.'}`);
+    return;
+  }
+  for (const tile of plan.tiles) {
+    world.railTypes[tile.index] = RAIL_TYPE_INDEX[target];
+    if (target === 'electrified') {
+      world.flags[tile.index] = (world.flags[tile.index] ?? 0) | TILE_FLAG.ELECTRIFIED;
+    } else {
+      world.flags[tile.index] = (world.flags[tile.index] ?? 0) & ~TILE_FLAG.ELECTRIFIED;
+    }
   }
   completeBuild(
     world,
     company,
     plan.cost,
-    `${plan.tiles.length} signal(aux) de bloc construit(s).`,
+    `${plan.tiles.length} tuile(s) convertie(s) en ${RAIL_TYPE_LABELS[target]}.`,
   );
 }
 
@@ -2235,6 +2381,14 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     applySignal(world, command, company);
     return;
   }
+  if (command.tool === 'unsignal') {
+    applyUnsignal(world, command, company);
+    return;
+  }
+  if (command.tool === 'convert') {
+    applyConvertRail(world, command, company);
+    return;
+  }
   if (command.tool === 'terraform') {
     applyTerraform(world, command, company, terraformSettingsFromCommand(command));
     return;
@@ -2278,6 +2432,7 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     axis,
     company: command.company,
     budget: company.money,
+    ...(tool === 'rail' ? { railType: railTypeFromCommand(command) } : {}),
   });
 
   if (!plan.valid) {
@@ -2307,6 +2462,8 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
         world.owner[tile.index] = COMPANY_NONE;
         world.flags[tile.index] = wasBridge ? TILE_FLAG.WATER : 0;
       }
+      world.railTypes[tile.index] = 0;
+      writeSignalData(world, tile.index, 0);
       const x = tile.index % world.width;
       const y = Math.floor(tile.index / world.width);
       world.depots = world.depots.filter(
@@ -2319,6 +2476,16 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     world.owner[tile.index] = command.company;
     world.trackBits[tile.index] = tile.connections;
     world.flags[tile.index] = 0;
+    if (tool === 'rail') {
+      const type = plan.railType ?? 'rail';
+      world.railTypes[tile.index] = RAIL_TYPE_INDEX[type];
+      if (type === 'electrified') {
+        world.flags[tile.index] = TILE_FLAG.ELECTRIFIED;
+      }
+    } else {
+      world.railTypes[tile.index] = 0;
+    }
+    writeSignalData(world, tile.index, 0);
   }
 
   company.money -= Math.round(plan.cost * priceFactor(world));
@@ -2429,6 +2596,14 @@ function buyVehicle(
     return;
   }
   const cost = Math.round(model.cost * priceFactor(world));
+  if (!modelCompatibleWithRail(model, depot.railType)) {
+    addNews(
+      world,
+      'error',
+      `Achat refusé : ${model.name} n’est pas compatible avec un ${RAIL_TYPE_LABELS[depot.railType ?? 'rail']}.`,
+    );
+    return;
+  }
   if (company.money < cost) {
     addNews(
       world,
@@ -3247,9 +3422,42 @@ function monthlyTick(world: MockWorld): void {
   world.rngState = rng.getState();
 }
 
+/** Écrit un octet de signal en maintenant le compteur de tuiles actives. */
+function writeSignalData(world: MockWorld, index: number, value: number): void {
+  const previous = world.signalData[index] ?? 0;
+  if (previous === 0 && value !== 0) world.signalCount += 1;
+  else if (previous !== 0 && value === 0) world.signalCount -= 1;
+  world.signalData[index] = value;
+}
+
+/**
+ * Recalcule l'état rouge/vert des signaux à partir de l'occupation réelle des
+ * cantons. Le calcul est déterministe : il ne dépend que des positions des
+ * trains et de `signalData` (#156).
+ */
+function updateSignalAspects(world: MockWorld): void {
+  if (world.signalCount === 0) return;
+  const width = world.width;
+  const map = mapSnapshotView(world);
+  const trains = world.vehicles.filter((vehicle) => vehicle.kind === 'train');
+  for (let index = 0; index < world.signalData.length; index += 1) {
+    const bits = world.signalData[index] ?? 0;
+    if (bits === 0) continue;
+    const x = index % width;
+    const y = Math.floor(index / width);
+    const block = signalBlockTiles(map, x, y);
+    const aspect = signalAspectForBlock(block, width, trains);
+    const current = decodeSignalBits(bits)?.aspect ?? 'green';
+    if (current !== aspect) {
+      writeSignalData(world, index, withSignalAspect(bits, aspect));
+    }
+  }
+}
+
 function advanceTick(world: MockWorld): void {
   world.tick += 1;
   for (const vehicle of world.vehicles) moveVehicle(world, vehicle);
+  updateSignalAspects(world);
   updateVehiclesTransforms(world);
 
   if (world.tick % TICKS_PER_DAY === 0) {
@@ -3297,6 +3505,9 @@ function serializeWorld(world: MockWorld): SerializedWorld {
     slope: encodeBase64(world.slope),
     flags: encodeBase64(world.flags),
     trackBits: encodeBase64(world.trackBits),
+    railTypes: encodeBase64(world.railTypes),
+    signalData: encodeBase64(world.signalData),
+    signalCount: world.signalCount,
     companies: world.companies,
     towns: world.towns,
     industries: world.industries,
@@ -3420,6 +3631,8 @@ export class MockEngine implements EngineDriver {
           slope: world.slope.slice(),
           flags: world.flags.slice(),
           trackBits: world.trackBits.slice(),
+          railTypes: world.railTypes.slice(),
+          signalData: world.signalData.slice(),
         }
       : null;
     if (includeMap) {
@@ -3545,6 +3758,7 @@ export class MockEngine implements EngineDriver {
       direction: depot.direction,
       width: depot.width,
       height: depot.height,
+      ...(depot.railType ? { railType: depot.railType } : {}),
     }));
 
     const vehicles: VehicleSnapshot[] = world.vehicles.map((vehicle) => ({
@@ -3584,6 +3798,7 @@ export class MockEngine implements EngineDriver {
       industries,
       stations,
       depots,
+      signals: world.signalCount > 0 ? signalsFromMap(mapSnapshotView(world)) : [],
       vehicles,
       subsidies,
       news,
@@ -3706,6 +3921,8 @@ export class MockEngine implements EngineDriver {
       world.slope,
       world.flags,
       world.trackBits,
+      world.railTypes,
+      world.signalData,
     ]) {
       for (let i = 0; i < layer.length; i += 1) hash.mixInt(layer[i] ?? 0);
     }
@@ -3752,6 +3969,13 @@ export class MockEngine implements EngineDriver {
       slope: decodeArray(saved.slope, expected),
       flags: decodeArray(saved.flags, expected),
       trackBits: decodeArray(saved.trackBits, expected),
+      railTypes: saved.railTypes
+        ? decodeArray(saved.railTypes, expected)
+        : new Uint8Array(expected),
+      signalData: saved.signalData
+        ? decodeArray(saved.signalData, expected)
+        : new Uint8Array(expected),
+      signalCount: saved.signalCount ?? 0,
       companies: saved.companies.map((company) => ({
         ...company,
         maxLoan: company.maxLoan ?? preset.maxLoan,
@@ -3787,6 +4011,10 @@ export class MockEngine implements EngineDriver {
       mapVersion: saved.mapVersion + 1,
       sequence: saved.sequence,
     };
+    // Recalcule le compteur (sauvegardes antérieures à #156 ou champ absent).
+    let signalCount = 0;
+    for (const value of world.signalData) if (value !== 0) signalCount += 1;
+    world.signalCount = signalCount;
     world.vehicles = saved.vehicles.map((vehicle) => ({
       ...vehicle,
       model: vehicle.model ?? '',
