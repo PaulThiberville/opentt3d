@@ -24,6 +24,36 @@ describe('AudioEngine', () => {
     expect(context.resumeCalls).toBe(1);
   });
 
+  it('diffère le buffer de bruit et les couches d’ambiance hors du geste', () => {
+    const { engine, context } = createEngine({ music: true });
+    engine.unlock();
+    // Le contexte, le master et le bus d'effets sont immédiats…
+    expect(context.gains.length).toBeGreaterThan(0);
+    expect(engine.isLayersReady).toBe(false);
+    // …mais aucun sample ni oscillateur n'est construit dans le pointerdown.
+    expect(context.buffersCreated).toBe(0);
+    expect(context.sources).toHaveLength(0);
+    expect(context.oscillators).toHaveLength(0);
+
+    engine.flushDeferredGraph();
+    expect(engine.isLayersReady).toBe(true);
+    expect(context.buffersCreated).toBe(1);
+    expect(context.sources.length).toBeGreaterThanOrEqual(2);
+    expect(context.oscillators.length).toBeGreaterThan(0);
+    engine.dispose();
+  });
+
+  it('construit le graphe différé au premier update sans bloquer unlock', () => {
+    const { engine, context } = createEngine();
+    engine.unlock();
+    expect(engine.isLayersReady).toBe(false);
+    engine.setGameplay(true);
+    engine.update(0.1);
+    expect(engine.isLayersReady).toBe(true);
+    expect(context.buffersCreated).toBe(1);
+    engine.dispose();
+  });
+
   it('applique les volumes master/effets/musique', () => {
     const { engine, context } = createEngine();
     engine.unlock();

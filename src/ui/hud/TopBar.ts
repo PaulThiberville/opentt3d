@@ -177,6 +177,7 @@ export class TopBar {
     );
     this.setText(this.dateValue, 'date', formatGameDate(snapshot?.economy));
     this.setText(this.fpsValue, 'fps', state.fps > 0 ? `${Math.round(state.fps)}` : '—');
+    this.fpsValue.title = `${Math.round(state.fps)} FPS · ${state.drawCalls} draw calls`;
     this.setText(this.qualityButton, 'quality', QUALITY_PRESETS[state.quality].label);
     this.setText(this.pauseButton, 'pause', state.paused ? '▶' : 'II');
     this.pauseButton.classList.toggle('is-active', state.paused);

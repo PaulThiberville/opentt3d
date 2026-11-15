@@ -124,6 +124,9 @@ export class AudioEngine {
 
   private unlocked = false;
   private disposed = false;
+  private layersStarted = false;
+  private layerTimer: ReturnType<typeof setTimeout> | null = null;
+  private idleHandle: number | null = null;
   private muted: boolean;
   private hidden = false;
   private focused = true;
@@ -147,6 +150,11 @@ export class AudioEngine {
 
   get isUnlocked(): boolean {
     return this.unlocked;
+  }
+
+  /** Le graphe complet (bruit, ambiance, musique) est-il construit ? */
+  get isLayersReady(): boolean {
+    return this.layersStarted;
   }
 
   get isMuted(): boolean {
@@ -176,7 +184,11 @@ export class AudioEngine {
     }
     this.ctx = ctx;
     this.unlocked = true;
-    this.buildGraph();
+    // Seul le bus critique est créé dans le geste utilisateur : les nœuds
+    // d'ambiance et le buffer de bruit (~2 s de samples) sont différés pour
+    // ne pas bloquer le premier pointerdown.
+    this.buildCoreGraph();
+    this.scheduleDeferredGraph();
     this.resumeContext();
     this.emit();
   }
@@ -251,6 +263,7 @@ export class AudioEngine {
 
   /** Avance l'horloge d'ambiance et programme oiseaux/grillons. */
   update(deltaSeconds: number): void {
+    if (this.unlocked && !this.layersStarted) this.flushDeferredGraph();
     const ctx = this.ctx;
     if (!ctx || this.disposed || !this.activeAmbience()) return;
     const delta = Math.max(0, Math.min(1, Number.isFinite(deltaSeconds) ? deltaSeconds : 0));
@@ -325,6 +338,7 @@ export class AudioEngine {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.cancelDeferredGraph();
     this.listeners.clear();
     for (const timer of this.cleanupTimers) clearTimeout(timer);
     this.cleanupTimers.clear();
@@ -373,7 +387,7 @@ export class AudioEngine {
     this.unlocked = false;
   }
 
-  private buildGraph(): void {
+  private buildCoreGraph(): void {
     const ctx = this.ctx;
     if (!ctx) return;
     this.master = ctx.createGain();
@@ -384,10 +398,50 @@ export class AudioEngine {
     this.musicGain.connect(this.master);
     this.ambienceBus = ctx.createGain();
     this.ambienceBus.connect(this.sfx);
-    this.noiseBuffer = this.createNoiseBuffer(ctx);
+    this.applyGains();
+  }
+
+  /**
+   * Programme la partie non critique du graphe (buffer de bruit, couches
+   * d'ambiance, musique) hors du handler de geste. `requestIdleCallback`
+   * quand il existe, sinon une tâche immédiate. Le premier `update` sert de
+   * filet de sécurité pour les environnements sans idle callback.
+   */
+  private scheduleDeferredGraph(): void {
+    if (this.layersStarted || this.disposed) return;
+    const scope = globalThis as {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+    };
+    if (typeof scope.requestIdleCallback === 'function') {
+      this.idleHandle = scope.requestIdleCallback(() => this.flushDeferredGraph(), {
+        timeout: 800,
+      });
+      return;
+    }
+    this.layerTimer = setTimeout(() => this.flushDeferredGraph(), 0);
+  }
+
+  /** Construit immédiatement le reste du graphe (tests, première frame). */
+  flushDeferredGraph(): void {
+    if (this.layersStarted || this.disposed || !this.ctx) return;
+    this.cancelDeferredGraph();
+    this.layersStarted = true;
+    this.noiseBuffer = this.createNoiseBuffer(this.ctx);
     this.startAmbienceLayers();
     this.startMusic();
     this.applyGains();
+  }
+
+  private cancelDeferredGraph(): void {
+    if (this.layerTimer !== null) {
+      clearTimeout(this.layerTimer);
+      this.layerTimer = null;
+    }
+    if (this.idleHandle !== null) {
+      const scope = globalThis as { cancelIdleCallback?: (handle: number) => void };
+      if (typeof scope.cancelIdleCallback === 'function') scope.cancelIdleCallback(this.idleHandle);
+      this.idleHandle = null;
+    }
   }
 
   private createNoiseBuffer(ctx: AudioContextLike): AudioBufferLike | null {

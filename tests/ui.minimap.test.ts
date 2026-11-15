@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   cameraFootprint,
+  computeMapSignature,
   computeMinimapLayout,
   minimapToWorld,
+  RedrawThrottle,
   worldToMinimap,
 } from '../src/ui/minimapMath';
 
@@ -54,6 +56,49 @@ describe('conversions monde ↔ minimap', () => {
     const limit = minimapToWorld(500, 500, layout, 256, 128);
     expect(limit.x).toBe(256);
     expect(limit.y).toBe(128);
+  });
+});
+
+describe('empreinte de carte de la minimap', () => {
+  const kind = new Uint8Array(16).fill(2);
+  const heightMap = new Uint8Array(16).fill(4);
+
+  it('reste stable quand seules les entités changent', () => {
+    const base = computeMapSignature({ width: 4, height: 4, kind, heightMap });
+    // Les entités ne font pas partie de l'empreinte : même carte, même fond.
+    expect(computeMapSignature({ width: 4, height: 4, kind, heightMap })).toBe(base);
+  });
+
+  it('change dès qu’une tuile ou une hauteur change', () => {
+    const base = computeMapSignature({ width: 4, height: 4, kind, heightMap });
+    const withKind = kind.slice();
+    withKind[5] = 8;
+    expect(computeMapSignature({ width: 4, height: 4, kind: withKind, heightMap })).not.toBe(base);
+    const withHeight = heightMap.slice();
+    withHeight[9] = 7;
+    expect(computeMapSignature({ width: 4, height: 4, kind, heightMap: withHeight })).not.toBe(
+      base,
+    );
+  });
+});
+
+describe('throttle de redraw de la minimap', () => {
+  it('laisse passer une frame puis attend l’intervalle', () => {
+    const throttle = new RedrawThrottle(100);
+    expect(throttle.shouldDraw(0)).toBe(true);
+    expect(throttle.shouldDraw(16)).toBe(false);
+    expect(throttle.shouldDraw(99)).toBe(false);
+    expect(throttle.shouldDraw(100)).toBe(true);
+    expect(throttle.shouldDraw(150)).toBe(false);
+    expect(throttle.shouldDraw(200)).toBe(true);
+  });
+
+  it('force un redraw immédiat sur resize et repart de cette date', () => {
+    const throttle = new RedrawThrottle(100);
+    expect(throttle.shouldDraw(0)).toBe(true);
+    expect(throttle.shouldDraw(50, true)).toBe(true);
+    expect(throttle.shouldDraw(120)).toBe(false);
+    expect(throttle.shouldDraw(150)).toBe(true);
   });
 });
 

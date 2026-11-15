@@ -18,7 +18,7 @@
 
 import * as THREE from 'three';
 import type { CompanyId, MapSnapshot, StationSnapshot, TownSnapshot } from '../engine/protocol';
-import { COMPANY_NONE } from '../engine/protocol';
+import { COMPANY_NONE, TILE_KIND_INDEX } from '../engine/protocol';
 import { cornerHeightWorld, sampleHeightWorld, tileKindFromIndex } from '../game/mapGrid';
 import { Prng, hashUnit2d } from '../game/prng';
 import { companyColour, hexToRgb } from './tileVisuals';
@@ -38,6 +38,7 @@ import {
 
 const MAX_RADIUS = 10;
 const MAX_STATION_TILES = 2048;
+const LOD_HYSTERESIS_RATIO = 1.18;
 
 export interface CityPickTarget {
   mesh: THREE.InstancedMesh;
@@ -93,6 +94,11 @@ export class CityLayer {
   private nightLights = true;
   private towns = new Map<number, TownState>();
   private buckets: THREE.InstancedMesh[] = [];
+  private bucketByKey = new Map<string, THREE.InstancedMesh>();
+  private farBucket: THREE.InstancedMesh | null = null;
+  private dirtyKeys = new Set<string>();
+  private allDirty = true;
+  private farDirty = true;
   private bucketTownIds = new Map<THREE.InstancedMesh, number[]>();
   private geometryCache = new Map<string, THREE.BufferGeometry>();
   private distantGeometry: THREE.BufferGeometry | null = null;
@@ -115,7 +121,16 @@ export class CityLayer {
   private detail: BuildingDetail = 1;
   private quality: QualityLevel = 'medium';
   private nearDistance = 80;
+  private farDistance = 95;
   private shadows = false;
+  private signature = 0;
+  private townSnapshots: readonly TownSnapshot[] = [];
+  /** Nombre de reconstructions réelles des villes (diagnostic/tests). */
+  builds = 0;
+  /** Nombre de bascules near/far (diagnostic/tests). */
+  lodSwitches = 0;
+  /** Nombre de lots réinstanciés lors du dernier `applyBuckets` (diagnostic/tests). */
+  bucketRebuilds = 0;
   private matrix = new THREE.Matrix4();
   private position = new THREE.Vector3();
   private quaternion = new THREE.Quaternion();
@@ -145,6 +160,11 @@ export class CityLayer {
   /** Reconstruit les bâtiments de toutes les villes. */
   build(towns: readonly TownSnapshot[], map: MapSnapshot): void {
     this.map = map;
+    this.townSnapshots = towns;
+    const signature = computeCitySignature(towns, map, this.detail);
+    if (this.builds > 0 && signature === this.signature) return;
+    this.signature = signature;
+    this.builds += 1;
     this.clear();
     const placementsByTown = new Map<number, Placement[]>();
 
@@ -306,7 +326,16 @@ export class CityLayer {
   /** Change le niveau de détail des bâtiments (qualité graphique). */
   setQuality(level: QualityLevel): void {
     this.applyQuality(level);
-    if (this.towns.size > 0) this.applyBuckets();
+    // La signature dépend du détail : sans cette mise à jour, le prochain
+    // snapshot déclencherait une reconstruction complète inutile des villes.
+    if (this.map) {
+      this.signature = computeCitySignature(this.townSnapshots, this.map, this.detail);
+    }
+    if (this.towns.size > 0) {
+      this.allDirty = true;
+      this.farDirty = true;
+      this.applyBuckets();
+    }
     if (this.stationStations.length > 0) {
       this.hallGeometry?.dispose();
       this.hallGeometry = null;
@@ -321,6 +350,7 @@ export class CityLayer {
     this.quality = level;
     this.detail = level === 'high' ? 2 : level === 'medium' ? 1 : 0;
     this.nearDistance = level === 'high' ? 120 : level === 'medium' ? 80 : 45;
+    this.farDistance = Math.round(this.nearDistance * LOD_HYSTERESIS_RATIO);
     this.nightLights = qualitySettings(level).nightWindows;
     this.nightUniform.value = this.nightLights ? this.nightAmount : 0;
   }
@@ -331,22 +361,38 @@ export class CityLayer {
     let changed = false;
     for (const town of this.towns.values()) {
       const distance = Math.hypot(town.centreX - cameraPosition.x, town.centreZ - cameraPosition.z);
-      const near = distance <= this.nearDistance;
-      if (near !== town.near) {
-        town.near = near;
-        changed = true;
+      let near = town.near;
+      // Hystérésis : entre `nearDistance` et `farDistance`, on conserve l'état.
+      if (town.near) {
+        if (distance > this.farDistance) near = false;
+      } else if (distance < this.nearDistance) {
+        near = true;
       }
+      if (near === town.near) continue;
+      town.near = near;
+      this.lodSwitches += 1;
+      this.markTownDirty(town);
+      changed = true;
     }
     if (changed) this.applyBuckets();
   }
 
-  private applyBuckets(): void {
-    for (const mesh of this.buckets) {
-      this.group.remove(mesh);
-      mesh.dispose();
+  /** Marque les lots touchés par une ville qui change d'état. */
+  private markTownDirty(town: TownState): void {
+    for (const placement of town.placements) {
+      this.dirtyKeys.add(`${placement.archetype}:${placement.variant}`);
     }
-    this.buckets = [];
-    this.bucketTownIds.clear();
+    this.farDirty = true;
+  }
+
+  private applyBuckets(): void {
+    const rebuildAll = this.allDirty;
+    const dirtyKeys = new Set(this.dirtyKeys);
+    this.dirtyKeys.clear();
+    this.allDirty = false;
+    this.bucketRebuilds = 0;
+
+    if (rebuildAll) this.clearBucketMeshes();
 
     const nearBuckets = new Map<string, Placement[]>();
     const far: Placement[] = [];
@@ -364,19 +410,59 @@ export class CityLayer {
     }
 
     for (const [key, placements] of nearBuckets) {
+      if (!rebuildAll && this.bucketByKey.has(key) && !dirtyKeys.has(key)) continue;
+      this.removeBucket(key);
       const [archetypeName, variantText] = key.split(':');
       const archetype = (archetypeName ?? 'house') as BuildingArchetype;
       const variant = Number.parseInt(variantText ?? '0', 10);
       const geometry = this.geometryFor(archetype, variant, this.detail);
       const mesh = this.createBucket(geometry, placements, `city-${key}`);
-      this.buckets.push(mesh);
+      this.bucketByKey.set(key, mesh);
+    }
+
+    for (const key of [...this.bucketByKey.keys()]) {
+      if (!nearBuckets.has(key)) this.removeBucket(key);
     }
 
     if (far.length > 0) {
-      const geometry = this.distantGeometryFor();
-      const mesh = this.createBucket(geometry, far, 'city-far');
-      this.buckets.push(mesh);
+      if (rebuildAll || this.farDirty || !this.farBucket) {
+        this.removeFarBucket();
+        this.farBucket = this.createBucket(this.distantGeometryFor(), far, 'city-far');
+      }
+    } else {
+      this.removeFarBucket();
     }
+    this.farDirty = false;
+
+    this.buckets = [...this.bucketByKey.values()];
+    if (this.farBucket) this.buckets.push(this.farBucket);
+  }
+
+  private removeBucket(key: string): void {
+    const mesh = this.bucketByKey.get(key);
+    if (!mesh) return;
+    this.bucketByKey.delete(key);
+    this.removeBucketMesh(mesh);
+  }
+
+  private removeFarBucket(): void {
+    if (!this.farBucket) return;
+    this.removeBucketMesh(this.farBucket);
+    this.farBucket = null;
+  }
+
+  private removeBucketMesh(mesh: THREE.InstancedMesh): void {
+    this.group.remove(mesh);
+    this.bucketTownIds.delete(mesh);
+    mesh.dispose();
+  }
+
+  private clearBucketMeshes(): void {
+    for (const mesh of this.bucketByKey.values()) this.removeBucketMesh(mesh);
+    this.bucketByKey.clear();
+    this.removeFarBucket();
+    this.buckets = [];
+    this.bucketTownIds.clear();
   }
 
   private createBucket(
@@ -386,6 +472,7 @@ export class CityLayer {
   ): THREE.InstancedMesh {
     const mesh = new THREE.InstancedMesh(geometry, this.material, placements.length);
     mesh.name = name;
+    this.bucketRebuilds += 1;
     mesh.castShadow = this.shadows && name !== 'city-far';
     mesh.receiveShadow = true;
     mesh.frustumCulled = true;
@@ -667,15 +754,13 @@ export class CityLayer {
   }
 
   private clear(): void {
-    for (const mesh of this.buckets) {
-      this.group.remove(mesh);
-      mesh.dispose();
-    }
-    this.buckets = [];
-    this.bucketTownIds.clear();
+    this.clearBucketMeshes();
     this.towns.clear();
     this.clearPlinths();
     this.clearStations();
+    this.dirtyKeys.clear();
+    this.allDirty = true;
+    this.farDirty = true;
   }
 
   private clearStations(): void {
@@ -702,6 +787,10 @@ export class CityLayer {
   dispose(): void {
     this.clear();
     this.group.clear();
+    this.signature = 0;
+    this.builds = 0;
+    this.lodSwitches = 0;
+    this.bucketRebuilds = 0;
     for (const geometry of this.geometryCache.values()) geometry.dispose();
     this.geometryCache.clear();
     this.distantGeometry?.dispose();
@@ -716,11 +805,52 @@ export class CityLayer {
     this.stationBaseMaterial.dispose();
     this.material.dispose();
     this.map = null;
+    this.townSnapshots = [];
   }
 
   get mapSnapshot(): MapSnapshot | null {
     return this.map;
   }
+}
+
+/** Empreinte stable des villes + tuiles house + hauteurs + détail. */
+export function computeCitySignature(
+  towns: readonly TownSnapshot[],
+  map: MapSnapshot,
+  detail: BuildingDetail,
+): number {
+  let hash = 0x811c9dc5;
+  const mix = (value: number): void => {
+    hash = Math.imul(hash ^ (value | 0), 0x01000193) >>> 0;
+  };
+  mix(map.width);
+  mix(map.height);
+  mix(detail);
+  mix(towns.length);
+  // Seule la zone lue par `build` autour de chaque ville compte : inutile de
+  // hacher les 262 144 tuiles d'une carte 512 à chaque snapshot.
+  const radius = MAX_RADIUS + 1;
+  for (const town of towns) {
+    const centreX = Math.floor(town.x);
+    const centreY = Math.floor(town.y);
+    mix(town.id);
+    mix(centreX);
+    mix(centreY);
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      const y = centreY + dy;
+      if (y < 0 || y >= map.height) continue;
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        const x = centreX + dx;
+        if (x < 0 || x >= map.width) continue;
+        const index = y * map.width + x;
+        // Une tuile house, une hauteur ou un voisin de pente qui change doit
+        // reposer les bâtiments et leurs plinthes.
+        mix(map.kind[index] === TILE_KIND_INDEX.house ? 1 : 0);
+        mix(map.heightMap[index] ?? 0);
+      }
+    }
+  }
+  return hash >>> 0;
 }
 
 /** Signature stable des gares + dimensions de carte, pour éviter les rebuilds. */

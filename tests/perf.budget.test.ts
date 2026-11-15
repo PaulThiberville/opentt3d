@@ -376,7 +376,7 @@ describe('budgets CityLayer', () => {
 // Végétation
 // ---------------------------------------------------------------------------
 describe('budgets VegetationLayer', () => {
-  it('respecte le plafond d’arbres du preset et 2 draw calls', () => {
+  it('respecte le plafond d’arbres du preset et le budget de chunks', () => {
     const map = makeMap(64, 64, (fixture) => {
       fillRect(fixture, 0, 0, 64, 64, TILE_KIND_INDEX.trees);
     });
@@ -387,13 +387,24 @@ describe('budgets VegetationLayer', () => {
         const settings = qualitySettings(quality);
         expect(layer.count).toBeLessThanOrEqual(settings.maxTrees);
         expect(layer.count).toBeGreaterThan(0);
-        expect(layer.drawCallCount).toBe(2);
+        // #24 : la végétation est chunkée pour le frustum culling. Chaque
+        // chunk proche porte tronc + houppier, un chunk lointain seulement le
+        // houppier basse définition. Le plafond reste 16 chunks (32 draw calls).
+        expect(layer.chunkCount).toBeLessThanOrEqual(16);
+        expect(layer.drawCallCount).toBe(layer.chunkCount * 2);
         const stats = groupStats(layer.group);
-        expect(stats.drawCalls).toBe(2);
+        expect(stats.drawCalls).toBe(layer.drawCallCount);
         expect(stats.triangles).toBeLessThanOrEqual(
           layer.count * BUDGETS.vegetationTrianglesPerTree,
         );
         expect(stats.triangles).toBeGreaterThan(0);
+
+        // Vue carte : les troncs disparaissent, un draw call par chunk.
+        layer.update(0, new THREE.Vector3(10_000, 0, 10_000));
+        expect(layer.farChunkCount).toBe(layer.chunkCount);
+        expect(layer.drawCallCount).toBe(layer.chunkCount);
+        expect(groupStats(layer.group).drawCalls).toBe(layer.chunkCount);
+        expect(layer.count).toBeLessThanOrEqual(settings.maxTrees);
       } finally {
         layer.dispose();
       }

@@ -357,6 +357,16 @@ export class BuildOverlay {
   }
 
   dispose(): void {
+    this.group.remove(
+      this.tiles,
+      this.line,
+      this.outline,
+      this.platformLines,
+      this.marker,
+      this.signalPole,
+      this.signalLight,
+    );
+    this.tiles.dispose();
     this.tiles.geometry.dispose();
     this.tileMaterial.dispose();
     this.line.geometry.dispose();

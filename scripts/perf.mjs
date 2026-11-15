@@ -91,9 +91,9 @@ const BUDGETS = {
   /** Ressources GPU vivantes créées pendant un scénario (hors warmup). */
   resourceGrowth: 48,
   /**
-   * Taux toléré pendant une construction active. Une fuite connue existe
-   * (attribut `aPhase` de la végétation remplacé sans dispose) : le budget
-   * l'encadre pour détecter une aggravation sans bloquer la CI.
+   * Taux toléré pendant une construction active. La fuite `aPhase` de la
+   * végétation est corrigée (#24) : le reste vient des reconstructions
+   * légitimes de chunks/buckets, encadrées pour détecter une aggravation.
    */
   resourceGrowthPerMinute: 400,
   /** Plancher de ressources encore vivantes après `session.dispose()`. */
@@ -1769,7 +1769,7 @@ function evaluateBudgets(run, quality, size, rendererKind) {
         (resourceGrowth / run.durationSeconds) * 60,
         BUDGETS.resourceGrowthPerMinute,
         'lte',
-        'fuite connue : attribut aPhase de la végétation',
+        'reconstructions légitimes (chunks, buckets)',
       );
     } else {
       // Fenêtre courte : le taux extrapolé est trop bruité, on borne le delta.
