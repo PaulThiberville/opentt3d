@@ -126,6 +126,9 @@ function buildBusCity(): THREE.BufferGeometry[] {
     extrudeShape(busCityShape(), 0.34, MODEL_COLOURS.body),
     box(0.96, 0.035, 0.006, MODEL_COLOURS.bodyShade, 0, 0.245, 0.173),
     box(0.96, 0.035, 0.006, MODEL_COLOURS.bodyShade, 0, 0.245, -0.173),
+    // Filet clair de livrée : il ne prend pas la teinte d'entreprise.
+    box(0.96, 0.018, 0.007, MODEL_COLOURS.accent, 0, 0.274, 0.174),
+    box(0.96, 0.018, 0.007, MODEL_COLOURS.accent, 0, 0.274, -0.174),
     // Bandes vitrées latérales découpées par des montants.
     box(0.14, 0.17, 0.012, MODEL_COLOURS.glass, -0.35, 0.365, 0.172),
     box(0.14, 0.17, 0.012, MODEL_COLOURS.glass, -0.17, 0.365, 0.172),
@@ -277,6 +280,10 @@ function truckCabParts(centreX: number): THREE.BufferGeometry[] {
     // Portière, poignée et marchepied.
     box(0.012, 0.28, 0.008, MODEL_COLOURS.chassis, centreX - 0.1, 0.3, 0.174),
     box(0.012, 0.28, 0.008, MODEL_COLOURS.chassis, centreX - 0.1, 0.3, -0.174),
+    // Filet de livrée sur la portière et rappel sur le toit.
+    box(0.022, 0.12, 0.012, MODEL_COLOURS.accent, centreX - 0.06, 0.36, 0.176),
+    box(0.022, 0.12, 0.012, MODEL_COLOURS.accent, centreX - 0.06, 0.36, -0.176),
+    box(0.03, 0.022, 0.1, MODEL_COLOURS.accent, centreX + 0.14, 0.607, 0),
     box(0.05, 0.03, 0.05, MODEL_COLOURS.chassis, centreX + 0.19, 0.44, 0.2),
     box(0.05, 0.03, 0.05, MODEL_COLOURS.chassis, centreX + 0.19, 0.44, -0.2),
     box(0.12, 0.02, 0.12, MODEL_COLOURS.chassis, centreX - 0.12, 0.16, 0.13),
@@ -371,6 +378,17 @@ function buildTruckTanker(): THREE.BufferGeometry[] {
       x: -0.42,
       y: 0.36,
     }),
+    // Deux filets clairs cerclent la citerne : livrée lisible même de loin.
+    cylinder(0.158, 0.158, 0.022, 14, MODEL_COLOURS.accent, {
+      axis: 'x',
+      x: -0.06,
+      y: 0.36,
+    }),
+    cylinder(0.158, 0.158, 0.022, 14, MODEL_COLOURS.accent, {
+      axis: 'x',
+      x: -0.36,
+      y: 0.36,
+    }),
     box(0.72, 0.03, 0.1, MODEL_COLOURS.metal, -0.21, 0.53, 0),
     cylinder(0.045, 0.045, 0.05, 8, MODEL_COLOURS.metal, { x: -0.2, y: 0.55, z: 0 }),
     cylinder(0.055, 0.055, 0.02, 8, MODEL_COLOURS.chassis, { x: -0.2, y: 0.577, z: 0 }),
@@ -451,6 +469,17 @@ function buildTrainSteam(): THREE.BufferGeometry[] {
       x: -0.12,
       y: 0.4,
     }),
+    // Filet clair et collier de laiton sur la chaudière.
+    cylinder(0.151, 0.151, 0.022, 12, MODEL_COLOURS.accent, {
+      axis: 'x',
+      x: 0.3,
+      y: 0.4,
+    }),
+    cylinder(0.151, 0.151, 0.018, 12, MODEL_COLOURS.brass, {
+      axis: 'x',
+      x: 0.06,
+      y: 0.4,
+    }),
     // Dômes vapeur et sable.
     cylinder(0.052, 0.062, 0.075, 8, MODEL_COLOURS.body, { x: 0.2, y: 0.52, z: 0 }),
     cylinder(0.022, 0.022, 0.03, 8, MODEL_COLOURS.metal, { x: 0.2, y: 0.57, z: 0 }),
@@ -467,6 +496,9 @@ function buildTrainSteam(): THREE.BufferGeometry[] {
     box(0.11, 0.15, 0.012, MODEL_COLOURS.glass, -0.5, 0.44, -0.172),
     box(0.012, 0.15, 0.24, MODEL_COLOURS.glass, -0.185, 0.44, 0),
     box(0.012, 0.27, 0.008, MODEL_COLOURS.chassis, -0.44, 0.31, 0.174),
+    // Filet de livrée sur la cabine.
+    box(0.4, 0.018, 0.009, MODEL_COLOURS.accent, -0.4, 0.53, 0.174),
+    box(0.4, 0.018, 0.009, MODEL_COLOURS.accent, -0.4, 0.53, -0.174),
     // Boucliers, attelage, lanterne et chasse-pierres.
     box(0.05, 0.1, 0.34, MODEL_COLOURS.chassis, 0.665, 0.19, 0),
     box(0.05, 0.1, 0.34, MODEL_COLOURS.chassis, -0.69, 0.19, 0),
@@ -551,6 +583,19 @@ function buildTrainCoach(): THREE.BufferGeometry[] {
     box(0.012, 0.32, 0.008, MODEL_COLOURS.chassis, 0.56, 0.33, -0.168),
     box(1.15, 0.03, 0.008, MODEL_COLOURS.bodyShade, 0, 0.27, 0.168),
     box(1.15, 0.03, 0.008, MODEL_COLOURS.bodyShade, 0, 0.27, -0.168),
+    box(1.15, 0.016, 0.009, MODEL_COLOURS.accent, 0, 0.291, 0.169),
+    box(1.15, 0.016, 0.009, MODEL_COLOURS.accent, 0, 0.291, -0.169),
+    // Main courante des portes.
+    box(0.016, 0.2, 0.012, MODEL_COLOURS.metal, -0.535, 0.37, 0.174),
+    box(0.016, 0.2, 0.012, MODEL_COLOURS.metal, 0.535, 0.37, 0.174),
+    box(0.016, 0.2, 0.012, MODEL_COLOURS.metal, -0.535, 0.37, -0.174),
+    box(0.016, 0.2, 0.012, MODEL_COLOURS.metal, 0.535, 0.37, -0.174),
+    // Filet clair au-dessus du bandeau, lisible de loin.
+    box(1.15, 0.016, 0.009, MODEL_COLOURS.accent, 0, 0.291, 0.169),
+    box(1.15, 0.016, 0.009, MODEL_COLOURS.accent, 0, 0.291, -0.169),
+    // Poignées et rambardes de porte.
+    box(0.02, 0.05, 0.012, MODEL_COLOURS.metal, -0.53, 0.35, 0.174),
+    box(0.02, 0.05, 0.012, MODEL_COLOURS.metal, 0.53, 0.35, 0.174),
     // Toit et aérateurs.
     beveledBox(1.1, 0.035, 0.3, MODEL_COLOURS.roof, { y: 0.615, radius: 0.012 }),
     beveledBox(0.14, 0.035, 0.14, MODEL_COLOURS.bodyShade, {
@@ -596,6 +641,11 @@ function buildTrainFreight(): THREE.BufferGeometry[] {
     box(0.024, 0.32, 0.026, MODEL_COLOURS.bodyShade, 0.34, 0.36, -0.168),
     box(0.94, 0.025, 0.028, MODEL_COLOURS.trim, 0, 0.5225, 0.168),
     box(0.94, 0.025, 0.028, MODEL_COLOURS.trim, 0, 0.5225, -0.168),
+    // Renforts métalliques et plaque d'immatriculation.
+    box(0.92, 0.014, 0.012, MODEL_COLOURS.metal, 0, 0.47, 0.172),
+    box(0.92, 0.014, 0.012, MODEL_COLOURS.metal, 0, 0.47, -0.172),
+    box(0.12, 0.05, 0.008, MODEL_COLOURS.accent, 0.12, 0.32, 0.173),
+    box(0.12, 0.05, 0.008, MODEL_COLOURS.accent, 0.12, 0.32, -0.173),
     // Chargement de charbon : trois tas déterministes.
     box(0.2, 0.18, 0.26, MODEL_COLOURS.cargo, -0.2, 0.43, 0),
     box(0.18, 0.16, 0.25, MODEL_COLOURS.cargo, 0.02, 0.42, 0, { rotateY: 0.08 }),
@@ -613,6 +663,11 @@ function buildTrainFreight(): THREE.BufferGeometry[] {
     hub(0.038, 0.008, MODEL_COLOURS.metal, -0.38, 0.075, -0.158),
     box(0.08, 0.05, 0.08, MODEL_COLOURS.metal, 0.59, 0.17, 0),
     box(0.08, 0.05, 0.08, MODEL_COLOURS.metal, -0.59, 0.17, 0),
+    // Lanternes de queue aux deux extrémités (le wagon roule dans les deux sens).
+    box(0.014, 0.045, 0.05, MODEL_COLOURS.tailLight, 0.5, 0.21, 0.09),
+    box(0.014, 0.045, 0.05, MODEL_COLOURS.tailLight, 0.5, 0.21, -0.09),
+    box(0.014, 0.045, 0.05, MODEL_COLOURS.tailLight, -0.5, 0.21, 0.09),
+    box(0.014, 0.045, 0.05, MODEL_COLOURS.tailLight, -0.5, 0.21, -0.09),
   ];
   return parts;
 }
@@ -640,6 +695,8 @@ function buildShip(): THREE.BufferGeometry[] {
     // Œuvre vive sombre, franc-bord teinté, pont.
     extrudePlan(shipPlan(0.95), 0.1, MODEL_COLOURS.chassis, { y: 0 }),
     extrudePlan(shipPlan(1), 0.16, MODEL_COLOURS.body, { y: 0.1 }),
+    // Ligne de flottaison rouge, indépendante de la livrée.
+    extrudePlan(shipPlan(0.985), 0.022, MODEL_COLOURS.hullRed, { y: 0.1 }),
     extrudePlan(shipPlan(0.9), 0.03, MODEL_COLOURS.wood, { y: 0.26 }),
     // Château et passerelle.
     beveledBox(0.36, 0.24, 0.34, MODEL_COLOURS.body, {
@@ -656,11 +713,21 @@ function buildShip(): THREE.BufferGeometry[] {
     // Cheminée et cerclage.
     cylinder(0.055, 0.06, 0.2, 10, MODEL_COLOURS.body, { x: -0.05, y: 0.58, z: 0 }),
     cylinder(0.062, 0.062, 0.045, 10, MODEL_COLOURS.chassis, { x: -0.05, y: 0.65, z: 0 }),
+    // Bande claire de cheminée et filet de pont.
+    cylinder(0.063, 0.063, 0.028, 10, MODEL_COLOURS.accent, {
+      x: -0.05,
+      y: 0.625,
+      z: 0,
+    }),
+    box(0.8, 0.014, 0.012, MODEL_COLOURS.accent, -0.02, 0.292, 0.198),
+    box(0.8, 0.014, 0.012, MODEL_COLOURS.accent, -0.02, 0.292, -0.198),
     // Mât, vergue et haubans.
     cylinder(0.008, 0.01, 0.3, 6, MODEL_COLOURS.metal, { x: 0.34, y: 0.42, z: 0 }),
     box(0.02, 0.01, 0.34, MODEL_COLOURS.metal, 0.34, 0.52, 0),
     box(0.008, 0.24, 0.008, MODEL_COLOURS.metal, 0.34, 0.4, 0.14),
     box(0.008, 0.24, 0.008, MODEL_COLOURS.metal, 0.34, 0.4, -0.14),
+    // Feu de tête de mât.
+    box(0.025, 0.03, 0.025, MODEL_COLOURS.lamp, 0.34, 0.585, 0),
     // Conteneurs sur le pont avant.
     beveledBox(0.22, 0.14, 0.26, MODEL_COLOURS.bodyShade, {
       x: 0.14,
@@ -794,6 +861,21 @@ function buildPlane(): THREE.BufferGeometry[] {
     // Livrée et immatriculation.
     box(0.9, 0.03, 0.008, MODEL_COLOURS.bodyShade, 0, 0.225, 0.106),
     box(0.9, 0.03, 0.008, MODEL_COLOURS.bodyShade, 0, 0.225, -0.106),
+    box(0.9, 0.012, 0.009, MODEL_COLOURS.accent, 0, 0.245, 0.107),
+    box(0.9, 0.012, 0.009, MODEL_COLOURS.accent, 0, 0.245, -0.107),
+    // Entrées d'air métalliques des réacteurs.
+    cylinder(0.052, 0.052, 0.018, 10, MODEL_COLOURS.metal, {
+      axis: 'x',
+      x: 0.182,
+      y: 0.235,
+      z: 0.36,
+    }),
+    cylinder(0.052, 0.052, 0.018, 10, MODEL_COLOURS.metal, {
+      axis: 'x',
+      x: 0.182,
+      y: 0.235,
+      z: -0.36,
+    }),
     box(0.012, 0.03, 0.06, MODEL_COLOURS.chassis, -0.35, 0.34, 0.095),
     // Train d'atterrissage.
     box(0.02, 0.14, 0.02, MODEL_COLOURS.chassis, 0.38, 0.13, 0),
