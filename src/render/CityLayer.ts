@@ -19,7 +19,7 @@
 import * as THREE from 'three';
 import type { CompanyId, MapSnapshot, StationSnapshot, TownSnapshot } from '../engine/protocol';
 import { COMPANY_NONE } from '../engine/protocol';
-import { sampleHeightWorld, tileKindFromIndex } from '../game/mapGrid';
+import { cornerHeightWorld, sampleHeightWorld, tileKindFromIndex } from '../game/mapGrid';
 import { Prng, hashUnit2d } from '../game/prng';
 import { companyColour, hexToRgb } from './tileVisuals';
 import { qualitySettings, type QualityLevel } from './quality';
@@ -28,6 +28,7 @@ import {
   chooseBuildingArchetype,
   createBuildingGeometry,
   createDistantBuildingGeometry,
+  createStationBaseGeometry,
   createStationHallGeometry,
   createStationPlatformGeometry,
   type BuildingArchetype,
@@ -56,6 +57,10 @@ interface Placement {
   tint: number;
   /** Dérive chaude/froide de la teinte, pour casser l'uniformité. */
   warmth: number;
+  /** Vide à combler sous le bâtiment quand la tuile est en pente. */
+  plinthHeight: number;
+  plinthWidth: number;
+  plinthDepth: number;
 }
 
 interface TownState {
@@ -74,6 +79,8 @@ interface StationPlacement {
   width: number;
   height: number;
   colour: number;
+  /** Hauteur de la terrasse locale (socle de gare uniquement). */
+  scaleY?: number;
 }
 
 export class CityLayer {
@@ -92,7 +99,15 @@ export class CityLayer {
   private platformGeometry: THREE.BufferGeometry | null = null;
   private stationHalls: THREE.InstancedMesh | null = null;
   private stationPlatforms: THREE.InstancedMesh | null = null;
+  private stationBases: THREE.InstancedMesh | null = null;
+  private stationBaseGeometry: THREE.BufferGeometry;
+  private stationBaseMaterial: THREE.MeshLambertMaterial;
+  private plinths: THREE.InstancedMesh | null = null;
+  private plinthGeometry: THREE.BufferGeometry;
+  private plinthMaterial: THREE.MeshLambertMaterial;
   private stationCount = 0;
+  private plinthCountValue = 0;
+  private stationBaseCountValue = 0;
   private stationSignature = 0;
   private stationStations: readonly StationSnapshot[] = [];
   private map: MapSnapshot | null = null;
@@ -134,6 +149,11 @@ export class CityLayer {
         );
     };
     this.material.customProgramCacheKey = () => 'opentt3d-building-windows-v2';
+    this.plinthGeometry = new THREE.BoxGeometry(1, 1, 1);
+    this.plinthGeometry.translate(0, 0.5, 0);
+    this.plinthMaterial = new THREE.MeshLambertMaterial({ color: 0x6b6355 });
+    this.stationBaseGeometry = createStationBaseGeometry();
+    this.stationBaseMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
     this.applyQuality('medium');
   }
 
@@ -188,7 +208,12 @@ export class CityLayer {
             scaleZ: rng.float(0.92, 1),
             tint: rng.float(0.9, 1.05),
             warmth: rng.float(-0.018, 0.018),
+            plinthHeight: 0,
+            plinthWidth: 0.7,
+            plinthDepth: 0.7,
           });
+          const placement = placements[placements.length - 1];
+          if (placement) this.describePlinth(placement, map, x, y);
         }
       }
 
@@ -223,7 +248,74 @@ export class CityLayer {
     }
 
     // Premier passage : tout en détail, la caméra affine au premier update.
+    this.buildPlinths();
     this.applyBuckets();
+  }
+
+  /** Calcule la plinthe locale d'une tuile en pente (jamais une dalle de ville). */
+  private describePlinth(placement: Placement, map: MapSnapshot, x: number, y: number): void {
+    const minCorner = Math.min(
+      cornerHeightWorld(map, x, y),
+      cornerHeightWorld(map, x + 1, y),
+      cornerHeightWorld(map, x, y + 1),
+      cornerHeightWorld(map, x + 1, y + 1),
+    );
+    const gap = placement.ground - minCorner;
+    if (gap <= 0.02) return;
+    const geometry = this.geometryFor(placement.archetype, placement.variant, this.detail);
+    geometry.computeBoundingBox();
+    const box = geometry.boundingBox;
+    const width = box ? box.max.x - box.min.x : 0.72;
+    const depth = box ? box.max.z - box.min.z : 0.72;
+    placement.plinthHeight = gap + 0.025;
+    placement.plinthWidth = Math.min(0.9, width * placement.scaleX * 0.94);
+    placement.plinthDepth = Math.min(0.9, depth * placement.scaleZ * 0.94);
+  }
+
+  /** Une seule instance de plinthe par bâtiment en pente, jamais un aplat global. */
+  private buildPlinths(): void {
+    this.clearPlinths();
+    const placements: Placement[] = [];
+    for (const town of this.towns.values()) {
+      for (const placement of town.placements) {
+        if (placement.plinthHeight > 0.02) placements.push(placement);
+      }
+    }
+    if (placements.length === 0) return;
+    const mesh = new THREE.InstancedMesh(
+      this.plinthGeometry,
+      this.plinthMaterial,
+      placements.length,
+    );
+    mesh.name = 'city-plinths';
+    mesh.castShadow = this.shadows;
+    mesh.receiveShadow = true;
+    for (let index = 0; index < placements.length; index += 1) {
+      const placement = placements[index];
+      if (!placement) continue;
+      this.position.set(
+        placement.x,
+        placement.ground - placement.plinthHeight + 0.025,
+        placement.z,
+      );
+      this.quaternion.setFromAxisAngle(this.yawAxis, placement.yaw);
+      this.scale.set(placement.plinthWidth, placement.plinthHeight, placement.plinthDepth);
+      this.matrix.compose(this.position, this.quaternion, this.scale);
+      mesh.setMatrixAt(index, this.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.computeBoundingSphere();
+    this.group.add(mesh);
+    this.plinths = mesh;
+    this.plinthCountValue = placements.length;
+  }
+
+  private clearPlinths(): void {
+    if (!this.plinths) return;
+    this.group.remove(this.plinths);
+    this.plinths.dispose();
+    this.plinths = null;
+    this.plinthCountValue = 0;
   }
 
   /** Change le niveau de détail des bâtiments (qualité graphique). */
@@ -377,55 +469,111 @@ export class CityLayer {
 
     const halls: StationPlacement[] = [];
     const platforms: StationPlacement[] = [];
+    const bases: StationPlacement[] = [];
     for (const station of visible) {
       const width = Math.max(1, station.width);
       const height = Math.max(1, station.height);
-      const centreX = station.x + width / 2;
-      const centreZ = station.y + height / 2;
       const yaw = width >= height ? 0 : Math.PI / 2;
-      const ground = sampleHeightWorld(map, centreX, centreZ);
+      const colour = stationColour(station.company);
+      // La halle tient sur UNE tuile : elle ne couvre jamais toute l'emprise.
+      const hallX = station.x + 0.5;
+      const hallZ = station.y + 0.5;
+      const hallGround = sampleHeightWorld(map, hallX, hallZ);
       halls.push({
-        x: centreX,
-        z: centreZ,
-        ground,
+        x: hallX,
+        z: hallZ,
+        ground: hallGround,
         yaw,
-        width: Math.min(1.5, Math.max(0.75, width * 0.55)),
-        height: Math.min(1.1, Math.max(0.75, height * 0.5)),
-        colour: stationColour(station.company),
+        width: 0.95,
+        height: 0.95,
+        colour,
       });
+      this.pushStationBase(bases, map, hallX, hallZ, hallGround, 0.82, yaw);
+      // Les aéroports gardent leur tarmac dessiné par le terrain : pas de
+      // canopée de quai sur 3×3 tuiles. Seul le terminal est posé.
+      if (station.kind === 'airport') continue;
       for (let tileY = 0; tileY < height; tileY += 1) {
         for (let tileX = 0; tileX < width; tileX += 1) {
           if (platforms.length >= MAX_STATION_TILES) break;
           const x = station.x + tileX + 0.5;
           const z = station.y + tileY + 0.5;
+          const ground = sampleHeightWorld(map, x, z);
           platforms.push({
             x,
             z,
-            ground: sampleHeightWorld(map, x, z),
+            ground,
             yaw,
             width: 0.95,
             height: 0.95,
-            colour: stationColour(station.company),
+            colour,
           });
+          this.pushStationBase(bases, map, x, z, ground, 0.9, yaw);
         }
       }
     }
 
     this.stationHalls = this.createStationMesh(hallGeometry, halls, 'station-halls');
-    this.stationPlatforms = this.createStationMesh(
-      platformGeometry,
-      platforms,
-      'station-platforms',
-    );
+    if (platforms.length > 0) {
+      this.stationPlatforms = this.createStationMesh(
+        platformGeometry,
+        platforms,
+        'station-platforms',
+      );
+    }
+    if (bases.length > 0) {
+      this.stationBases = this.createStationMesh(
+        this.stationBaseGeometry,
+        bases,
+        'station-bases',
+        this.stationBaseMaterial,
+      );
+    }
     this.stationCount = visible.length;
+    this.stationBaseCountValue = bases.length;
+  }
+
+  /**
+   * Ajoute une petite terrasse locale sous une tuile de gare si la pente crée
+   * un vide. C'est une instance par tuile, jamais une plaque multi-tuiles.
+   */
+  private pushStationBase(
+    bases: StationPlacement[],
+    map: MapSnapshot,
+    x: number,
+    z: number,
+    ground: number,
+    footprint: number,
+    yaw: number,
+  ): void {
+    const tileX = Math.floor(x);
+    const tileY = Math.floor(z);
+    const minCorner = Math.min(
+      cornerHeightWorld(map, tileX, tileY),
+      cornerHeightWorld(map, tileX + 1, tileY),
+      cornerHeightWorld(map, tileX, tileY + 1),
+      cornerHeightWorld(map, tileX + 1, tileY + 1),
+    );
+    const gap = ground - minCorner;
+    if (gap <= 0.02) return;
+    bases.push({
+      x,
+      z,
+      ground: minCorner,
+      yaw,
+      width: footprint,
+      height: footprint,
+      colour: 0xffffff,
+      scaleY: gap + 0.025,
+    });
   }
 
   private createStationMesh(
     geometry: THREE.BufferGeometry,
     placements: readonly StationPlacement[],
     name: string,
+    material: THREE.Material = this.material,
   ): THREE.InstancedMesh {
-    const mesh = new THREE.InstancedMesh(geometry, this.material, placements.length);
+    const mesh = new THREE.InstancedMesh(geometry, material, placements.length);
     mesh.name = name;
     mesh.castShadow = this.shadows;
     mesh.receiveShadow = true;
@@ -434,7 +582,7 @@ export class CityLayer {
       if (!placement) continue;
       this.position.set(placement.x, placement.ground, placement.z);
       this.quaternion.setFromAxisAngle(this.yawAxis, placement.yaw);
-      this.scale.set(placement.width, 1, placement.height);
+      this.scale.set(placement.width, placement.scaleY ?? 1, placement.height);
       this.matrix.compose(this.position, this.quaternion, this.scale);
       mesh.setMatrixAt(index, this.matrix);
       hexToRgb(placement.colour, this.rgb);
@@ -471,6 +619,8 @@ export class CityLayer {
     }
     if (this.stationHalls) this.stationHalls.castShadow = enabled;
     if (this.stationPlatforms) this.stationPlatforms.castShadow = enabled;
+    if (this.stationBases) this.stationBases.castShadow = enabled;
+    if (this.plinths) this.plinths.castShadow = enabled;
   }
 
   get buildingCount(): number {
@@ -483,8 +633,23 @@ export class CityLayer {
     return this.stationCount;
   }
 
+  /** Socles locaux de gare (diagnostic/tests). */
+  get stationBaseCount(): number {
+    return this.stationBaseCountValue;
+  }
+
+  /** Plinthes de bâtiments en pente (diagnostic/tests). */
+  get plinthCount(): number {
+    return this.plinthCountValue;
+  }
+
   get drawCallCount(): number {
-    return this.buckets.length + (this.stationHalls ? 1 : 0) + (this.stationPlatforms ? 1 : 0);
+    return (
+      this.buckets.length +
+      (this.stationHalls ? 1 : 0) +
+      (this.stationPlatforms ? 1 : 0) +
+      (this.stationBases ? 1 : 0)
+    );
   }
 
   /** Nombre de villes affichées en silhouette simplifiée (diagnostic). */
@@ -519,6 +684,7 @@ export class CityLayer {
     this.buckets = [];
     this.bucketTownIds.clear();
     this.towns.clear();
+    this.clearPlinths();
     this.clearStations();
   }
 
@@ -533,6 +699,12 @@ export class CityLayer {
       this.stationPlatforms.dispose();
       this.stationPlatforms = null;
     }
+    if (this.stationBases) {
+      this.group.remove(this.stationBases);
+      this.stationBases.dispose();
+      this.stationBases = null;
+    }
+    this.stationBaseCountValue = 0;
     this.stationCount = 0;
     this.stationSignature = 0;
   }
@@ -548,6 +720,10 @@ export class CityLayer {
     this.hallGeometry = null;
     this.platformGeometry?.dispose();
     this.platformGeometry = null;
+    this.plinthGeometry.dispose();
+    this.plinthMaterial.dispose();
+    this.stationBaseGeometry.dispose();
+    this.stationBaseMaterial.dispose();
     this.material.dispose();
     this.map = null;
   }

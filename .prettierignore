@@ -9,3 +9,7 @@ engine/build-host/
 engine/.cache/
 public/
 *.wasm
+
+# Artefacts d’outils/agents
+.playwright-cli/
+e2e-out/

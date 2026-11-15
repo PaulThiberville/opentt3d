@@ -20,3 +20,7 @@ public/engine/
 .idea/
 .vscode/
 *.swp
+
+# Artefacts d’outils/agents
+.playwright-cli/
+e2e-out/
