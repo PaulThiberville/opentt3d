@@ -206,9 +206,15 @@ describe('panneau véhicule', () => {
       7,
       true,
     );
-    expect(view?.orders).toEqual([
-      { index: 0, label: 'Arrêt de Valmont', kind: 'station' },
-      { index: 1, label: 'Dépôt (2, 2)', kind: 'depot' },
+    expect(view?.orders).toMatchObject([
+      {
+        index: 0,
+        label: 'Arrêt de Valmont',
+        kind: 'station',
+        action: 'normal',
+        current: false,
+      },
+      { index: 1, label: 'Dépôt (2, 2)', kind: 'depot', action: 'normal', current: false },
     ]);
     expect(view?.canStart).toBe(true);
     expect(view?.canStop).toBe(false);
@@ -219,5 +225,99 @@ describe('panneau véhicule', () => {
   it('retourne null pour un véhicule disparu', () => {
     expect(describeVehiclePanel(snapshot([]), makeMap(), 7, false)).toBeNull();
     expect(describeVehiclePanel(null, makeMap(), 7, false)).toBeNull();
+  });
+
+  it('liste les refits du modèle avec capacité, coût et perte', () => {
+    const view = describeVehiclePanel(
+      snapshot([
+        vehicle({
+          model: 'truck_flatbed',
+          cargo: { type: 'goods', amount: 12, capacity: 30 },
+          status: 3,
+        }),
+      ]),
+      makeMap(),
+      7,
+      false,
+    );
+    expect(view?.modelName).toBe('Camion plateau');
+    expect(view?.cargo).toEqual({ label: 'Marchandises', amount: 12, capacity: 30, percent: 40 });
+    expect(view?.cargoAtRisk).toBe(12);
+    expect(view?.inDepot).toBe(true);
+    expect(view?.refits.map((refit) => refit.cargo)).toEqual([
+      'goods',
+      'coal',
+      'grain',
+      'wood',
+      'steel',
+    ]);
+    expect(view?.refits.find((refit) => refit.cargo === 'goods')?.available).toBe(false);
+    const coal = view?.refits.find((refit) => refit.cargo === 'coal');
+    expect(coal?.available).toBe(true);
+    expect(coal?.capacity).toBe(34);
+    expect(coal?.cost).toBe(560);
+  });
+
+  it('désactive le refit hors dépôt et pour un modèle inconnu', () => {
+    const view = describeVehiclePanel(
+      snapshot([vehicle({ model: 'truck_flatbed', status: 1 })]),
+      makeMap(),
+      7,
+      false,
+    );
+    expect(view?.refits.every((refit) => !refit.available)).toBe(true);
+    expect(view?.refits[0]?.reason).toContain('dépôt');
+
+    const unknown = describeVehiclePanel(
+      snapshot([vehicle({ model: 'modele_inconnu', status: 3 })]),
+      makeMap(),
+      7,
+      false,
+    );
+    // Repli par type/cargaison : le panneau reste utilisable.
+    expect(unknown?.refits.length).toBeGreaterThan(0);
+  });
+
+  it('affiche les options d’ordre et marque l’ordre courant', () => {
+    const view = describeVehiclePanel(
+      snapshot([
+        vehicle({
+          status: 1,
+          currentOrder: 2,
+          orderTargets: [3, 5],
+          orderKinds: ['station', 'depot'],
+          orderDetails: [
+            {
+              index: 0,
+              target: 3,
+              kind: 'station',
+              options: { action: 'full_load', timetable: { waitTicks: 120, autostart: true } },
+            },
+            {
+              index: 1,
+              target: -1,
+              kind: 'conditional',
+              options: {
+                condition: { type: 'percentage', comparator: 'more_or_equal', value: 80 },
+                jump: 2,
+              },
+            },
+            { index: 2, target: 5, kind: 'depot', options: { action: 'transfer' } },
+          ],
+        }),
+      ]),
+      makeMap(),
+      7,
+      false,
+    );
+    expect(view?.orders.map((order) => order.kind)).toEqual(['station', 'conditional', 'depot']);
+    expect(view?.orders[0]?.actionLabel).toBe('Plein chargement');
+    expect(view?.orders[0]?.timetableLabel).toContain('attente 120 t');
+    expect(view?.orders[1]?.conditionLabel).toContain('Chargement');
+    expect(view?.orders[1]?.jumpLabel).toContain('ordre 3');
+    expect(view?.orders[2]?.actionLabel).toBe('Transfert');
+    expect(view?.orders[2]?.current).toBe(true);
+    expect(view?.currentOrder).toBe(2);
+    expect(view?.shareCandidates.length).toBe(0);
   });
 });
