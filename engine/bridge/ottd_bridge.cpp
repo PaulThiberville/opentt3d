@@ -2,10 +2,11 @@
  * OpenTT3D - pont C++ entre OpenTTD (WebAssembly) et le frontend JavaScript.
  *
  * Ce fichier est compilé dans le binaire Emscripten et expose une API C
- * stable (voir `engine/README` du wiki et `src/engine/protocol.ts`).
+ * stable (voir le wiki, section Architecture > Protocole, et
+ * `src/engine/protocol.ts`).
  *
  * Principe : le pilote vidéo "web" (engine/bridge/web_v.cpp) rend la main
- * après l'initialisation ; ici, nous pompns explicitement la boucle de jeu
+ * après l'initialisation ; ici, nous pompons explicitement la boucle de jeu
  * (`GameLoop` + `InputLoop` + `UpdateWindows`) tick par tick, sans timer ni
  * rendu, ce qui garantit un comportement déterministe et testable sous Node.
  *
@@ -15,9 +16,7 @@
 #include "stdafx.h"
 
 #include "company_base.h"
-#include "company_cmd.h"
 #include "company_func.h"
-#include "console_func.h"
 #include "core/random_func.hpp"
 #include "debug.h"
 #include "gfx_func.h"
@@ -25,19 +24,16 @@
 #include "industry.h"
 #include "map_func.h"
 #include "openttd.h"
-#include "progress.h"
 #include "settings_type.h"
 #include "station_base.h"
 #include "tile_map.h"
 #include "timer/timer_game_calendar.h"
-#include "timer/timer_game_economy.h"
 #include "timer/timer_game_tick.h"
 #include "town.h"
 #include "vehicle_base.h"
 #include "window_func.h"
 
 #include <algorithm>
-#include <cstring>
 #include <emscripten.h>
 
 #include "safeguards.h"
