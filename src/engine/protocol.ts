@@ -79,7 +79,7 @@ export interface MapSnapshot {
   /** Uint8Array, valeurs = TILE_KIND_INDEX */
   kind: Uint8Array;
   /** Uint8Array, hauteur 0..15 (demi-niveaux OpenTTD) */
-  height: Uint8Array;
+  heightMap: Uint8Array;
   /** Uint8Array, entreprise propriétaire ou COMPANY_NONE */
   owner: Uint8Array;
   /** Uint8Array, pente OpenTTD (0 = plat) */
