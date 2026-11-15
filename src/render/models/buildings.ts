@@ -5,8 +5,10 @@
  * prismes, cylindres et plans fusionnée en UNE géométrie à couleurs de
  * sommets. Les fenêtres sont des quads (2 triangles) marqués par l'attribut
  * `aWindow` : le shader de nuit les allume sans draw call ni matériau
- * supplémentaire. Les modèles sont exprimés dans une empreinte unitaire
- * (1×1 tuile, base à y = 0) puis posés par `InstancedMesh`.
+ * supplémentaire. `aFinish` et `aGlow` distinguent verre, métal, toits satinés
+ * et sources lumineuses ; le matériau `MeshStandardMaterial` partagé applique
+ * rugosité, reflet de verre et émission. Les modèles sont exprimés dans une
+ * empreinte unitaire (1×1 tuile, base à y = 0) puis posés par `InstancedMesh`.
  *
  * Budget : chaque archétype reste largement sous 2 000 triangles, y compris
  * au niveau de détail maximal. Les variantes sont déterministes : une même
@@ -15,7 +17,8 @@
 
 import * as THREE from 'three';
 import { Prng, hashUnit2d } from '../../game/prng';
-import { hexToRgb } from '../tileVisuals';
+import { hexToRgb, mixColour, weatherColour } from '../tileVisuals';
+import { MODEL_FINISH, MODEL_GLOW, type ModelFinish, type ModelGlow } from './materials';
 
 export type BuildingArchetype = 'house' | 'apartment' | 'shop' | 'church' | 'warehouse';
 
@@ -61,12 +64,27 @@ const DOOR = 0x4a3527;
 const TRIM = 0xe6dfcf;
 const LIT_WINDOW = 1;
 
+/** Teintes de vitrage utilisées par les archétypes (finition verre). */
+const GLASS_COLOURS = new Set<number>([GLASS, 0x40525f, 0x2c3b45, 0x3d4e6b, 0x3d4a55, 0x33383b]);
+
+/** Couleurs de livrée qui doivent rester exactement blanches. */
+const PURE_WHITE = 0xffffff;
+
+function finishForBuildingColour(colour: number): ModelFinish {
+  if (GLASS_COLOURS.has(colour)) return MODEL_FINISH.glass;
+  if (colour === DOOR || colour === TRIM) return MODEL_FINISH.accent;
+  if (colour === 0x8a8f94 || colour === 0x6b7176) return MODEL_FINISH.metal;
+  return MODEL_FINISH.paint;
+}
+
 /** Petit constructeur de géométrie fusionnée, à couleurs de sommets. */
 class ModelBuilder {
   private positions: number[] = [];
   private normals: number[] = [];
   private colours: number[] = [];
   private windows: number[] = [];
+  private finishes: number[] = [];
+  private glows: number[] = [];
   private rgb = { r: 0, g: 0, b: 0 };
   private matrix = new THREE.Matrix4();
   private position = new THREE.Vector3();
@@ -84,7 +102,13 @@ class ModelBuilder {
     height: number,
     depth: number,
     colour: number,
-    options: { yaw?: number; tiltZ?: number; window?: number } = {},
+    options: {
+      yaw?: number;
+      tiltZ?: number;
+      window?: number;
+      finish?: ModelFinish;
+      glow?: ModelGlow;
+    } = {},
   ): void {
     this.euler.set(0, options.yaw ?? 0, options.tiltZ ?? 0, 'YXZ');
     this.quaternion.setFromEuler(this.euler);
@@ -96,17 +120,41 @@ class ModelBuilder {
     const position = flat.getAttribute('position');
     const normal = flat.getAttribute('normal');
     const window = options.window ?? 0;
+    const finish = options.finish ?? finishForBuildingColour(colour);
+    const glow = options.glow ?? MODEL_GLOW.none;
+    const weathered = colour !== PURE_WHITE;
     hexToRgb(colour, this.rgb);
     const count = position.count;
     for (let i = 0; i < count; i += 1) {
-      this.positions.push(position.getX(i), position.getY(i), position.getZ(i));
+      const px = position.getX(i);
+      const py = position.getY(i);
+      const pz = position.getZ(i);
+      this.positions.push(px, py, pz);
       this.normals.push(
         normal ? normal.getX(i) : this.up.x,
         normal ? normal.getY(i) : this.up.y,
         normal ? normal.getZ(i) : this.up.z,
       );
-      this.colours.push(this.rgb.r, this.rgb.g, this.rgb.b);
+      let factor = 1;
+      if (weathered) {
+        // Salissure basse et grain très léger : deux bâtiments identiques
+        // restent identiques, mais les surfaces ne sont plus parfaitement plates.
+        const grime = Math.max(0, Math.min(1, 1 - py / 0.16));
+        const grain = hashUnit2d(
+          colour & 0xffffff,
+          Math.round(px * 197 + pz * 89),
+          Math.round(py * 409),
+        );
+        factor = 1 - grime * 0.1 + (grain - 0.5) * 0.045;
+      }
+      this.colours.push(
+        Math.max(0, Math.min(1, this.rgb.r * factor)),
+        Math.max(0, Math.min(1, this.rgb.g * factor)),
+        Math.max(0, Math.min(1, this.rgb.b * factor)),
+      );
       this.windows.push(window);
+      this.finishes.push(finish);
+      this.glows.push(glow);
     }
     if (flat !== geometry) flat.dispose();
     geometry.dispose();
@@ -120,7 +168,12 @@ class ModelBuilder {
     height: number,
     depth: number,
     colour: number,
-    options: { yaw?: number; window?: number } = {},
+    options: {
+      yaw?: number;
+      window?: number;
+      finish?: ModelFinish;
+      glow?: ModelGlow;
+    } = {},
   ): void {
     const geometry = new THREE.BoxGeometry(1, 1, 1);
     geometry.translate(0, 0.5, 0);
@@ -136,7 +189,7 @@ class ModelBuilder {
     height: number,
     depth: number,
     colour: number,
-    options: { yaw?: number } = {},
+    options: { yaw?: number; finish?: ModelFinish } = {},
   ): void {
     this.add(prismGeometry(), x, baseY, z, width, height, depth, colour, options);
   }
@@ -150,7 +203,7 @@ class ModelBuilder {
     height: number,
     depth: number,
     colour: number,
-    options: { yaw?: number } = {},
+    options: { yaw?: number; finish?: ModelFinish } = {},
   ): void {
     const geometry = new THREE.ConeGeometry(0.5, 1, 4);
     geometry.rotateY(Math.PI / 4);
@@ -165,7 +218,7 @@ class ModelBuilder {
     diameter: number,
     height: number,
     colour: number,
-    options: { segments?: number; topScale?: number } = {},
+    options: { segments?: number; topScale?: number; finish?: ModelFinish } = {},
   ): void {
     const geometry = new THREE.CylinderGeometry(
       Math.max(0.05, options.topScale ?? 1) * 0.5,
@@ -176,7 +229,9 @@ class ModelBuilder {
       false,
     );
     geometry.translate(0, 0.5, 0);
-    this.add(geometry, x, baseY, z, diameter, height, diameter, colour);
+    this.add(geometry, x, baseY, z, diameter, height, diameter, colour, {
+      finish: options.finish,
+    });
   }
 
   /** Quad vertical (fenêtre, porte, enseigne) plaqué sur une façade. */
@@ -200,6 +255,8 @@ class ModelBuilder {
     geometry.setAttribute('normal', new THREE.Float32BufferAttribute(this.normals, 3));
     geometry.setAttribute('color', new THREE.Float32BufferAttribute(this.colours, 3));
     geometry.setAttribute('aWindow', new THREE.Float32BufferAttribute(this.windows, 1));
+    geometry.setAttribute('aFinish', new THREE.Float32BufferAttribute(this.finishes, 1));
+    geometry.setAttribute('aGlow', new THREE.Float32BufferAttribute(this.glows, 1));
     geometry.computeBoundingSphere();
     return geometry;
   }
@@ -232,12 +289,19 @@ function shade(colour: number, amount: number): number {
 
 function facadeColour(archetype: BuildingArchetype, variant: number, rng: Prng): number {
   const palette = WALL_PALETTES[archetype];
-  return shade(palette[variant % palette.length] ?? 0xc9b9a4, rng.float(-0.035, 0.035));
+  const base = palette[variant % palette.length] ?? 0xc9b9a4;
+  const seed = 0x9e37 + variant * 131 + archetype.length * 17 + Math.floor(rng.float(0, 4096));
+  return weatherColour(base, seed, 0.06);
 }
 
 function roofColour(archetype: BuildingArchetype, variant: number, rng: Prng): number {
   const palette = ROOF_PALETTES[archetype];
-  return shade(palette[(variant + 1) % palette.length] ?? 0x555a60, rng.float(-0.04, 0.04));
+  const base = palette[(variant + 1) % palette.length] ?? 0x555a60;
+  // Dérive chaude (tuiles) ou froide (ardoise), puis usure déterministe.
+  const drift = rng.chance(0.5) ? 0xa87d62 : 0x7d8892;
+  const tinted = mixColour(base, drift, rng.float(0.02, 0.09));
+  const seed = 0x513b + variant * 197 + archetype.length * 29 + Math.floor(rng.float(0, 4096));
+  return weatherColour(tinted, seed, 0.09);
 }
 
 /**
@@ -339,9 +403,13 @@ function buildHouse(variant: number, detail: BuildingDetail): THREE.BufferGeomet
   builder.box(0, 0, 0, width, height, depth, wall);
   const roofHeight = 0.27 + (variant === 1 ? 0.1 : 0);
   if (variant === 0) {
-    builder.prism(0, height, 0, width + 0.04, roofHeight, depth + 0.05, roof);
+    builder.prism(0, height, 0, width + 0.04, roofHeight, depth + 0.05, roof, {
+      finish: MODEL_FINISH.satin,
+    });
   } else {
-    builder.pyramid(0, height, 0, width + 0.05, roofHeight, depth + 0.06, roof);
+    builder.pyramid(0, height, 0, width + 0.05, roofHeight, depth + 0.06, roof, {
+      finish: MODEL_FINISH.satin,
+    });
   }
   if (detail >= 1) {
     addFacadeOpenings(builder, { x: 0, z: 0, width, depth, height, seed: 0x91 + variant });
@@ -352,7 +420,9 @@ function buildHouse(variant: number, detail: BuildingDetail): THREE.BufferGeomet
     builder.box(chimneyX, height + roofHeight * 0.45 + 0.32, 0.02, 0.13, 0.035, 0.13, 0x3b3a38);
     builder.box(0, 0, depth / 2 + 0.05, width * 0.8, 0.02, 0.12, shade(wall, -0.12));
     // Petit auvent au-dessus de la porte.
-    builder.box(width * 0.2, 0.26, depth / 2 + 0.07, 0.22, 0.025, 0.13, roof);
+    builder.box(width * 0.2, 0.26, depth / 2 + 0.07, 0.22, 0.025, 0.13, roof, {
+      finish: MODEL_FINISH.satin,
+    });
   }
   return builder.build();
 }
@@ -369,13 +439,23 @@ function buildApartment(variant: number, detail: BuildingDetail): THREE.BufferGe
   if (variant === 0) {
     builder.box(0, height, 0, width + 0.02, 0.05, depth + 0.02, shade(wall, 0.08));
     // Acrotère : quatre murets minces.
-    builder.box(0, height + 0.05, depth / 2, width, 0.06, 0.035, roof);
-    builder.box(0, height + 0.05, -depth / 2, width, 0.06, 0.035, roof);
-    builder.box(width / 2, height + 0.05, 0, 0.035, 0.06, depth, roof);
-    builder.box(-width / 2, height + 0.05, 0, 0.035, 0.06, depth, roof);
+    builder.box(0, height + 0.05, depth / 2, width, 0.06, 0.035, roof, {
+      finish: MODEL_FINISH.satin,
+    });
+    builder.box(0, height + 0.05, -depth / 2, width, 0.06, 0.035, roof, {
+      finish: MODEL_FINISH.satin,
+    });
+    builder.box(width / 2, height + 0.05, 0, 0.035, 0.06, depth, roof, {
+      finish: MODEL_FINISH.satin,
+    });
+    builder.box(-width / 2, height + 0.05, 0, 0.035, 0.06, depth, roof, {
+      finish: MODEL_FINISH.satin,
+    });
     builder.box(width * 0.18, height + 0.05, -depth * 0.16, 0.2, 0.22, 0.2, shade(wall, -0.05));
   } else {
-    builder.prism(0, height, 0, width + 0.04, 0.24, depth + 0.05, roof);
+    builder.prism(0, height, 0, width + 0.04, 0.24, depth + 0.05, roof, {
+      finish: MODEL_FINISH.satin,
+    });
     builder.box(-width * 0.2, height + 0.12, 0, 0.1, 0.24, 0.1, shade(roof, -0.1));
   }
   if (detail >= 1) {
@@ -395,9 +475,13 @@ function buildApartment(variant: number, detail: BuildingDetail): THREE.BufferGe
     for (let floor = 1; floor < floors; floor += 2) {
       const y = 0.06 + floor * 0.24;
       builder.box(0, y, depth / 2 + 0.06, width * 0.72, 0.022, 0.13, shade(wall, 0.1));
-      builder.box(0, y + 0.022, depth / 2 + 0.12, width * 0.72, 0.07, 0.02, roof);
+      builder.box(0, y + 0.022, depth / 2 + 0.12, width * 0.72, 0.07, 0.02, roof, {
+        finish: MODEL_FINISH.satin,
+      });
     }
-    builder.box(0, 0, depth / 2 + 0.06, width * 0.42, 0.025, 0.12, roof);
+    builder.box(0, 0, depth / 2 + 0.06, width * 0.42, 0.025, 0.12, roof, {
+      finish: MODEL_FINISH.satin,
+    });
   }
   return builder.build();
 }
@@ -412,10 +496,14 @@ function buildShop(variant: number, detail: BuildingDetail): THREE.BufferGeometr
   const height = 0.78 + variant * 0.12;
   builder.box(0, 0, 0, width, height, depth, wall);
   if (variant === 0) {
-    builder.prism(0, height, 0, width + 0.05, 0.24, depth + 0.04, roof);
+    builder.prism(0, height, 0, width + 0.05, 0.24, depth + 0.04, roof, {
+      finish: MODEL_FINISH.satin,
+    });
   } else {
     builder.box(0, height, 0, width + 0.02, 0.06, depth + 0.02, shade(wall, 0.06));
-    builder.box(0, height + 0.06, depth / 2, width, 0.05, 0.03, roof);
+    builder.box(0, height + 0.06, depth / 2, width, 0.05, 0.03, roof, {
+      finish: MODEL_FINISH.satin,
+    });
   }
   if (detail >= 1) {
     // Devanture : deux grands vitrages et une porte latérale.
@@ -465,13 +553,15 @@ function buildChurch(variant: number, detail: BuildingDetail): THREE.BufferGeome
   const depth = 0.7;
   const height = 0.66 + variant * 0.05;
   builder.box(0, 0, 0, width, height, depth, wall);
-  builder.prism(0, height, 0, width + 0.05, 0.48, depth + 0.06, roof);
+  builder.prism(0, height, 0, width + 0.05, 0.48, depth + 0.06, roof, {
+    finish: MODEL_FINISH.satin,
+  });
   // Clocher décalé sur un coin : jamais hors de l'empreinte unitaire.
   const towerX = -width / 2 + 0.11;
   const towerZ = depth / 2 - 0.11;
   builder.box(towerX, 0, towerZ, 0.24, 1.18, 0.24, shade(wall, 0.03));
   builder.box(towerX, 1.18, towerZ, 0.28, 0.06, 0.28, shade(wall, 0.1));
-  builder.pyramid(towerX, 1.24, towerZ, 0.32, 0.34, 0.32, roof);
+  builder.pyramid(towerX, 1.24, towerZ, 0.32, 0.34, 0.32, roof, { finish: MODEL_FINISH.satin });
   builder.box(towerX, 1.58, towerZ, 0.025, 0.11, 0.025, 0x3b3a38);
   builder.box(towerX, 1.62, towerZ, 0.09, 0.025, 0.025, 0x3b3a38);
   if (detail >= 1) {
@@ -506,7 +596,9 @@ function buildWarehouse(variant: number, detail: BuildingDetail): THREE.BufferGe
     // Toit en shed : trois petits pans successifs.
     for (let index = 0; index < 3; index += 1) {
       const offset = -width / 2 + (width * (index + 0.5)) / 3;
-      builder.prism(offset, height, 0, width / 3 + 0.01, 0.14, depth + 0.03, roof);
+      builder.prism(offset, height, 0, width / 3 + 0.01, 0.14, depth + 0.03, roof, {
+        finish: MODEL_FINISH.satin,
+      });
     }
   } else {
     builder.box(0, height, 0, width + 0.02, 0.04, depth + 0.02, shade(wall, 0.05));
@@ -580,7 +672,9 @@ export function createBuildingGeometry(
 export function createDistantBuildingGeometry(): THREE.BufferGeometry {
   const builder = new ModelBuilder();
   builder.box(0, 0, 0, 0.78, 0.68, 0.72, 0xc9b9a4);
-  builder.prism(0, 0.68, 0, 0.82, 0.26, 0.76, 0x6b6259);
+  builder.prism(0, 0.68, 0, 0.82, 0.26, 0.76, 0x6b6259, {
+    finish: MODEL_FINISH.satin,
+  });
   builder.box(0, 0.94, 0, 0.06, 0.06, 0.06, 0x6b6259);
   return fitFootprint(builder.build());
 }
@@ -607,7 +701,7 @@ export function createStationHallGeometry(detail: BuildingDetail): THREE.BufferG
   const wall = 0xcac4b6;
   const roof = 0x555a60;
   builder.box(0, 0, -0.06, 0.7, 0.36, 0.46, wall);
-  builder.prism(0, 0.36, -0.06, 0.76, 0.18, 0.52, roof);
+  builder.prism(0, 0.36, -0.06, 0.76, 0.18, 0.52, roof, { finish: MODEL_FINISH.satin });
   // Auvent de quai tenu par deux poteaux.
   builder.box(0, 0.35, 0.31, 0.84, 0.03, 0.3, shade(roof, 0.08));
   builder.box(-0.34, 0, 0.4, 0.035, 0.35, 0.035, shade(wall, -0.18));
@@ -632,7 +726,10 @@ export function createStationPlatformGeometry(detail: BuildingDetail): THREE.Buf
   builder.box(0, 0.09, 0.36, 0.86, 0.012, 0.06, 0xd8d2c4);
   builder.box(-0.34, 0.09, 0.16, 0.035, 0.34, 0.035, 0x6b7176);
   builder.box(0.34, 0.09, 0.16, 0.035, 0.34, 0.035, 0x6b7176);
-  builder.prism(0, 0.43, 0.12, 0.44, 0.12, 0.86, 0x555a60, { yaw: Math.PI / 2 });
+  builder.prism(0, 0.43, 0.12, 0.44, 0.12, 0.86, 0x555a60, {
+    yaw: Math.PI / 2,
+    finish: MODEL_FINISH.satin,
+  });
   builder.box(0, 0.43, 0.12, 0.86, 0.022, 0.46, 0xd8d2c4);
   if (detail >= 1) {
     builder.box(-0.12, 0.09, 0.24, 0.16, 0.05, 0.06, 0x7a5c3a);
@@ -654,8 +751,12 @@ export function createDepotBodyGeometry(
   builder.box(0, 0, -0.04, 0.76, 0.5, 0.5, wall);
   const openingWidth = kind === 'rail' ? 0.5 : 0.56;
   const openingHeight = kind === 'rail' ? 0.36 : 0.32;
-  builder.plane(0, 0.02 + openingHeight / 2, 0.215, openingWidth, openingHeight, 0x33383b, 0);
+  builder.plane(0, 0.02 + openingHeight / 2, 0.215, openingWidth, openingHeight, 0x33383b, 0, 0.55);
   builder.box(0, 0.02 + openingHeight, 0.218, openingWidth + 0.04, 0.03, 0.02, TRIM);
+  // Lanterne au-dessus du seuil : petite emission chaude la nuit.
+  builder.box(0, 0.02 + openingHeight + 0.05, 0.222, 0.06, 0.03, 0.025, 0xfff0c0, {
+    glow: MODEL_GLOW.headlight,
+  });
   builder.box(-0.42, 0, 0.32, 0.035, 0.36, 0.035, shade(wall, -0.15));
   builder.box(0.42, 0, 0.32, 0.035, 0.36, 0.035, shade(wall, -0.15));
   if (detail >= 1) {
@@ -674,7 +775,9 @@ export function createDepotBodyGeometry(
 /** Livrée coloriable d'un dépôt : toit, auvent et enseigne (couleur blanche). */
 export function createDepotLiveryGeometry(kind: DepotKind): THREE.BufferGeometry {
   const builder = new ModelBuilder();
-  builder.prism(0, 0.5, -0.04, 0.84, 0.16, 0.58, 0xffffff);
+  builder.prism(0, 0.5, -0.04, 0.84, 0.16, 0.58, 0xffffff, {
+    finish: MODEL_FINISH.satin,
+  });
   builder.box(0, 0.44, 0.3, 0.88, 0.03, 0.26, 0xffffff);
   builder.box(0, 0.36, 0.19, 0.42, 0.06, 0.02, 0xffffff);
   if (kind === 'rail') builder.box(0, 0.5, 0.44, 0.88, 0.03, 0.06, 0xffffff);

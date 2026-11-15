@@ -23,6 +23,7 @@ import { cornerHeightWorld, sampleHeightWorld, tileKindFromIndex } from '../game
 import { Prng, hashUnit2d } from '../game/prng';
 import { companyColour, hexToRgb } from './tileVisuals';
 import { qualitySettings, type QualityLevel } from './quality';
+import { createModelMaterial } from './models/materials';
 import {
   BUILDING_VARIANTS,
   chooseBuildingArchetype,
@@ -86,7 +87,7 @@ interface StationPlacement {
 export class CityLayer {
   readonly group = new THREE.Group();
 
-  private material: THREE.MeshLambertMaterial;
+  private material: THREE.MeshStandardMaterial;
   private nightUniform: { value: number } = { value: 0 };
   private nightAmount = 0;
   private nightLights = true;
@@ -125,30 +126,14 @@ export class CityLayer {
 
   constructor() {
     this.group.name = 'cities';
-    this.material = new THREE.MeshLambertMaterial({ vertexColors: true });
-    // Fenêtres éclairées : un attribut par sommet, aucun draw call en plus.
-    this.material.onBeforeCompile = (shader) => {
-      shader.uniforms.uNight = this.nightUniform;
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          '#include <common>',
-          '#include <common>\nattribute float aWindow;\nvarying float vWindow;',
-        )
-        .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vWindow = aWindow;');
-      shader.fragmentShader = shader.fragmentShader
-        .replace(
-          '#include <common>',
-          '#include <common>\nuniform float uNight;\nvarying float vWindow;',
-        )
-        .replace(
-          '#include <emissivemap_fragment>',
-          `#include <emissivemap_fragment>
-           if ( uNight > 0.001 && vWindow > 0.01 ) {
-             totalEmissiveRadiance += vec3( 1.0, 0.6, 0.25 ) * vWindow * uNight * 1.3;
-           }`,
-        );
-    };
-    this.material.customProgramCacheKey = () => 'opentt3d-building-windows-v2';
+    this.material = createModelMaterial({
+      night: this.nightUniform,
+      glowStrength: 1.35,
+      nightAmbient: 0.025,
+      roughness: 0.78,
+      metalness: 0.03,
+      name: 'cities-surface',
+    });
     this.plinthGeometry = new THREE.BoxGeometry(1, 1, 1);
     this.plinthGeometry.translate(0, 0.5, 0);
     this.plinthMaterial = new THREE.MeshLambertMaterial({ color: 0x6b6355 });
@@ -596,6 +581,11 @@ export class CityLayer {
     return mesh;
   }
 
+  /** Matériau de surface partagé (diagnostic et tests). */
+  get surfaceMaterial(): THREE.MeshStandardMaterial {
+    return this.material;
+  }
+
   /** 0 = jour, 1 = nuit profonde : allume les fenêtres des bâtiments. */
   setNight(amount: number): void {
     this.nightAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
@@ -776,8 +766,8 @@ function computeStationSignature(
 function stationColour(company: CompanyId): number {
   if (company === COMPANY_NONE) return 0xd8d2c4;
   const rgb = hexToRgb(companyColour(company), { r: 0, g: 0, b: 0 });
-  const r = Math.round(255 * 0.55 + rgb.r * 255 * 0.45);
-  const g = Math.round(255 * 0.55 + rgb.g * 255 * 0.45);
-  const b = Math.round(255 * 0.55 + rgb.b * 255 * 0.45);
+  const r = Math.round(255 * 0.42 + rgb.r * 255 * 0.58);
+  const g = Math.round(255 * 0.42 + rgb.g * 255 * 0.58);
+  const b = Math.round(255 * 0.42 + rgb.b * 255 * 0.58);
   return (r << 16) | (g << 8) | b;
 }

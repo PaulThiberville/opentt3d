@@ -11,12 +11,16 @@
  * Les ajouts de détail sont déterministes (graine dérivée de l'id et du type)
  * et bornés : chaque archétype reste sous 2 000 triangles, y compris au
  * niveau de détail maximal. Le niveau 0 ne conserve que les volumes du plan.
+ * Chaque sommet reçoit une finition (`aFinish`) et une émission (`aGlow`) :
+ * vitrages réflectifs, cheminées métalliques, toits satinés et fenêtres
+ * éclairées la nuit, sans matériau ni draw call par archétype.
  */
 
 import * as THREE from 'three';
 import type { IndustryPlan, IndustryPart } from '../industryPlan';
 import type { IndustryArchetype, IndustryDetail } from '../industryPlan';
-import { Prng } from '../../game/prng';
+import { Prng, hashUnit2d } from '../../game/prng';
+import { MODEL_FINISH, MODEL_GLOW, type ModelFinish, type ModelGlow } from './materials';
 
 type ModelShape = 'box' | 'prism' | 'cylinder' | 'cone' | 'ico' | 'sphere' | 'plane';
 
@@ -35,6 +39,8 @@ interface ModelPart {
   topScale: number;
   /** Origine au centre vertical (objets couchés ou suspendus). */
   centre: boolean;
+  /** Rôle du volume dans le plan (main, annex, stock, silo, chimney). */
+  role?: string;
 }
 
 export interface IndustryGeometryStats {
@@ -50,6 +56,33 @@ export interface IndustryGeometryResult {
 
 const GLASS = 0x33414d;
 const DOOR = 0x3f3227;
+const WARM_LIGHT = 0xff9a3c;
+
+/** Finition et émission d'une partie d'industrie, déduites du plan. */
+function industrySurface(part: { colour: number; shape: ModelShape; role?: string }): {
+  finish: ModelFinish;
+  glow: ModelGlow;
+} {
+  if (part.colour === GLASS) {
+    return { finish: MODEL_FINISH.glass, glow: MODEL_GLOW.window };
+  }
+  if (part.colour === DOOR) {
+    return { finish: MODEL_FINISH.accent, glow: MODEL_GLOW.none };
+  }
+  if (part.colour === WARM_LIGHT) {
+    return { finish: MODEL_FINISH.accent, glow: MODEL_GLOW.headlight };
+  }
+  if (part.role === 'chimney') {
+    return { finish: MODEL_FINISH.metal, glow: MODEL_GLOW.none };
+  }
+  if (part.role === 'silo' || part.shape === 'prism') {
+    return { finish: MODEL_FINISH.satin, glow: MODEL_GLOW.none };
+  }
+  if (part.role === 'stock') {
+    return { finish: MODEL_FINISH.accent, glow: MODEL_GLOW.none };
+  }
+  return { finish: MODEL_FINISH.paint, glow: MODEL_GLOW.none };
+}
 
 /** Convertit les parties du plan en parties de modèle (repère monde). */
 function planParts(plan: IndustryPlan): ModelPart[] {
@@ -67,6 +100,7 @@ function planParts(plan: IndustryPlan): ModelPart[] {
     tiltZ: part.tiltZ,
     topScale: part.topScale,
     centre: part.centre,
+    role: part.role,
   }));
 }
 
@@ -938,6 +972,8 @@ export function buildIndustryGeometry(
   const positions: number[] = [];
   const normals: number[] = [];
   const colours: number[] = [];
+  const finishes: number[] = [];
+  const glows: number[] = [];
   const rgb = { r: 0, g: 0, b: 0 };
   let triangles = 0;
   let windows = 0;
@@ -963,19 +999,33 @@ export function buildIndustryGeometry(
       const positionAttribute = flat.getAttribute('position');
       const normalAttribute = flat.getAttribute('normal');
       hexToRgb(part.colour, rgb);
+      const surface = industrySurface(part);
       const count = positionAttribute.count;
       for (let index = 0; index < count; index += 1) {
-        positions.push(
-          positionAttribute.getX(index),
-          positionAttribute.getY(index),
-          positionAttribute.getZ(index),
-        );
+        const px = positionAttribute.getX(index);
+        const py = positionAttribute.getY(index);
+        const pz = positionAttribute.getZ(index);
+        positions.push(px, py, pz);
         normals.push(
           normalAttribute ? normalAttribute.getX(index) : up.x,
           normalAttribute ? normalAttribute.getY(index) : up.y,
           normalAttribute ? normalAttribute.getZ(index) : up.z,
         );
-        colours.push(rgb.r, rgb.g, rgb.b);
+        // Usure et salissure déterministes, sans texture.
+        const grime = Math.max(0, Math.min(1, 1 - py / 0.2));
+        const grain = hashUnit2d(
+          part.colour & 0xffffff,
+          Math.round(px * 181 + pz * 73),
+          Math.round(py * 397),
+        );
+        const factor = 1 - grime * 0.11 + (grain - 0.5) * 0.05;
+        colours.push(
+          Math.max(0, Math.min(1, rgb.r * factor)),
+          Math.max(0, Math.min(1, rgb.g * factor)),
+          Math.max(0, Math.min(1, rgb.b * factor)),
+        );
+        finishes.push(surface.finish);
+        glows.push(surface.glow);
       }
       triangles += count / 3;
       partCount += 1;
@@ -989,6 +1039,8 @@ export function buildIndustryGeometry(
   merged.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   merged.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
   merged.setAttribute('color', new THREE.Float32BufferAttribute(colours, 3));
+  merged.setAttribute('aFinish', new THREE.Float32BufferAttribute(finishes, 1));
+  merged.setAttribute('aGlow', new THREE.Float32BufferAttribute(glows, 1));
   merged.computeBoundingSphere();
   return { geometry: merged, stats: { triangles, windows, parts: partCount } };
 }

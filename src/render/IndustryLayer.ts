@@ -15,6 +15,7 @@ import * as THREE from 'three';
 import type { IndustrySnapshot, MapSnapshot } from '../engine/protocol';
 import { TILE_KIND_INDEX } from '../engine/protocol';
 import { qualitySettings, type QualityLevel } from './quality';
+import { createModelMaterial } from './models/materials';
 import {
   collectIndustryFootprint,
   planDetail,
@@ -51,7 +52,9 @@ interface ArchetypeMesh {
 export class IndustryLayer {
   readonly group = new THREE.Group();
 
-  private material: THREE.MeshLambertMaterial;
+  private material: THREE.MeshStandardMaterial;
+  private nightUniform: { value: number } = { value: 0 };
+  private nightAmount = 0;
   private meshes: ArchetypeMesh[] = [];
   private plans: IndustryPlan[] = [];
   private smoke: THREE.InstancedMesh | null = null;
@@ -80,7 +83,14 @@ export class IndustryLayer {
 
   constructor() {
     this.group.name = 'industries';
-    this.material = new THREE.MeshLambertMaterial({ vertexColors: true });
+    this.material = createModelMaterial({
+      night: this.nightUniform,
+      glowStrength: 1.1,
+      nightAmbient: 0.03,
+      roughness: 0.74,
+      metalness: 0.06,
+      name: 'industries-surface',
+    });
   }
 
   /** Reconstruit seulement si les industries, l'emprise ou le détail changent. */
@@ -277,6 +287,21 @@ export class IndustryLayer {
   setShadows(enabled: boolean): void {
     this.shadows = enabled;
     for (const entry of this.meshes) entry.mesh.castShadow = enabled;
+  }
+
+  /** Matériau de surface partagé (diagnostic et tests). */
+  get surfaceMaterial(): THREE.MeshStandardMaterial {
+    return this.material;
+  }
+
+  /** 0 = jour, 1 = nuit profonde : allume les vitrages et balises. */
+  setNight(amount: number): void {
+    this.nightAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
+    this.nightUniform.value = this.nightAmount;
+  }
+
+  get night(): number {
+    return this.nightAmount;
   }
 
   get industryCount(): number {
