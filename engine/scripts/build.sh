@@ -223,8 +223,11 @@ if [[ ${BASELINE} -eq 0 ]]; then
   mkdir -p "${WASM_DIR}/baseset"
   cp "${OPENGFX_DIR}"/*.grf "${OPENGFX_DIR}"/opengfx.obg "${WASM_DIR}/baseset/"
   log "OpenGFX ${OPENGFX_VERSION} copié dans ${WASM_DIR}/baseset"
+  # IA minimale du dépôt (engine/ai) : le patch CMake la précharge dans /ai.
+  [[ -d "${ENGINE_DIR}/ai" ]] || die "scripts IA introuvables : ${ENGINE_DIR}/ai"
+  log "IA OpenTT3D : ${ENGINE_DIR}/ai (préchargée dans /ai)"
   # Le packager Emscripten ne suit pas les fichiers ajoutés après coup :
-  # on force la réédition du module pour intégrer le nouveau baseset.
+  # on force la réédition du module pour intégrer le nouveau baseset et l'IA.
   rm -f "${WASM_DIR}/opentt3d-engine.js" "${WASM_DIR}/opentt3d-engine.wasm" "${WASM_DIR}/opentt3d-engine.data"
 fi
 

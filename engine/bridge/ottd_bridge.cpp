@@ -15,6 +15,7 @@
 
 #include "stdafx.h"
 
+#include "ai/ai_info.hpp"
 #include "cargotype.h"
 #include "clear_map.h"
 #include "company_base.h"
@@ -50,13 +51,25 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <emscripten.h>
+#include <optional>
+#include <string_view>
+#include <unordered_set>
+#include <vector>
 
 #include "safeguards.h"
 
 /* Déclarés dans openttd.cpp ; non exportés par un en-tête public. */
 extern Company *DoStartupNewCompany(bool is_ai, CompanyID company);
 extern void PostMainLoop();
+
+/**
+ * Hook optionnel installé par le pont (patch engine/patches/0003) : OpenTTD
+ * l'appelle dans `UserErrorI` / `FatalErrorI` avant `_exit`/`abort`, ce qui
+ * permet de mémoriser le message dans `ottd_last_error()`.
+ */
+extern void (*_ottd_fatal_error_hook)(const char *message);
 
 namespace {
 
@@ -84,6 +97,458 @@ uint8_t Log2(uint32_t value)
 	uint8_t result = 0;
 	while ((value >>= 1) != 0) result++;
 	return result;
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Configuration de partie (issue #60)                                      */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Options acceptées par `ottd_set_game_config()` et `ottd_new_game_ex()`.
+ *
+ * Tous les champs sont facultatifs : un champ absent conserve la valeur
+ * courante de `_settings_newgame` (les défauts OpenTTD au premier appel).
+ * Les noms JSON sont en snake_case, avec les alias camelCase du frontend.
+ *
+ * | Champ JSON                     | Type            | Effet |
+ * |---|---|---|
+ * | `climate` / `landscape`        | chaîne          | `_settings_newgame.game_creation.landscape` (`temperate`, `subarctic`, `subtropical`, `toyland`) |
+ * | `start_year` / `startYear`     | entier 1800..2200 | `game_creation.starting_year` (+ `ending_year` au moins +50 ans) |
+ * | `difficulty`                   | entier 0..3 ou chaîne (`easy`, `normal`, `hard`, `expert`) | préréglage de `_settings_newgame.difficulty` |
+ * | `ai_companies` / `aiCompanies` | entier 0..14    | nombre d'entreprises IA créées au démarrage |
+ * | `towns`                        | entier 1..5000  | nombre exact de villes (`custom_town_number`) |
+ * | `industries`                   | entier 1..5000  | nombre exact d'industries (`custom_industry_number`) |
+ * | `disasters`                    | booléen         | force `difficulty.disasters` |
+ * | `map_size` / `mapSize` / `size`| entier 64..4096 (puissance de 2) | doit correspondre à `w` et `h` |
+ * | `game_name` / `gameName`       | chaîne          | mémorisé et renvoyé dans le snapshot (aucun champ OpenTTD équivalent) |
+ */
+struct GameSetupConfig {
+	std::optional<LandscapeType> landscape;
+	std::optional<int> start_year;
+	std::optional<int> difficulty;
+	std::optional<int> ai_companies;
+	std::optional<int> towns;
+	std::optional<int> industries;
+	std::optional<int> map_size;
+	std::optional<bool> disasters;
+	std::optional<std::string> game_name;
+};
+
+/** Configuration appliquée à la partie courante (pour le snapshot JSON). */
+GameSetupConfig _ottd_active_config;
+/** Configuration en attente, utilisée par le prochain `ottd_new_game`. */
+GameSetupConfig _ottd_pending_config;
+bool _ottd_has_pending_config = false;
+/** Avertissements non bloquants de la partie courante. */
+std::vector<std::string> _ottd_warnings;
+
+void SkipJsonSpace(std::string_view text, size_t &pos)
+{
+	while (pos < text.size() &&
+			(text[pos] == ' ' || text[pos] == '\t' || text[pos] == '\n' || text[pos] == '\r')) {
+		pos++;
+	}
+}
+
+bool JsonDelimiter(std::string_view text, size_t pos)
+{
+	if (pos >= text.size()) return true;
+	const char c = text[pos];
+	return c == ',' || c == '}' || c == ']' || c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+bool JsonFail(std::string &error, std::string_view message)
+{
+	error.assign(message);
+	return false;
+}
+
+void AppendUtf8(std::string &out, uint32_t codepoint)
+{
+	if (codepoint <= 0x7F) {
+		out.push_back(static_cast<char>(codepoint));
+	} else if (codepoint <= 0x7FF) {
+		out.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+		out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+	} else if (codepoint <= 0xFFFF) {
+		out.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+		out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+		out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+	} else {
+		out.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+		out.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+		out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+		out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+	}
+}
+
+bool ParseHex4(std::string_view text, size_t &pos, uint32_t &value)
+{
+	if (pos + 4 > text.size()) return false;
+	value = 0;
+	for (int i = 0; i < 4; i++) {
+		const char c = text[pos++];
+		value <<= 4;
+		if (c >= '0' && c <= '9') value |= static_cast<uint32_t>(c - '0');
+		else if (c >= 'a' && c <= 'f') value |= static_cast<uint32_t>(c - 'a' + 10);
+		else if (c >= 'A' && c <= 'F') value |= static_cast<uint32_t>(c - 'A' + 10);
+		else return false;
+	}
+	return true;
+}
+
+/** Lit une chaîne JSON (guillemets inclus) et décode les échappements usuels. */
+bool ParseJsonString(std::string_view text, size_t &pos, std::string &out, std::string &error)
+{
+	if (pos >= text.size() || text[pos] != '"') {
+		return JsonFail(error, "chaîne JSON attendue");
+	}
+	pos++;
+	out.clear();
+	while (pos < text.size()) {
+		const char c = text[pos++];
+		if (c == '"') return true;
+		if (c != '\\') {
+			out.push_back(c);
+			continue;
+		}
+		if (pos >= text.size()) return JsonFail(error, "échappement JSON incomplet");
+		const char escape = text[pos++];
+		switch (escape) {
+			case '"':  out.push_back('"'); break;
+			case '\\': out.push_back('\\'); break;
+			case '/':  out.push_back('/'); break;
+			case 'b':  out.push_back('\b'); break;
+			case 'f':  out.push_back('\f'); break;
+			case 'n':  out.push_back('\n'); break;
+			case 'r':  out.push_back('\r'); break;
+			case 't':  out.push_back('\t'); break;
+			case 'u': {
+				uint32_t codepoint = 0;
+				if (!ParseHex4(text, pos, codepoint)) return JsonFail(error, "échappement \\u invalide");
+				if (codepoint >= 0xD800 && codepoint <= 0xDBFF &&
+						pos + 6 <= text.size() && text[pos] == '\\' && text[pos + 1] == 'u') {
+					pos += 2;
+					uint32_t low = 0;
+					if (!ParseHex4(text, pos, low) || low < 0xDC00 || low > 0xDFFF) {
+						return JsonFail(error, "paire de substitution \\u invalide");
+					}
+					codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00);
+				}
+				AppendUtf8(out, codepoint);
+				break;
+			}
+			default:
+				return JsonFail(error, "échappement JSON inconnu");
+		}
+	}
+	return JsonFail(error, "chaîne JSON non terminée");
+}
+
+/** Lit un nombre JSON strict (entier ou décimal, sans exposant). */
+bool ParseJsonNumber(std::string_view text, size_t &pos, double &out, std::string &error)
+{
+	const size_t start = pos;
+	if (pos < text.size() && text[pos] == '-') pos++;
+	const size_t digits_start = pos;
+	while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') pos++;
+	if (pos == digits_start) return JsonFail(error, "nombre JSON attendu");
+	if (pos < text.size() && text[pos] == '.') {
+		pos++;
+		const size_t fraction_start = pos;
+		while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') pos++;
+		if (pos == fraction_start) return JsonFail(error, "fraction JSON invalide");
+	}
+	if (!JsonDelimiter(text, pos)) return JsonFail(error, "nombre JSON invalide");
+
+	const std::string token(text.substr(start, pos - start));
+	char *end = nullptr;
+	out = std::strtod(token.c_str(), &end);
+	if (end == nullptr || *end != '\0') return JsonFail(error, "nombre JSON invalide");
+	return true;
+}
+
+bool ReadJsonInt(std::string_view text, size_t &pos, int &out, std::string &error)
+{
+	if (pos >= text.size() || !((text[pos] >= '0' && text[pos] <= '9') || text[pos] == '-')) {
+		return JsonFail(error, "un entier est attendu");
+	}
+	double value = 0;
+	if (!ParseJsonNumber(text, pos, value, error)) return false;
+	if (value != static_cast<double>(static_cast<int>(value))) {
+		return JsonFail(error, "un entier est attendu");
+	}
+	out = static_cast<int>(value);
+	return true;
+}
+
+std::optional<LandscapeType> ParseClimate(std::string_view value)
+{
+	if (value == "temperate") return LandscapeType::Temperate;
+	if (value == "subarctic" || value == "arctic") return LandscapeType::Arctic;
+	if (value == "subtropical" || value == "tropic") return LandscapeType::Tropic;
+	if (value == "toyland") return LandscapeType::Toyland;
+	return std::nullopt;
+}
+
+std::optional<int> ParseDifficulty(std::string_view value)
+{
+	if (value == "easy" || value == "facile") return 0;
+	if (value == "normal" || value == "normale") return 1;
+	if (value == "hard" || value == "difficile") return 2;
+	if (value == "expert") return 3;
+	return std::nullopt;
+}
+
+/**
+ * Analyse un objet JSON plat de configuration de partie.
+ * @param json texte JSON (vide, `null` ou objet).
+ * @param[out] config configuration analysée (réinitialisée).
+ * @param[out] error message lisible en cas d'échec.
+ * @return true si la configuration est valide.
+ */
+bool ParseGameConfig(std::string_view json, GameSetupConfig &config, std::string &error)
+{
+	config = GameSetupConfig{};
+	size_t pos = 0;
+	SkipJsonSpace(json, pos);
+	if (pos >= json.size()) return true;
+	if (json.substr(pos) == "null") return true;
+	if (json[pos] != '{') return JsonFail(error, "configuration : objet JSON attendu");
+
+	pos++;
+	std::unordered_set<std::string> seen;
+	bool first_field = true;
+	for (;;) {
+		SkipJsonSpace(json, pos);
+		if (pos >= json.size()) return JsonFail(error, "configuration : objet JSON incomplet");
+		if (json[pos] == '}') {
+			pos++;
+			break;
+		}
+		if (!first_field) {
+			if (json[pos] != ',') return JsonFail(error, "configuration : virgule attendue entre les champs");
+			pos++;
+			SkipJsonSpace(json, pos);
+		}
+		first_field = false;
+
+		std::string key;
+		if (!ParseJsonString(json, pos, key, error)) return false;
+		if (!seen.insert(key).second) {
+			return JsonFail(error, fmt::format("configuration : champ « {} » dupliqué", key));
+		}
+
+		SkipJsonSpace(json, pos);
+		if (pos >= json.size() || json[pos] != ':') {
+			return JsonFail(error, fmt::format("configuration : « : » attendu après « {} »", key));
+		}
+		pos++;
+		SkipJsonSpace(json, pos);
+
+		/* `null` remet le champ à sa valeur par défaut (aucun effet). */
+		if (json.substr(pos, 4) == "null" && JsonDelimiter(json, pos + 4)) {
+			pos += 4;
+			continue;
+		}
+
+		if (key == "climate" || key == "landscape") {
+			std::string value;
+			if (pos >= json.size() || json[pos] != '"' || !ParseJsonString(json, pos, value, error)) {
+				return JsonFail(error, "configuration : « climate » doit être une chaîne");
+			}
+			const std::optional<LandscapeType> landscape = ParseClimate(value);
+			if (!landscape.has_value()) {
+				return JsonFail(error, fmt::format(
+					"configuration : climat inconnu « {} » (temperate, subarctic, subtropical, toyland)", value));
+			}
+			config.landscape = *landscape;
+		} else if (key == "start_year" || key == "startYear") {
+			int value = 0;
+			if (!ReadJsonInt(json, pos, value, error)) return false;
+			config.start_year = value;
+		} else if (key == "difficulty") {
+			if (pos < json.size() && json[pos] == '"') {
+				std::string value;
+				if (!ParseJsonString(json, pos, value, error)) return false;
+				const std::optional<int> difficulty = ParseDifficulty(value);
+				if (!difficulty.has_value()) {
+					return JsonFail(error, fmt::format(
+						"configuration : difficulté inconnue « {} » (easy, normal, hard, expert)", value));
+				}
+				config.difficulty = *difficulty;
+			} else {
+				int value = 0;
+				if (!ReadJsonInt(json, pos, value, error)) return false;
+				config.difficulty = value;
+			}
+		} else if (key == "ai_companies" || key == "aiCompanies") {
+			int value = 0;
+			if (!ReadJsonInt(json, pos, value, error)) return false;
+			config.ai_companies = value;
+		} else if (key == "towns") {
+			int value = 0;
+			if (!ReadJsonInt(json, pos, value, error)) return false;
+			config.towns = value;
+		} else if (key == "industries") {
+			int value = 0;
+			if (!ReadJsonInt(json, pos, value, error)) return false;
+			config.industries = value;
+		} else if (key == "map_size" || key == "mapSize" || key == "size" || key == "width" || key == "height") {
+			int value = 0;
+			if (!ReadJsonInt(json, pos, value, error)) return false;
+			config.map_size = value;
+		} else if (key == "disasters") {
+			if (json.substr(pos, 4) == "true" && JsonDelimiter(json, pos + 4)) {
+				pos += 4;
+				config.disasters = true;
+			} else if (json.substr(pos, 5) == "false" && JsonDelimiter(json, pos + 5)) {
+				pos += 5;
+				config.disasters = false;
+			} else {
+				return JsonFail(error, "configuration : « disasters » doit être un booléen");
+			}
+		} else if (key == "game_name" || key == "gameName" || key == "name") {
+			std::string value;
+			if (pos >= json.size() || json[pos] != '"' || !ParseJsonString(json, pos, value, error)) {
+				return JsonFail(error, "configuration : « game_name » doit être une chaîne");
+			}
+			config.game_name = value;
+		} else {
+			return JsonFail(error, fmt::format("configuration : champ inconnu « {} »", key));
+		}
+	}
+
+	SkipJsonSpace(json, pos);
+	if (pos != json.size()) return JsonFail(error, "configuration : caractères en trop après l'objet JSON");
+	return true;
+}
+
+/** Préréglages de difficulté appliqués avant la génération (0 = facile). */
+struct DifficultyPreset {
+	uint32_t max_loan;
+	uint8_t initial_interest;
+	uint8_t vehicle_costs;
+	uint8_t construction_cost;
+	uint8_t competitor_speed;
+	uint8_t town_council_tolerance;
+	bool disasters;
+};
+
+/**
+ * Préréglages exposés par l'API (#60). Le niveau 1 « normale » correspond
+ * exactement aux défauts d'OpenTTD 15.3 : une partie sans difficulté explicite
+ * et une partie `difficulty: 1` produisent donc le même monde.
+ */
+static constexpr DifficultyPreset DIFFICULTY_PRESETS[4] = {
+	{500000, 2, 0, 0, 2, 0, false}, // 0 facile
+	{300000, 2, 0, 0, 2, 0, false}, // 1 normale (défauts OpenTTD)
+	{200000, 3, 1, 1, 3, 1, true},  // 2 difficile
+	{100000, 4, 2, 2, 4, 2, true},  // 3 expert
+};
+
+bool ApplyDifficultyPreset(int level, std::string &error)
+{
+	if (level < 0 || level >= static_cast<int>(std::size(DIFFICULTY_PRESETS))) {
+		return JsonFail(error, fmt::format("configuration : difficulté {} hors bornes (0..3)", level));
+	}
+	const DifficultyPreset &preset = DIFFICULTY_PRESETS[level];
+	_settings_newgame.difficulty.max_loan = preset.max_loan;
+	_settings_newgame.difficulty.initial_interest = preset.initial_interest;
+	_settings_newgame.difficulty.vehicle_costs = preset.vehicle_costs;
+	_settings_newgame.difficulty.construction_cost = preset.construction_cost;
+	_settings_newgame.difficulty.competitor_speed = preset.competitor_speed;
+	_settings_newgame.difficulty.town_council_tolerance = preset.town_council_tolerance;
+	_settings_newgame.difficulty.disasters = preset.disasters;
+	return true;
+}
+
+/**
+ * Valide puis applique la configuration à `_settings_newgame`.
+ * `StartNewGameWithoutGUI()` recopie ensuite ces réglages dans `_settings_game`
+ * (`MakeNewgameSettingsLive`), exactement comme le fait l'interface OpenTTD.
+ */
+bool ApplyGameConfig(const GameSetupConfig &config, uint32_t w, uint32_t h, std::string &error)
+{
+	if (config.map_size.has_value()) {
+		const int size = *config.map_size;
+		if (!IsPowerOfTwo(static_cast<uint32_t>(size)) || size < 64 || size > 4096) {
+			return JsonFail(error, fmt::format(
+				"configuration : map_size {} invalide (puissance de 2 entre 64 et 4096)", size));
+		}
+		if (static_cast<uint32_t>(size) != w || static_cast<uint32_t>(size) != h) {
+			return JsonFail(error, fmt::format(
+				"configuration : map_size {} incompatible avec les dimensions {}x{}", size, w, h));
+		}
+	}
+
+	if (config.landscape.has_value()) {
+		_settings_newgame.game_creation.landscape = *config.landscape;
+	}
+
+	if (config.start_year.has_value()) {
+		const int year = *config.start_year;
+		if (year < 1800 || year > 2200) {
+			return JsonFail(error, fmt::format("configuration : année de départ {} hors bornes (1800..2200)", year));
+		}
+		_settings_newgame.game_creation.starting_year = TimerGameCalendar::Year{year};
+		/* La fin de partie par défaut (2050) précéderait une année de départ
+		 * tardive : on garde au moins 50 années de jeu, comme l'UI OpenTTD. */
+		const TimerGameCalendar::Year minimum_end{year + 50};
+		if (_settings_newgame.game_creation.ending_year < minimum_end) {
+			_settings_newgame.game_creation.ending_year = minimum_end;
+		}
+	}
+
+	if (config.difficulty.has_value() && !ApplyDifficultyPreset(*config.difficulty, error)) return false;
+
+	if (config.towns.has_value()) {
+		const int towns = *config.towns;
+		if (towns < 1 || towns > static_cast<int>(CUSTOM_TOWN_MAX_NUMBER)) {
+			return JsonFail(error, fmt::format(
+				"configuration : nombre de villes {} hors bornes (1..{})", towns, CUSTOM_TOWN_MAX_NUMBER));
+		}
+		_settings_newgame.difficulty.number_towns = static_cast<uint8_t>(CUSTOM_TOWN_NUMBER_DIFFICULTY);
+		_settings_newgame.game_creation.custom_town_number = static_cast<uint16_t>(towns);
+	}
+
+	if (config.industries.has_value()) {
+		const int industries = *config.industries;
+		if (industries < 1 || industries > static_cast<int>(IndustryPool::MAX_SIZE)) {
+			return JsonFail(error, fmt::format(
+				"configuration : nombre d'industries {} hors bornes (1..{})", industries, IndustryPool::MAX_SIZE));
+		}
+		_settings_newgame.difficulty.industry_density = static_cast<uint8_t>(ID_CUSTOM);
+		_settings_newgame.game_creation.custom_industry_number = static_cast<uint16_t>(industries);
+	}
+
+	if (config.disasters.has_value()) _settings_newgame.difficulty.disasters = *config.disasters;
+
+	if (config.ai_companies.has_value()) {
+		const int count = *config.ai_companies;
+		if (count < 0 || count >= static_cast<int>(MAX_COMPANIES)) {
+			return JsonFail(error, fmt::format(
+				"configuration : nombre d'IA {} hors bornes (0..{})", count, MAX_COMPANIES - 1));
+		}
+		/* Reflète la demande dans les réglages de difficulté (fenêtre IA,
+		 * remplacement des faillites) ; la création effective est faite
+		 * explicitement après la génération, de façon déterministe. */
+		_settings_newgame.difficulty.max_no_competitors = static_cast<uint8_t>(count);
+	}
+
+	return true;
+}
+
+/** Nom protocolaire d'un climat. */
+const char *LandscapeName(LandscapeType landscape)
+{
+	switch (landscape) {
+		case LandscapeType::Temperate: return "temperate";
+		case LandscapeType::Arctic:    return "subarctic";
+		case LandscapeType::Tropic: return "subtropical";
+		case LandscapeType::Toyland:   return "toyland";
+		default:                       return "unknown";
+	}
 }
 
 /** Pompe une itération de la boucle de jeu, sans rendu ni attente. */
@@ -620,6 +1085,34 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 		"\"counts\":{{\"companies\":{},\"towns\":{},\"industries\":{},\"stations\":{},\"vehicles\":{}}},",
 		companies, towns, industries, stations, vehicles);
 
+	/* --- Configuration appliquée (issue #60) ------------------------------ */
+	const GameSetupConfig &active = _ottd_active_config;
+	out += "\"config\":{\"climate\":";
+	AppendJsonString(out, LandscapeName(_settings_game.game_creation.landscape));
+	out += fmt::format(
+		",\"startYear\":{},\"difficulty\":{},\"aiCompanies\":{},\"towns\":{},\"industries\":{},"
+		"\"seed\":{},\"mapSize\":{},\"gameName\":",
+		_settings_game.game_creation.starting_year.base(),
+		active.difficulty.value_or(-1),
+		active.ai_companies.value_or(0),
+		active.towns.value_or(-1),
+		active.industries.value_or(-1),
+		_settings_game.game_creation.generation_seed,
+		Map::SizeX() == Map::SizeY() ? Map::SizeX() : 0);
+	AppendJsonString(out, active.game_name.value_or(""));
+	out += "}";
+
+	/* --- Avertissements non bloquants ------------------------------------- */
+	out += ",\"warnings\":[";
+	bool first_warning = true;
+	for (const std::string &warning : _ottd_warnings) {
+		if (!first_warning) out.push_back(',');
+		first_warning = false;
+		AppendJsonString(out, warning);
+	}
+	out.push_back(']');
+	out.push_back(',');
+
 	/* --- Entreprises ------------------------------------------------------ */
 	out += "\"companies\":[";
 	bool first = true;
@@ -797,9 +1290,69 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 	out += ",\"news\":[],\"events\":[]}";
 }
 
+/**
+ * Crée `count` entreprises IA et démarre leur script (`AI::StartNew`).
+ *
+ * `DoStartupNewCompany(true, id)` choisit les identifiants dans l'ordre
+ * croissant des emplacements libres : pour une même graine et une même
+ * configuration, les entreprises IA et leur script sont donc identiques.
+ *
+ * @param count nombre d'IA à démarrer.
+ * @param[out] error message lisible si le démarrage est incomplet.
+ * @return nombre d'IA effectivement démarrées.
+ */
+int StartAiCompanies(int count, std::string &error)
+{
+	int started = 0;
+	for (int i = 0; i < count; i++) {
+		CompanyID company_id = CompanyID::Invalid();
+		for (CompanyID candidate = CompanyID::Begin(); candidate < MAX_COMPANIES; ++candidate) {
+			if (!Company::IsValidID(candidate)) {
+				company_id = candidate;
+				break;
+			}
+		}
+		if (company_id == CompanyID::Invalid()) {
+			error = fmt::format("plus d'emplacement libre pour l'IA {} sur {}", i + 1, count);
+			break;
+		}
+
+		Company *company = DoStartupNewCompany(true, company_id);
+		if (company == nullptr) {
+			error = fmt::format("création de l'entreprise IA {} refusée", company_id.base());
+			break;
+		}
+		if (company->ai_info == nullptr) {
+			error = fmt::format("l'entreprise IA {} n'a pas de script associé", company_id.base());
+			break;
+		}
+		if (company->ai_info->GetName() == "DummyAI") {
+			error = "aucun script IA installé : OpenTTD a démarré l'IA factice (DummyAI)";
+			break;
+		}
+		started++;
+	}
+	return started;
+}
+
 } // namespace
 
 extern "C" {
+
+/**
+ * Hook appelé par OpenTTD (`UserErrorI`/`FatalErrorI`) juste avant l'arrêt.
+ *
+ * Le message est copié dans `_ottd_error` pour rester lisible via
+ * `ottd_last_error()` depuis JavaScript après l'exception/trap. Aucune
+ * allocation non triviale n'est faite au-delà de `std::string::assign`, et
+ * `Debug` n'est pas appelé (les pilotes peuvent déjà être arrêtés).
+ */
+extern "C" void OttdBridgeFatalErrorHook(const char *message)
+{
+	_ottd_error.assign(message != nullptr ? message : "erreur fatale sans message");
+	_ottd_in_game = false;
+	_exit_game = true;
+}
 
 /**
  * Initialise OpenTTD avec les pilotes null/web, puis rend la main.
@@ -810,7 +1363,12 @@ EMSCRIPTEN_KEEPALIVE int ottd_boot(void)
 	if (_ottd_booted) return 0;
 
 	_ottd_error.clear();
+	_ottd_warnings.clear();
+	_ottd_has_pending_config = false;
 	_exit_game = false;
+	/* Installé avant `openttd_main` : une erreur de pilote ou de baseset est
+	 * ainsi mémorisée avant `_exit`. */
+	_ottd_fatal_error_hook = OttdBridgeFatalErrorHook;
 
 	static const std::string arg0 = "openttd";
 	static const std::string arg_v = "-v";
@@ -855,12 +1413,18 @@ EMSCRIPTEN_KEEPALIVE int ottd_boot(void)
 
 /**
  * Démarre une nouvelle partie déterministe.
+ *
+ * Cœur commun aux trois points d'entrée publics (`ottd_new_game`,
+ * `ottd_new_game_ex`, `ottd_set_game_config` + `ottd_new_game`).
+ *
  * @param seed graine de génération (uint32_t)
  * @param w largeur de la carte (puissance de 2, 64..4096)
  * @param h hauteur de la carte (puissance de 2, 64..4096)
- * @return 0 en cas de succès, code d'erreur sinon.
+ * @param config configuration validée à appliquer avant la génération
+ * @return 0 en cas de succès, 5 si la partie est jouable mais que les IA n'ont
+ *         pas toutes démarré, code d'erreur sinon.
  */
-EMSCRIPTEN_KEEPALIVE int ottd_new_game(uint32_t seed, uint32_t w, uint32_t h)
+static int StartGame(uint32_t seed, uint32_t w, uint32_t h, const GameSetupConfig &config)
 {
 	if (!_ottd_booted) {
 		SetError("ottd_boot() doit être appelé avant ottd_new_game()");
@@ -871,9 +1435,17 @@ EMSCRIPTEN_KEEPALIVE int ottd_new_game(uint32_t seed, uint32_t w, uint32_t h)
 		return 2;
 	}
 
+	_ottd_error.clear();
+	_ottd_warnings.clear();
+
+	std::string config_error;
+	if (!ApplyGameConfig(config, w, h, config_error)) {
+		SetError(config_error);
+		return 4;
+	}
+
 	_exit_game = false;
 	_ottd_in_game = false;
-	_ottd_error.clear();
 
 	SetRandomSeed(seed);
 	_settings_newgame.game_creation.generation_seed = seed;
@@ -899,6 +1471,24 @@ EMSCRIPTEN_KEEPALIVE int ottd_new_game(uint32_t seed, uint32_t w, uint32_t h)
 		DoStartupNewCompany(false, CompanyID::Begin());
 		SetLocalCompany(CompanyID::Begin());
 	}
+
+	_ottd_active_config = config;
+
+	int result = 0;
+	const int ai_count = config.ai_companies.value_or(0);
+	if (ai_count > 0) {
+		std::string ai_error;
+		const int started = StartAiCompanies(ai_count, ai_error);
+		if (started < ai_count) {
+			_ottd_warnings.push_back(fmt::format(
+				"IA démarrées : {}/{} ({})", started, ai_count, ai_error));
+			/* La partie reste jouable : les entreprises déjà créées et la
+			 * génération du monde sont valides. Le code 5 le signale. */
+			result = 5;
+			SetError(_ottd_warnings.back());
+		}
+	}
+
 	_pause_mode = {};
 	_ottd_in_game = true;
 	_ottd_json_sequence = 0;
@@ -906,6 +1496,87 @@ EMSCRIPTEN_KEEPALIVE int ottd_new_game(uint32_t seed, uint32_t w, uint32_t h)
 
 	/* Un tick pour laisser les initialisations de partie se terminer. */
 	PumpOneTick();
+	return result;
+}
+
+/**
+ * Démarre une nouvelle partie déterministe avec la configuration en attente
+ * (`ottd_set_game_config`) ou les défauts OpenTTD.
+ *
+ * API compatible avec la v1 : sans `ottd_set_game_config`, cette fonction
+ * produit exactement le même monde que la version précédente du pont.
+ *
+ * @param seed graine de génération (uint32_t)
+ * @param w largeur de la carte (puissance de 2, 64..4096)
+ * @param h hauteur de la carte (puissance de 2, 64..4096)
+ * @return 0 en cas de succès, code d'erreur sinon (voir `ottd_last_error`).
+ */
+EMSCRIPTEN_KEEPALIVE int ottd_new_game(uint32_t seed, uint32_t w, uint32_t h)
+{
+	const GameSetupConfig config = _ottd_has_pending_config ? _ottd_pending_config : GameSetupConfig{};
+	return StartGame(seed, w, h, config);
+}
+
+/**
+ * Démarre une nouvelle partie avec une configuration JSON explicite.
+ *
+ * La configuration remplace celle posée par `ottd_set_game_config()` et reste
+ * active pour les prochains appels. `config_json` peut être `nullptr`, vide
+ * ou `"null"` pour démarrer avec les défauts.
+ *
+ * @param seed graine de génération (uint32_t)
+ * @param w largeur de la carte (puissance de 2, 64..4096)
+ * @param h hauteur de la carte (puissance de 2, 64..4096)
+ * @param config_json objet JSON plat (voir `GameSetupConfig`).
+ * @return 0 en cas de succès, 4 si la configuration est invalide (la partie
+ *         n'est pas démarrée), 5 si la partie est jouable sans toutes les IA.
+ */
+EMSCRIPTEN_KEEPALIVE int ottd_new_game_ex(uint32_t seed, uint32_t w, uint32_t h, const char *config_json)
+{
+	if (!_ottd_booted) {
+		SetError("ottd_boot() doit être appelé avant ottd_new_game_ex()");
+		return 1;
+	}
+
+	GameSetupConfig config;
+	if (config_json != nullptr) {
+		std::string config_error;
+		if (!ParseGameConfig(config_json, config, config_error)) {
+			SetError(config_error);
+			return 4;
+		}
+		_ottd_pending_config = config;
+		_ottd_has_pending_config = true;
+	} else {
+		config = _ottd_has_pending_config ? _ottd_pending_config : GameSetupConfig{};
+	}
+
+	return StartGame(seed, w, h, config);
+}
+
+/**
+ * Enregistre la configuration du prochain `ottd_new_game()`.
+ *
+ * @param config_json objet JSON plat, ou `nullptr`/vide/`"null` pour revenir
+ *        aux défauts OpenTTD.
+ * @return 0 si la configuration est valide, 4 sinon (rien n'est modifié).
+ */
+EMSCRIPTEN_KEEPALIVE int ottd_set_game_config(const char *config_json)
+{
+	GameSetupConfig config;
+	std::string config_error;
+	if (config_json != nullptr && !ParseGameConfig(config_json, config, config_error)) {
+		SetError(config_error);
+		return 4;
+	}
+
+	if (config_json == nullptr) {
+		_ottd_pending_config = GameSetupConfig{};
+		_ottd_has_pending_config = false;
+	} else {
+		_ottd_pending_config = config;
+		_ottd_has_pending_config = true;
+	}
 	return 0;
 }
 
@@ -921,7 +1592,8 @@ EMSCRIPTEN_KEEPALIVE int ottd_step(uint32_t ticks)
 	}
 	if (ticks == 0) return 0;
 
-	_ottd_error.clear();
+	/* Après une erreur fatale, on conserve le message pour `ottd_last_error`. */
+	if (!_exit_game) _ottd_error.clear();
 	uint32_t executed = 0;
 	while (executed < ticks) {
 		if (_exit_game) break;
@@ -1061,8 +1733,8 @@ EMSCRIPTEN_KEEPALIVE int ottd_snapshot_json(char *out, int capacity)
 	if (!_ottd_in_game) {
 		json = "{\"meta\":{\"protocol\":1,\"tick\":0,\"hash\":\"0x0000000000000000\",\"sequence\":0},"
 			"\"economy\":null,\"map\":null,\"counts\":{\"companies\":0,\"towns\":0,\"industries\":0,"
-			"\"stations\":0,\"vehicles\":0},\"companies\":[],\"towns\":[],\"industries\":[],"
-			"\"stations\":[],\"vehicles\":[],\"news\":[],\"events\":[]}";
+			"\"stations\":0,\"vehicles\":0},\"config\":null,\"warnings\":[],\"companies\":[],"
+			"\"towns\":[],\"industries\":[],\"stations\":[],\"vehicles\":[],\"news\":[],\"events\":[]}";
 	} else {
 		BuildWorldJson(json, width, height);
 	}
@@ -1087,6 +1759,7 @@ EMSCRIPTEN_KEEPALIVE int ottd_snapshot_json(char *out, int capacity)
 EMSCRIPTEN_KEEPALIVE void ottd_shutdown(void)
 {
 	if (!_ottd_booted) return;
+	_ottd_fatal_error_hook = nullptr;
 	_exit_game = true;
 	PostMainLoop();
 	_ottd_in_game = false;
