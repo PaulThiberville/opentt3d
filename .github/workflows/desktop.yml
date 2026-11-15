@@ -1,0 +1,82 @@
+name: Desktop builds
+
+# Empaquette l'enveloppe Electron nativement sur macOS et Windows, puis publie
+# les installeurs en artefacts de workflow (rétention 1 jour). Lancement manuel
+# uniquement : aucune release n'est créée et aucun secret de signature n'est
+# requis. Aucun cache n'est activé (politique projet : 1 heure maximum).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: mac
+            label: macOS (dmg, zip)
+            artifact: opentt3d-macos
+          - os: windows-latest
+            platform: win
+            label: Windows (installeur, zip)
+            artifact: opentt3d-windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Récupérer le moteur WASM (release engine-latest)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p public/engine
+          gh release download engine-latest \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'opentt3d-engine.*' \
+            --dir public/engine
+          ls -lh public/engine
+
+      - name: Vérifier les artefacts WASM
+        shell: bash
+        run: |
+          for file in opentt3d-engine.js opentt3d-engine.wasm opentt3d-engine.data; do
+            test -s "public/engine/$file" || { echo "::error::public/engine/$file manquant"; exit 1; }
+          done
+
+      - name: Tests
+        run: npm test
+
+      - name: Build web
+        run: npm run build
+
+      - name: Empaqueter (${{ matrix.platform }})
+        run: npx electron-builder --${{ matrix.platform }} --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
