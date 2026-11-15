@@ -5,7 +5,17 @@ import type { MapSnapshot } from '../src/engine/protocol';
 import { TILE_KIND_INDEX } from '../src/engine/protocol';
 import { sampleHeightWorld } from '../src/game/mapGrid';
 import { CHUNK_SIZE, TerrainLayer } from '../src/render/TerrainLayer';
-import { terrainBudget, terrainSubdivision } from '../src/render/terrainSurface';
+import {
+  TERRAIN_SKIN_BOUNDS,
+  glslBound,
+  terrainBudget,
+  terrainSubdivision,
+} from '../src/render/terrainSurface';
+import {
+  SHORE_MAX_DISTANCE,
+  WATER_WAVE_AMPLITUDE,
+  waterSurfaceHeight,
+} from '../src/render/waterSurface';
 
 function makeMap(width: number, height: number, water = false): MapSnapshot {
   const kind = new Uint8Array(width * height).fill(TILE_KIND_INDEX.grass);
@@ -46,6 +56,23 @@ function chunkMesh(layer: TerrainLayer, name: string): Mesh {
   const mesh = chunkMeshes(layer).find((candidate) => candidate.name === name);
   if (!mesh) throw new Error(`chunk terrain ${name} manquant`);
   return mesh;
+}
+
+function waterMeshes(layer: TerrainLayer): Mesh[] {
+  return layer.group.children.filter(
+    (child): child is Mesh => child instanceof THREE.Mesh && child.name.startsWith('water-'),
+  );
+}
+
+function extent(attribute: THREE.BufferAttribute): { min: number; max: number } {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let index = 0; index < attribute.count; index += 1) {
+    const value = attribute.getX(index);
+    min = Math.min(min, value);
+    max = Math.max(max, value);
+  }
+  return { min, max };
 }
 
 function totalTriangles(layer: TerrainLayer): number {
@@ -203,7 +230,15 @@ describe('TerrainLayer', () => {
     for (const name of ['terrain-0-0', 'terrain-1-1']) {
       const a = chunkMesh(first, name).geometry;
       const b = chunkMesh(second, name).geometry;
-      for (const attribute of ['position', 'normal', 'color', 'aNightGlow', 'aAo']) {
+      for (const attribute of [
+        'position',
+        'normal',
+        'color',
+        'aNightGlow',
+        'aAo',
+        'aShore',
+        'aDepth',
+      ]) {
         expect(Array.from(a.getAttribute(attribute).array)).toEqual(
           Array.from(b.getAttribute(attribute).array),
         );
@@ -266,6 +301,143 @@ describe('TerrainLayer', () => {
     layer.setMap(makeMap(64, 64, true));
     const names = layer.group.children.map((child) => child.name);
     expect(names.filter((name) => name.startsWith('water-')).length).toBeGreaterThan(0);
+    layer.dispose();
+  });
+
+  it('expose la distance à l’eau et la profondeur sans changer le budget', () => {
+    const layer = new TerrainLayer();
+    layer.setMap(makeMap(64, 64, true));
+    expect(layer.tileSubdivision).toBe(1);
+    expect(totalTriangles(layer)).toBe(64 * 64 * 2);
+
+    const geometry = chunkMesh(layer, 'terrain-0-0').geometry;
+    const position = geometry.getAttribute('position');
+    for (const name of ['aShore', 'aDepth']) {
+      const attribute = geometry.getAttribute(name);
+      expect(attribute.count).toBe(position.count);
+      expect(attribute.itemSize).toBe(1);
+    }
+
+    const shore = extent(geometry.getAttribute('aShore') as THREE.BufferAttribute);
+    expect(shore.min).toBe(0);
+    expect(shore.max).toBeGreaterThan(1);
+    expect(shore.max).toBeLessThanOrEqual(SHORE_MAX_DISTANCE);
+    // À l'autre bout de la carte, on est loin de l'eau : plage nulle.
+    const inland = extent(
+      chunkMesh(layer, 'terrain-1-1').geometry.getAttribute('aShore') as THREE.BufferAttribute,
+    );
+    expect(inland.min).toBeGreaterThan(3);
+
+    const depths = extent(geometry.getAttribute('aDepth') as THREE.BufferAttribute);
+    expect(depths.min).toBeGreaterThanOrEqual(0);
+    expect(depths.max).toBeLessThanOrEqual(1);
+    expect(depths.min).toBeLessThan(0.1);
+    expect(depths.max).toBeGreaterThan(0.3);
+
+    // Le maillage d'eau porte la même profondeur, interpolée par coin.
+    for (const water of waterMeshes(layer)) {
+      const waterDepth = extent(water.geometry.getAttribute('aDepth') as THREE.BufferAttribute);
+      expect(waterDepth.min).toBeGreaterThanOrEqual(0);
+      expect(waterDepth.max).toBeLessThanOrEqual(1);
+    }
+    layer.dispose();
+  });
+
+  it('tient l’eau au-dessus du lit et hors de tout z-fighting', () => {
+    const map = makeMap(64, 64, true);
+    const layer = new TerrainLayer();
+    layer.setMap(map);
+    const bed = sampleHeightWorld(map, 8.5, 8.5);
+    expect(bed).toBe(0);
+    const surface = waterSurfaceHeight(0);
+    expect(surface - bed).toBeGreaterThan(0.4);
+
+    const ground = chunkMesh(layer, 'terrain-0-0');
+    for (const water of waterMeshes(layer)) {
+      const positions = water.geometry.getAttribute('position');
+      for (let index = 0; index < positions.count; index += 1) {
+        const y = positions.getY(index);
+        expect(y).toBeCloseTo(surface, 6);
+        expect(y - bed).toBeGreaterThan(0.4);
+      }
+      const material = water.material as THREE.MeshPhongMaterial;
+      expect(material.transparent).toBe(true);
+      expect(material.depthWrite).toBe(false);
+      expect(material.polygonOffset).toBe(true);
+      expect(water.renderOrder).toBeGreaterThan(ground.renderOrder);
+    }
+
+    const ocean = layer.group.children.find((child) => child.name === 'ocean-backdrop') as
+      THREE.Mesh | undefined;
+    expect(ocean).toBeDefined();
+    expect(ocean?.position.y ?? 0).toBeLessThan(surface - 0.1);
+    layer.dispose();
+  });
+
+  it('ne recalcule le champ de distance que si un type de tuile change', () => {
+    const layer = new TerrainLayer();
+    layer.setMap(makeMap(64, 64, true));
+    expect(layer.shoreFieldBuilds).toBe(1);
+
+    const heightsOnly = makeMap(64, 64, true);
+    heightsOnly.heightMap[20 * 64 + 20] = 9;
+    layer.applyDelta(heightsOnly);
+    expect(layer.shoreFieldBuilds).toBe(1);
+
+    const kinds = makeMap(64, 64, true);
+    kinds.kind[20 * 64 + 20] = TILE_KIND_INDEX.road;
+    layer.applyDelta(kinds);
+    expect(layer.shoreFieldBuilds).toBe(2);
+    layer.dispose();
+  });
+
+  it('borne les seuils et la houle injectés dans les shaders', () => {
+    const layer = new TerrainLayer();
+    layer.setMap(makeMap(64, 64, true));
+
+    const ground = chunkMesh(layer, 'terrain-0-0');
+    const groundMaterial = ground.material as THREE.MeshLambertMaterial;
+    const groundShader = {
+      uniforms: {},
+      vertexShader: '#include <common>\n#include <beginnormal_vertex>\n#include <begin_vertex>',
+      fragmentShader:
+        '#include <common>\n#include <color_fragment>\n#include <normal_fragment_begin>\n#include <emissivemap_fragment>',
+    };
+    groundMaterial.onBeforeCompile(groundShader as never, null as never);
+    expect(groundShader.vertexShader).toContain('attribute float aShore');
+    expect(groundShader.vertexShader).toContain('attribute float aDepth');
+    const fragment = groundShader.fragmentShader;
+    const earthStart = Number(/TERRAIN_EARTH_START = ([0-9.]+);/.exec(fragment)?.[1]);
+    const rockStart = Number(/TERRAIN_ROCK_START = ([0-9.]+);/.exec(fragment)?.[1]);
+    expect(earthStart).toBeCloseTo(TERRAIN_SKIN_BOUNDS.earthSlope.start, 4);
+    expect(rockStart).toBeCloseTo(TERRAIN_SKIN_BOUNDS.rockSlope.start, 4);
+    expect(earthStart).toBeLessThan(rockStart);
+    expect(fragment).toContain(
+      `TERRAIN_ALPINE_WEIGHT = ${glslBound(TERRAIN_SKIN_BOUNDS.alpine.weight)};`,
+    );
+    expect(fragment).toContain('SKIN_SAND');
+    expect(fragment).toContain('SKIN_BED_DEEP');
+    expect(fragment).not.toContain('NaN');
+
+    const water = waterMeshes(layer)[0];
+    if (!water) throw new Error('maillage d’eau manquant');
+    const waterMaterial = water.material as THREE.MeshPhongMaterial;
+    const waterShader = {
+      uniforms: {},
+      vertexShader: '#include <common>\n#include <begin_vertex>',
+      fragmentShader:
+        '#include <common>\n#include <color_fragment>\n#include <normal_fragment_begin>\n#include <emissivemap_fragment>',
+    };
+    waterMaterial.onBeforeCompile(waterShader as never, null as never);
+    expect(waterShader.vertexShader).toContain(
+      `const float WATER_WAVE_AMPLITUDE = ${WATER_WAVE_AMPLITUDE.toFixed(5)};`,
+    );
+    expect(waterShader.vertexShader).toContain('vWaterDepth = aDepth;');
+    expect(waterShader.fragmentShader).toContain('WATER_SHALLOW');
+    expect(waterShader.fragmentShader).toContain('WATER_DEEP');
+    expect(waterShader.fragmentShader).toContain('diffuseColor.a');
+    expect(waterShader.fragmentShader).toContain('SKY_REFLECTION');
+    expect(waterShader.fragmentShader).not.toContain('NaN');
     layer.dispose();
   });
 

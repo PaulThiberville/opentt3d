@@ -14,18 +14,26 @@ export interface Rgb {
   b: number;
 }
 
-/** Palette de base par type de tuile (hex sRGB). */
+/**
+ * Palette de base par type de tuile (hex sRGB).
+ *
+ * Les verts sont volontairement saturés : les couleurs sont converties en
+ * espace linéaire avant d'alimenter les sommets (voir `hexToLinearRgb`), sans
+ * quoi l'encodage sRGB final délavait l'herbe vers un beige passé. `rough`
+ * reste un vert d'altitude plutôt qu'un beige : la roche est ajoutée par le
+ * shader selon la pente, pas par la palette.
+ */
 export const TILE_COLOURS: Record<TileKind, number> = {
   void: 0x0d1218,
-  clear: 0x5f8a43,
-  grass: 0x477334,
-  rough: 0x6d6452,
-  water: 0x1f4f70,
-  coast: 0xc2a878,
+  clear: 0x609344,
+  grass: 0x4f7d38,
+  rough: 0x5b7838,
+  water: 0x1d4a68,
+  coast: 0xcdb488,
   rail: 0x5c5348,
   road: 0x4d4d4f,
   house: 0x587a3e,
-  trees: 0x2f5428,
+  trees: 0x2d5827,
   station: 0x5b7044,
   industry: 0x746457,
   bridge: 0x6b5540,
@@ -61,6 +69,33 @@ export function hexToRgb(hex: number, out: Rgb = { r: 0, g: 0, b: 0 }): Rgb {
   out.g = ((hex >> 8) & 0xff) / 255;
   out.b = (hex & 0xff) / 255;
   return out;
+}
+
+/** Canal sRGB (0..1) vers l'espace linéaire attendu par Three.js. */
+export function srgbToLinear(value: number): number {
+  const c = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+/**
+ * Couleur hex sRGB vers triplet linéaire.
+ *
+ * Les `BufferAttribute` de couleur ne sont pas convertis par Three.js : écrire
+ * directement les octets sRGB dans les sommets revient à les traiter comme des
+ * valeurs linéaires. L'herbe ressortait alors lavée et beige. Cette conversion
+ * rétablit la teinte de la palette sous l'éclairage ACES.
+ */
+export function hexToLinearRgb(hex: number, out: Rgb = { r: 0, g: 0, b: 0 }): Rgb {
+  out.r = srgbToLinear(((hex >> 16) & 0xff) / 255);
+  out.g = srgbToLinear(((hex >> 8) & 0xff) / 255);
+  out.b = srgbToLinear((hex & 0xff) / 255);
+  return out;
+}
+
+/** Formate une couleur sRGB en `vec3` GLSL linéaire, pour les constantes du shader. */
+export function glslLinearColour(hex: number): string {
+  const rgb = hexToLinearRgb(hex);
+  return `vec3( ${rgb.r.toFixed(5)}, ${rgb.g.toFixed(5)}, ${rgb.b.toFixed(5)} )`;
 }
 
 /** Mélange linéaire de deux couleurs hex sRGB (0 = `a`, 1 = `b`). */
@@ -153,18 +188,60 @@ export function tileColour(
     default:
       break;
   }
-  // Altitude : les sommets tirent vers la roche claire.
+  // Herbe, prés et forêts : dérive de teinte (vert tendre ↔ vert profond)
+  // plutôt qu'un simple éclaircissement, pour éviter les plaques délavées.
   if (kind === 'grass' || kind === 'clear' || kind === 'trees' || kind === 'rough') {
-    const altitude = Math.max(0, Math.min(1, (heightLevel - 8) / 6));
-    if (altitude > 0) colour = mixColour(colour, 0x8d8676, altitude * 0.5);
-    if (steepness >= 3) colour = mixColour(colour, 0x5f584a, 0.32);
+    const drift = hashUnit2d(seed, heightLevel + 21, steepness + 31);
+    const tint = kind === 'trees' ? 0x244d22 : kind === 'rough' ? 0x748348 : 0x5d9438;
+    colour = mixColour(colour, tint, 0.06 + drift * 0.12);
+    // Altitude : très légère montée vers les pelouses alpines, la roche et la
+    // falaise étant désormais ajoutées par la peau procédurale selon la pente.
+    const altitude = Math.max(0, Math.min(1, (heightLevel - 10) / 5));
+    if (altitude > 0) colour = mixColour(colour, 0x6c7c4a, altitude * 0.1);
+    if (steepness >= 3) colour = mixColour(colour, 0x6a5c44, 0.18);
   }
   return colour;
 }
 
+/** Teintes de la peau procédurale, en sRGB (converties côté shader/sommets). */
+export const TERRAIN_SKIN_COLOURS = {
+  earth: 0x6b5638,
+  rock: 0x74766b,
+  rockDark: 0x4e5148,
+  sand: 0xcdb488,
+  wetSand: 0x9c855e,
+  bedShallow: 0x7c7c58,
+  bedDeep: 0x173841,
+  dryGrass: 0x8b9a4a,
+  skyReflection: 0xa8cada,
+} as const;
+
+export function smoothstep01(edge0: number, edge1: number, value: number): number {
+  if (edge0 === edge1) return value < edge0 ? 0 : 1;
+  const t = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+/** Eau peu profonde (turquoise) à profonde (bleu nuit). */
+export const WATER_SHALLOW_COLOUR = 0x55aab2;
+export const WATER_MID_COLOUR = 0x26738f;
+export const WATER_DEEP_COLOUR = 0x123f5b;
+
+/**
+ * Couleur d'eau pour un facteur de profondeur 0 (bord) à 1 (large).
+ * La rampe reste dans les bleus-verts : pas de gris, pas de beige.
+ */
+export function waterColourAtDepth(depth: number, seed = 0): number {
+  const d = Math.max(0, Math.min(1, Number.isFinite(depth) ? depth : 0));
+  let colour = mixColour(WATER_SHALLOW_COLOUR, WATER_MID_COLOUR, smoothstep01(0.02, 0.5, d));
+  colour = mixColour(colour, WATER_DEEP_COLOUR, smoothstep01(0.38, 1, d));
+  const shimmer = (hashUnit2d(seed, 0x37, 0x71) - 0.5) * 0.06;
+  return shadeColour(colour, shimmer);
+}
+
 /** Variation appliquée aux eaux peu profondes (proches d'une côte). */
 export function shallowWaterColour(seed: number): number {
-  return mixColour(TILE_COLOURS.water, 0x4a93b4, 0.2 + hashUnit2d(seed, 7, 3) * 0.08);
+  return mixColour(WATER_SHALLOW_COLOUR, 0x8fd0cd, 0.16 + hashUnit2d(seed, 7, 3) * 0.12);
 }
 
 /** Couleur d'un bâtiment de ville, selon le quartier et la graine. */
