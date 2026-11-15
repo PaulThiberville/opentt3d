@@ -20,6 +20,18 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Récupérer le moteur WASM (release engine-latest)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p public/engine
+          gh release download engine-latest \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'opentt3d-engine.*' \
+            --dir public/engine
+          ls -lh public/engine || true
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
