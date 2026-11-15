@@ -345,6 +345,127 @@ describe('CityLayer : gares', () => {
   });
 });
 
+describe('CityLayer : signatures et LOD', () => {
+  it('ne reconstruit pas les bâtiments pour un snapshot identique', () => {
+    const { map, town } = makeTownMap();
+    const layer = new CityLayer();
+    layer.build([town], map);
+    expect(layer.builds).toBe(1);
+    const buckets = layer.group.children.filter((child) => child.name.startsWith('city-'));
+    layer.build([{ ...town, population: town.population + 500 }], map);
+    expect(layer.builds).toBe(1);
+    expect(layer.group.children.filter((child) => child.name.startsWith('city-'))).toEqual(buckets);
+    layer.dispose();
+  });
+
+  it('reconstruit quand une tuile house ou une hauteur change', () => {
+    const { map, town } = makeTownMap();
+    const layer = new CityLayer();
+    layer.build([town], map);
+    expect(layer.builds).toBe(1);
+
+    const houseIndex = 32 * map.width + 32;
+    map.heightMap[houseIndex] = 8;
+    layer.build([town], map);
+    expect(layer.builds).toBe(2);
+
+    map.kind[houseIndex] = TILE_KIND_INDEX.road;
+    layer.build([town], map);
+    expect(layer.builds).toBe(3);
+    layer.dispose();
+  });
+
+  it('conserve l’état near/far entre les deux seuils (hystérésis)', () => {
+    const { map, town } = makeTownMap();
+    const layer = new CityLayer();
+    layer.build([town], map);
+    const centre = new THREE.Vector3(town.x, 20, town.y);
+    layer.update(centre);
+    expect(layer.distantTownCount).toBe(0);
+
+    // 88 tuiles : entre near (80) et far (~94), on garde le détail.
+    layer.update(new THREE.Vector3(town.x, 20, town.y + 88));
+    expect(layer.distantTownCount).toBe(0);
+    expect(layer.lodSwitches).toBe(0);
+
+    layer.update(new THREE.Vector3(town.x, 20, town.y + 110));
+    expect(layer.distantTownCount).toBe(1);
+    expect(layer.lodSwitches).toBe(1);
+
+    // Retour à 88 : on reste en silhouette tant qu'on ne repasse pas sous 80.
+    layer.update(new THREE.Vector3(town.x, 20, town.y + 88));
+    expect(layer.distantTownCount).toBe(1);
+    expect(layer.lodSwitches).toBe(1);
+
+    layer.update(new THREE.Vector3(town.x, 20, town.y + 70));
+    expect(layer.distantTownCount).toBe(0);
+    expect(layer.lodSwitches).toBe(2);
+    layer.dispose();
+  });
+
+  it('ne réinstancie que les lots touchés par une bascule', () => {
+    const map = makeMap(160, 160);
+    const towns: TownSnapshot[] = [];
+    for (const [id, cx, cy] of [
+      [1, 32, 32],
+      [2, 122, 32],
+      [3, 116, 32],
+    ] as const) {
+      towns.push(makeTownAt(map, id, cx, cy));
+    }
+    const layer = new CityLayer();
+    layer.build(towns, map);
+
+    // Éloigne tout le monde, puis rapproche deux villes : la troisième reste
+    // en silhouette basse.
+    layer.update(new THREE.Vector3(500, 20, 500));
+    expect(layer.distantTownCount).toBe(3);
+    layer.update(new THREE.Vector3(42, 20, 32));
+    expect(layer.distantTownCount).toBe(1);
+
+    const nearBefore = layer.group.children.filter(
+      (child) => child.name.startsWith('city-') && child.name !== 'city-far',
+    );
+    layer.bucketRebuilds = 0;
+    // La troisième ville (x=122) passe sous le seuil near ; les deux autres
+    // restent near. Seuls ses lots doivent être réinstanciés.
+    layer.update(new THREE.Vector3(64, 20, 32));
+    expect(layer.distantTownCount).toBe(0);
+    const nearAfter = layer.group.children.filter(
+      (child) => child.name.startsWith('city-') && child.name !== 'city-far',
+    );
+    expect(layer.bucketRebuilds).toBeGreaterThan(0);
+    expect(layer.bucketRebuilds).toBeLessThan(nearAfter.length);
+    expect(nearAfter.some((mesh) => nearBefore.includes(mesh))).toBe(true);
+    layer.dispose();
+  });
+});
+
+/** Ville carrée compacte autour d'un centre. */
+function makeTownAt(map: MapSnapshot, id: number, cx: number, cy: number): TownSnapshot {
+  let count = 0;
+  for (let dy = -6; dy <= 6; dy += 1) {
+    for (let dx = -6; dx <= 6; dx += 1) {
+      if (dx * dx + dy * dy > 36) continue;
+      const x = cx + dx;
+      const y = cy + dy;
+      if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
+      map.kind[y * map.width + x] = TILE_KIND_INDEX.house;
+      count += 1;
+    }
+  }
+  return {
+    id,
+    name: `Ville ${id}`,
+    x: cx + 0.5,
+    y: cy + 0.5,
+    population: 3_000,
+    growthRate: 1,
+    buildings: count,
+    rating: 70,
+  };
+}
+
 /** Lacet d'un quaternion de rotation Y uniquement. */
 function quaternionToYaw(quaternion: THREE.Quaternion): number {
   const euler = new THREE.Euler().setFromQuaternion(quaternion, 'YXZ');
