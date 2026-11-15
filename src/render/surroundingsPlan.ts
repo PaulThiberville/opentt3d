@@ -27,14 +27,15 @@ import {
   type Rgb,
 } from './tileVisuals';
 import {
-  WATER_LEVEL_OFFSET,
   sampleField,
+  waterBedHeight,
   waterDepthFactor,
+  waterSurfaceHeight,
   type ShoreFields,
 } from './waterSurface';
 
 /** Niveau de l'eau (identique aux tuiles d'eau du terrain). */
-export const SEA_LEVEL = WATER_LEVEL_OFFSET;
+export const SEA_LEVEL = waterSurfaceHeight(0);
 
 /** Lit visé au bout de la jupe, sous le niveau de la mer. */
 export const SKIRT_SEABED = -1.8;
@@ -124,7 +125,17 @@ export function surroundingHeight(
   budget: SurroundingsBudget = SURROUNDINGS_BUDGETS.medium,
 ): number {
   const distance = distanceOutsideMap(map, x, z);
-  if (distance <= 0) return sampleHeightWorld(map, x, z);
+  if (distance <= 0) {
+    // Le maillage du terrain abaisse le lit des tuiles d'eau : la jupe doit
+    // reprendre cette hauteur, pas le dessus de la tuile.
+    const ix = Math.max(0, Math.min(map.width - 1, Math.floor(x)));
+    const iz = Math.max(0, Math.min(map.height - 1, Math.floor(z)));
+    const index = ix + iz * map.width;
+    if (tileKindFromIndex(map.kind[index] ?? 0) === 'water') {
+      return waterBedHeight(map.heightMap[index] ?? 0);
+    }
+    return sampleHeightWorld(map, x, z);
+  }
   const edgeX = clamp(x, 0, map.width);
   const edgeZ = clamp(z, 0, map.height);
   const edge = sampleHeightWorld(map, edgeX, edgeZ);
