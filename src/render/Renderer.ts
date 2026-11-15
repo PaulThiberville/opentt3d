@@ -10,11 +10,14 @@ import * as THREE from 'three';
 import { clamp } from '../game/interpolation';
 import { Prng } from '../game/prng';
 import { approachPhase, sunState, wrap01, type SunState } from './dayNight';
+import { PostFX, type PostFxPassName, type PostFxStatus } from './PostFX';
+import { postFxSettings } from './postFxConfig';
 import {
   detectQuality,
   qualitySettings,
   resolvePixelRatio,
   resolveRenderSize,
+  resolveShadowFrustum,
   type QualityLevel,
   type QualitySettings,
 } from './quality';
@@ -38,6 +41,7 @@ export interface RendererDiagnostics {
   width: number;
   height: number;
   quality: QualityLevel;
+  postFx: PostFxStatus;
 }
 
 export class Renderer {
@@ -71,6 +75,9 @@ export class Renderer {
   private resizeObserver: ResizeObserver | null = null;
   private focus = new THREE.Vector3();
   private forward = new THREE.Vector3();
+  private postfx: PostFX | null = null;
+  private lastPostFxNight = -1;
+  private shadowFrustumRadius = 0;
   private disposed = false;
 
   constructor(options: RendererOptions) {
@@ -97,8 +104,13 @@ export class Renderer {
     this.webgl.outputColorSpace = THREE.SRGBColorSpace;
     this.webgl.toneMapping = THREE.ACESFilmicToneMapping;
     this.webgl.toneMappingExposure = 1.02;
+    // `PCFSoftShadowMap` a été retiré de Three ; PCF + radius donne une ombre
+    // douce équivalente sans avertissement console.
     this.webgl.shadowMap.enabled = this.settings.shadows;
-    this.webgl.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.webgl.shadowMap.type = THREE.PCFShadowMap;
+    // Les diagnostics cumulent toutes les passes de la frame (scène, ombres,
+    // post-processing) : `reset()` est appelé au début de chaque rendu.
+    this.webgl.info.autoReset = false;
 
     this.scene.background = new THREE.Color(0x9dc3dc);
     this.fog = new THREE.Fog(0x9dc3dc, this.settings.fogNear, this.settings.drawDistance);
@@ -117,14 +129,12 @@ export class Renderer {
     this.sun.shadow.mapSize.set(this.settings.shadowMapSize, this.settings.shadowMapSize);
     this.sun.shadow.camera.near = 1;
     this.sun.shadow.camera.far = 420;
-    this.sun.shadow.camera.left = -80;
-    this.sun.shadow.camera.right = 80;
-    this.sun.shadow.camera.top = 80;
-    this.sun.shadow.camera.bottom = -80;
-    this.sun.shadow.bias = -0.0006;
-    this.sun.shadow.normalBias = 0.5;
+    this.sun.shadow.bias = this.settings.shadowBias;
+    this.sun.shadow.normalBias = this.settings.shadowNormalBias;
+    this.sun.shadow.radius = this.settings.shadowRadius;
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
+    this.applyShadowSettings();
 
     this.moon = new THREE.DirectionalLight(0x9fb6e8, 0);
     this.moon.castShadow = false;
@@ -175,6 +185,7 @@ export class Renderer {
     this.scene.add(this.moonDisc);
 
     this.applyDayNightState();
+    this.postfx = this.createPostFx();
 
     this.resize();
     window.addEventListener('resize', this.handleResize);
@@ -225,20 +236,52 @@ export class Renderer {
   setQuality(level: QualityLevel): void {
     this.qualityLevel = level;
     this.settings = qualitySettings(level);
-    this.webgl.shadowMap.enabled = this.settings.shadows;
-    this.sun.castShadow = this.settings.shadows;
-    this.sun.shadow.mapSize.set(this.settings.shadowMapSize, this.settings.shadowMapSize);
-    if (this.sun.shadow.map) {
-      this.sun.shadow.map.dispose();
-      this.sun.shadow.map = null;
-    }
+    this.applyShadowSettings();
     this.hemi.intensity = this.settings.ambientLight;
     this.fog.near = this.settings.fogNear;
     this.fog.far = this.settings.drawDistance;
     this.camera.far = this.settings.drawDistance;
     this.camera.updateProjectionMatrix();
+    this.postfx?.dispose();
+    this.postfx = this.createPostFx();
+    this.lastPostFxNight = -1;
     this.applyDayNightState();
     this.resize();
+  }
+
+  /** Statut du post-processing (passes actives, repli éventuel). */
+  get postFxStatus(): PostFxStatus {
+    return (
+      this.postfx?.status ?? {
+        requested: false,
+        active: false,
+        passes: [],
+        warnings: [],
+        fallbackReason: null,
+        estimatedCostMs: 0,
+      }
+    );
+  }
+
+  get postFxActive(): boolean {
+    return this.postfx?.active ?? false;
+  }
+
+  /**
+   * Active/désactive le composer à chaud (debug). En `low`, aucun pipeline
+   * n'existe : la méthode reste sans effet et renvoie `false`.
+   */
+  setPostProcessing(enabled: boolean): boolean {
+    return this.postfx?.setEnabled(enabled) ?? false;
+  }
+
+  togglePostProcessing(): boolean {
+    return this.postfx?.toggle() ?? false;
+  }
+
+  /** Debug : coupe une passe du composer sans changer de preset. */
+  setPostFxPass(name: PostFxPassName, enabled: boolean): boolean {
+    return this.postfx?.setPassEnabled(name, enabled) ?? false;
   }
 
   start(onFrame?: (deltaSeconds: number) => void): void {
@@ -269,6 +312,7 @@ export class Renderer {
     const size = resolveRenderSize(cssWidth, cssHeight, this.qualityLevel, window.devicePixelRatio);
     this.webgl.setPixelRatio(size.pixelRatio);
     this.webgl.setSize(size.width, size.height, false);
+    this.postfx?.setSize(size.width, size.height, size.pixelRatio);
     this.camera.aspect = size.width / Math.max(1, size.height);
     this.camera.updateProjectionMatrix();
   }
@@ -283,6 +327,7 @@ export class Renderer {
       width: Math.round(size.x),
       height: Math.round(size.y),
       quality: this.qualityLevel,
+      postFx: this.postFxStatus,
     };
   }
 
@@ -307,7 +352,10 @@ export class Renderer {
     this.dayState = sunState(this.phase);
     this.applyDayNightState();
     this.updateCelestialPositions();
-    this.webgl.render(this.scene, this.camera);
+    this.webgl.info.reset();
+    if (!this.postfx?.render(deltaSeconds)) {
+      this.webgl.render(this.scene, this.camera);
+    }
   }
 
   /** Couleurs, intensités et éléments de ciel pour la phase courante. */
@@ -334,6 +382,11 @@ export class Renderer {
     this.starMaterial.opacity = state.starOpacity * 0.9;
     this.moonDisc.visible = showSky && state.night > 0.12;
     this.moonDiscMaterial.opacity = Math.min(1, state.night * 0.95);
+
+    if (this.postfx && Math.abs(state.night - this.lastPostFxNight) > 0.002) {
+      this.lastPostFxNight = state.night;
+      this.postfx.setNight(state.night);
+    }
   }
 
   /** Soleil, lune et étoiles suivent la caméra et le point visé. */
@@ -348,7 +401,7 @@ export class Renderer {
     this.sun.position.copy(this.focus).addScaledVector(this.sunDirection, SUN_DISTANCE);
     this.sun.target.position.copy(this.focus);
     this.sun.target.updateMatrixWorld();
-    if (this.settings.shadows) this.sun.shadow.camera.updateProjectionMatrix();
+    this.updateShadowFrustum();
 
     this.moonDirection
       .set(-state.direction.x, Math.max(0.15, -state.direction.y), -state.direction.z)
@@ -363,6 +416,67 @@ export class Renderer {
       .copy(this.camera.position)
       .addScaledVector(this.moonDirection, MOON_RADIUS);
     this.moonDisc.lookAt(this.camera.position);
+  }
+
+  private createPostFx(): PostFX | null {
+    try {
+      return new PostFX({
+        renderer: this.webgl,
+        scene: this.scene,
+        camera: this.camera,
+        settings: postFxSettings(this.qualityLevel),
+        pixelRatio: resolvePixelRatio(
+          this.qualityLevel,
+          typeof window === 'undefined' ? 1 : window.devicePixelRatio,
+        ),
+      });
+    } catch (error) {
+      console.warn('[OpenTT3D] Post-processing désactivé :', error);
+      return null;
+    }
+  }
+
+  /** Applique la configuration d'ombre du preset (PCF doux, budget borné). */
+  private applyShadowSettings(): void {
+    const settings = this.settings;
+    this.webgl.shadowMap.enabled = settings.shadows;
+    this.webgl.shadowMap.type = THREE.PCFShadowMap;
+    this.sun.castShadow = settings.shadows;
+    this.sun.shadow.mapSize.set(settings.shadowMapSize, settings.shadowMapSize);
+    this.sun.shadow.bias = settings.shadowBias;
+    this.sun.shadow.normalBias = settings.shadowNormalBias;
+    this.sun.shadow.radius = settings.shadowRadius;
+    this.sun.shadow.camera.near = 1;
+    this.sun.shadow.camera.far = 420;
+    this.sun.shadow.camera.left = -settings.shadowFrustum;
+    this.sun.shadow.camera.right = settings.shadowFrustum;
+    this.sun.shadow.camera.top = settings.shadowFrustum;
+    this.sun.shadow.camera.bottom = -settings.shadowFrustum;
+    this.sun.shadow.camera.updateProjectionMatrix();
+    this.shadowFrustumRadius = 0;
+    if (this.sun.shadow.map) {
+      this.sun.shadow.map.dispose();
+      this.sun.shadow.map = null;
+    }
+  }
+
+  /**
+   * Une cascade unique ajustée à la distance de la caméra : le frustum d'ombre
+   * s'élargit quand on dézoome, ce qui garde des texels exploitables sans
+   * payer deux passes de profondeur.
+   */
+  private updateShadowFrustum(): void {
+    if (!this.settings.shadows) return;
+    const distance = this.camera.position.distanceTo(this.focus);
+    const radius = resolveShadowFrustum(this.settings.shadowFrustum, distance);
+    if (Math.abs(radius - this.shadowFrustumRadius) < 0.5) return;
+    this.shadowFrustumRadius = radius;
+    const camera = this.sun.shadow.camera;
+    camera.left = -radius;
+    camera.right = radius;
+    camera.top = radius;
+    camera.bottom = -radius;
+    camera.updateProjectionMatrix();
   }
 
   private handleResize = (): void => {
@@ -402,6 +516,8 @@ export class Renderer {
     document.removeEventListener('visibilitychange', this.handleVisibility);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.postfx?.dispose();
+    this.postfx = null;
     this.scene.remove(this.sun);
     this.scene.remove(this.sun.target);
     this.scene.remove(this.moon);
