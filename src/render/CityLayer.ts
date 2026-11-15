@@ -1,0 +1,207 @@
+/**
+ * Rendu des villes : bâtiments low-poly instanciés.
+ *
+ * Pour chaque ville, deux `InstancedMesh` (corps + toits) sont reconstruits à
+ * partir des tuiles `house` de la carte. La variation (taille, hauteur, teinte)
+ * est déterministe : une même ville produit toujours le même bâti. Les
+ * empreintes sont bornées à 0,78 tuile pour ne jamais déborder.
+ */
+
+import * as THREE from 'three';
+import type { MapSnapshot, TownSnapshot } from '../engine/protocol';
+import { sampleHeightWorld, tileKindFromIndex } from '../game/mapGrid';
+import { Prng, hashUnit2d } from '../game/prng';
+import { buildingColour, hexToRgb } from './tileVisuals';
+
+const MAX_RADIUS = 10;
+const MAX_FOOTPRINT = 0.78;
+
+export interface CityPickTarget {
+  mesh: THREE.InstancedMesh;
+  townForInstance(instanceId: number): number | null;
+}
+
+interface CityInstances {
+  townId: number;
+  bodies: THREE.InstancedMesh;
+  roofs: THREE.InstancedMesh;
+  townIds: number[];
+}
+
+export class CityLayer {
+  readonly group = new THREE.Group();
+
+  private bodyGeometry: THREE.BoxGeometry;
+  private roofGeometry: THREE.ConeGeometry;
+  private bodyMaterial: THREE.MeshLambertMaterial;
+  private roofMaterial: THREE.MeshLambertMaterial;
+  private cities = new Map<number, CityInstances>();
+  private map: MapSnapshot | null = null;
+  private shadows = false;
+
+  constructor() {
+    this.group.name = 'cities';
+    this.bodyGeometry = new THREE.BoxGeometry(1, 1, 1);
+    this.bodyGeometry.translate(0, 0.5, 0);
+    this.roofGeometry = new THREE.ConeGeometry(Math.SQRT1_2, 1, 4);
+    this.roofGeometry.rotateY(Math.PI / 4);
+    this.roofGeometry.translate(0, 0.5, 0);
+    this.bodyMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    this.roofMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  }
+
+  /** Reconstruit les bâtiments de toutes les villes. */
+  build(towns: readonly TownSnapshot[], map: MapSnapshot): void {
+    this.map = map;
+    this.clear();
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    const colour = new THREE.Color();
+    const rgb = { r: 0, g: 0, b: 0 };
+
+    for (const town of towns) {
+      const placements: {
+        x: number;
+        y: number;
+        height: number;
+        width: number;
+        depth: number;
+        body: number;
+        roof: number;
+        roofHeight: number;
+      }[] = [];
+      const rng = new Prng((town.id + 1) * 7919 + map.width);
+      const centerX = Math.floor(town.x);
+      const centerY = Math.floor(town.y);
+
+      for (let dy = -MAX_RADIUS; dy <= MAX_RADIUS; dy += 1) {
+        for (let dx = -MAX_RADIUS; dx <= MAX_RADIUS; dx += 1) {
+          const x = centerX + dx;
+          const y = centerY + dy;
+          if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
+          const index = y * map.width + x;
+          if (tileKindFromIndex(map.kind[index] ?? 0) !== 'house') continue;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          if (distance > MAX_RADIUS) continue;
+
+          const footprint = Math.min(MAX_FOOTPRINT, 0.56 + rng.float(0, 0.22));
+          const centrality = Math.max(0, 1 - distance / MAX_RADIUS);
+          const tall = centrality > 0.62 && hashUnit2d(town.id, x, y) > 0.55;
+          const height = tall ? 1.5 + rng.float(0, 1.6) : 0.55 + rng.float(0, 0.75);
+          placements.push({
+            x: x + 0.5 + rng.float(-0.03, 0.03),
+            y: y + 0.5 + rng.float(-0.03, 0.03),
+            height,
+            width: footprint,
+            depth: Math.min(MAX_FOOTPRINT, footprint * rng.float(0.85, 1.08)),
+            body: buildingColour(town.id * 31 + x, y, 0x9aa0a4),
+            roof: tall ? 0x5a5f66 : rng.chance(0.5) ? 0x8a4a3c : 0x5f5a52,
+            roofHeight: tall ? 0.22 : 0.3 + rng.float(0, 0.16),
+          });
+        }
+      }
+
+      if (placements.length === 0) continue;
+      const bodies = new THREE.InstancedMesh(this.bodyGeometry, this.bodyMaterial, placements.length);
+      const roofs = new THREE.InstancedMesh(this.roofGeometry, this.roofMaterial, placements.length);
+      bodies.name = `city-${town.id}-bodies`;
+      roofs.name = `city-${town.id}-roofs`;
+      bodies.castShadow = this.shadows;
+      bodies.receiveShadow = true;
+      roofs.castShadow = this.shadows;
+      const townIds: number[] = [];
+      quaternion.identity();
+
+      for (let i = 0; i < placements.length; i += 1) {
+        const placement = placements[i];
+        if (!placement) continue;
+        const ground = sampleHeightWorld(map, placement.x, placement.y);
+        position.set(placement.x, ground, placement.y);
+        scale.set(placement.width, placement.height, placement.depth);
+        matrix.compose(position, quaternion, scale);
+        bodies.setMatrixAt(i, matrix);
+        hexToRgb(placement.body, rgb);
+        colour.setRGB(rgb.r, rgb.g, rgb.b);
+        bodies.setColorAt(i, colour);
+
+        position.set(placement.x, ground + placement.height, placement.y);
+        scale.set(placement.width * 1.04, placement.roofHeight, placement.depth * 1.04);
+        matrix.compose(position, quaternion, scale);
+        roofs.setMatrixAt(i, matrix);
+        hexToRgb(placement.roof, rgb);
+        colour.setRGB(rgb.r, rgb.g, rgb.b);
+        roofs.setColorAt(i, colour);
+        townIds.push(town.id);
+      }
+
+      bodies.instanceMatrix.needsUpdate = true;
+      roofs.instanceMatrix.needsUpdate = true;
+      if (bodies.instanceColor) bodies.instanceColor.needsUpdate = true;
+      if (roofs.instanceColor) roofs.instanceColor.needsUpdate = true;
+      bodies.computeBoundingSphere();
+      roofs.computeBoundingSphere();
+      this.group.add(bodies);
+      this.group.add(roofs);
+      this.cities.set(town.id, { townId: town.id, bodies, roofs, townIds });
+    }
+  }
+
+  setShadows(enabled: boolean): void {
+    this.shadows = enabled;
+    for (const city of this.cities.values()) {
+      city.bodies.castShadow = enabled;
+      city.roofs.castShadow = enabled;
+    }
+  }
+
+  get buildingCount(): number {
+    let total = 0;
+    for (const city of this.cities.values()) total += city.bodies.count;
+    return total;
+  }
+
+  get drawCallCount(): number {
+    return this.cities.size * 2;
+  }
+
+  pickTargets(): CityPickTarget[] {
+    const targets: CityPickTarget[] = [];
+    for (const city of this.cities.values()) {
+      targets.push({
+        mesh: city.bodies,
+        townForInstance: (instanceId: number) => city.townIds[instanceId] ?? null,
+      });
+      targets.push({
+        mesh: city.roofs,
+        townForInstance: (instanceId: number) => city.townIds[instanceId] ?? null,
+      });
+    }
+    return targets;
+  }
+
+  private clear(): void {
+    for (const city of this.cities.values()) {
+      this.group.remove(city.bodies);
+      this.group.remove(city.roofs);
+      city.bodies.dispose();
+      city.roofs.dispose();
+    }
+    this.cities.clear();
+  }
+
+  dispose(): void {
+    this.clear();
+    this.group.clear();
+    this.bodyGeometry.dispose();
+    this.roofGeometry.dispose();
+    this.bodyMaterial.dispose();
+    this.roofMaterial.dispose();
+    this.map = null;
+  }
+
+  get mapSnapshot(): MapSnapshot | null {
+    return this.map;
+  }
+}
