@@ -3539,3 +3539,118 @@ select.input {
     max-height: 55vh;
   }
 }
+
+/* Mode photo (#121) : le HUD disparaît, l'overlay de raccourcis reste lisible. */
+body.photo-mode .hud,
+body.photo-mode .badge,
+body.photo-mode .save-chip {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+body.photo-mode #scene {
+  cursor: grab;
+}
+
+.photo-overlay {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-width: min(440px, calc(100vw - 32px));
+  padding: 12px 14px;
+  border: 1px solid var(--hud-border);
+  border-radius: var(--hud-radius);
+  background: var(--hud-bg);
+  box-shadow: var(--hud-shadow);
+  color: var(--hud-text);
+  pointer-events: auto;
+}
+
+.photo-overlay[hidden] {
+  display: none;
+}
+
+.photo-overlay-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--hud-accent);
+}
+
+.photo-overlay-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--hud-muted);
+}
+
+.photo-overlay-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.photo-preset,
+.photo-capture {
+  padding: 5px 10px;
+  border: 1px solid var(--hud-border-strong);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--hud-text);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.photo-preset:hover,
+.photo-capture:hover {
+  border-color: var(--hud-accent);
+}
+
+.photo-preset.is-active {
+  border-color: var(--hud-accent);
+  background: var(--hud-accent-soft);
+  color: var(--hud-accent);
+}
+
+.photo-capture {
+  align-self: flex-start;
+  border-color: var(--hud-accent);
+  color: var(--hud-accent);
+}
+
+.photo-overlay-status {
+  margin: 0;
+  min-height: 0;
+  font-size: 10px;
+  color: var(--hud-muted);
+}
+
+/* Intro cinématique : simple invitation à passer, jamais bloquante. */
+.intro-hint {
+  position: fixed;
+  left: 50%;
+  bottom: 44px;
+  z-index: 55;
+  transform: translateX(-50%);
+  padding: 7px 14px;
+  border: 1px solid var(--hud-border);
+  border-radius: 999px;
+  background: var(--hud-bg);
+  color: var(--hud-muted);
+  font-size: 11px;
+  pointer-events: none;
+  transition: opacity 400ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .intro-hint {
+    transition: none;
+  }
+}
