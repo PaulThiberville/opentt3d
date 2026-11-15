@@ -52,6 +52,13 @@ import {
   updateSettings,
   type GameSettings,
 } from './ui/settings';
+import { defaultSaveName, type SaveRecord } from './ui/saveFormat';
+import {
+  describeSaveError,
+  openSaveStore,
+  type NewSaveInput,
+  type SaveStoreHandle,
+} from './ui/saveStore';
 import { AboutScreen } from './ui/screens/AboutScreen';
 import { DisconnectedScreen } from './ui/screens/DisconnectedScreen';
 import { GameOverScreen } from './ui/screens/GameOverScreen';
@@ -61,6 +68,7 @@ import { MainMenuScreen } from './ui/screens/MainMenuScreen';
 import { MultiplayerScreen, type CreateRoomRequest } from './ui/screens/MultiplayerScreen';
 import { NewGameScreen } from './ui/screens/NewGameScreen';
 import { PauseScreen } from './ui/screens/PauseScreen';
+import { SaveScreen } from './ui/screens/SaveScreen';
 import { ScreenManager } from './ui/screens/ScreenManager';
 import { SettingsScreen } from './ui/screens/SettingsScreen';
 import type { GameOverSummary } from './ui/types';
@@ -87,6 +95,17 @@ if (window.localStorage.getItem(SETTINGS_STORAGE_KEY) === null) {
 }
 let session: GameSession | null = null;
 let settingsOrigin: SettingsOrigin = 'menu';
+let saveStorePromise: Promise<SaveStoreHandle> | null = null;
+let autosavePending = false;
+
+/**
+ * Ouvre le stockage local une seule fois par page. `openSaveStore` retombe sur
+ * un backend mémoire si IndexedDB est refusé ; l'écran de sauvegarde l'annonce.
+ */
+function ensureSaveStore(): Promise<SaveStoreHandle> {
+  saveStorePromise ??= openSaveStore();
+  return saveStorePromise;
+}
 
 const webglAvailable = Renderer.isWebGLAvailable();
 
@@ -224,6 +243,7 @@ function showMainMenu(): void {
     new MainMenuScreen({
       onSolo: () => showNewGame(),
       onMultiplayer: () => showMultiplayer(),
+      onLoad: () => showSaveScreen('menu'),
       onSettings: () => showSettings('menu'),
       onAbout: () => showAbout(),
       unavailableReason: webglAvailable
@@ -471,7 +491,105 @@ function soloCallbacks(loading?: LoadingScreen): GameSessionCallbacks {
       persistSettings(updateSettings(settings, { quality }));
       pendingOptions = { ...pendingOptions, quality };
     },
+    onAutosave: () => {
+      void runAutosave();
+    },
   };
+}
+
+/** Options d'affichage à réutiliser pour une sauvegarde chargée. */
+function loadedGameOptions(record: SaveRecord): NewGameOptions {
+  const patch: Partial<Record<keyof NewGameOptions, unknown>> = {
+    quality: settings.quality,
+  };
+  if (record.seed !== null) patch.seed = record.seed;
+  if (record.mapSize !== null) patch.size = record.mapSize;
+  return mergeNewGameOptions({ ...pendingOptions, quality: settings.quality }, patch);
+}
+
+async function startLoadedGame(record: SaveRecord): Promise<void> {
+  // L'ancienne session (le cas échéant) est libérée avant toute allocation :
+  // pas de contexte WebGL ni de listener orphelin pendant le chargement.
+  disposeSession();
+  if (!webglAvailable) {
+    showMainMenu();
+    return;
+  }
+  const options = loadedGameOptions(record);
+  replayOptions = options;
+  pendingOptions = options;
+  persistSettings(updateSettings(settings, { quality: options.quality }));
+
+  const token: LoadToken = { cancelled: false };
+  const loading: LoadingScreen = new LoadingScreen({
+    onCancel: () => {
+      token.cancelled = true;
+      loading.setCancelling();
+    },
+    onClose: () => showMainMenu(),
+  });
+  screens.show('loading', loading);
+  loading.setProgress(0.02, `Restauration de « ${record.name} »…`);
+
+  const next = new GameSession({
+    canvas: sceneCanvas,
+    uiRoot: uiMount,
+    config: options,
+    settings,
+    engine: record.engine,
+    loadedGame: {
+      bytes: record.bytes,
+      options,
+      engine: record.engine,
+      name: record.name,
+    },
+    callbacks: soloCallbacks(loading),
+  });
+  session = next;
+
+  try {
+    await next.load(token);
+    if (token.cancelled) throw new LoadCancelledError();
+    screens.hide();
+    next.setInputEnabled(true);
+    // La partie a souvent été sauvegardée depuis la pause : on reprend
+    // immédiatement après la restauration.
+    next.resume();
+    exposeDebug(next);
+  } catch (error) {
+    const cancelled = token.cancelled || error instanceof LoadCancelledError;
+    next.dispose();
+    if (session === next) session = null;
+    if (cancelled) {
+      showMainMenu();
+      return;
+    }
+    const message = describeUnknownError(error);
+    loading.setError(
+      'Impossible de charger la sauvegarde',
+      `${message} Vérifiez que le fichier correspond bien au moteur ${record.engine === 'wasm' ? 'WASM' : 'mock'}.`,
+    );
+  }
+}
+
+/** Autosave glissant : capture, écriture, rotation, toast discret. */
+async function runAutosave(): Promise<void> {
+  const current = session;
+  if (!current || current.isNetwork || autosavePending) return;
+  autosavePending = true;
+  try {
+    const handle = await ensureSaveStore();
+    if (session !== current || current.isNetwork) return;
+    const captured = await current.captureSave();
+    const slot = await handle.store.saveAutosave(captured);
+    if (session === current) current.notifySave(`Partie sauvegardée · ${slot.name}`);
+  } catch (error) {
+    if (session === current) {
+      current.notifySaveError(`Autosave impossible : ${describeSaveError(error)}`);
+    }
+  } finally {
+    autosavePending = false;
+  }
 }
 
 async function startNetworkGame(info: StartInfo): Promise<void> {
@@ -535,6 +653,46 @@ async function startNetworkGame(info: StartInfo): Promise<void> {
   }
 }
 
+/**
+ * Écran Sauvegarder / Charger. Depuis la pause, il capture la session en cours ;
+ * depuis le menu principal, il ne fait que lister/importer et charger.
+ */
+function showSaveScreen(origin: 'menu' | 'pause'): void {
+  const current = session;
+  if (origin === 'pause' && current) {
+    current.setInputEnabled(false);
+    current.pause();
+  }
+  const capture =
+    origin === 'pause' && current
+      ? async (): Promise<Omit<NewSaveInput, 'name'>> => current.captureSave()
+      : undefined;
+  const overview = origin === 'pause' ? (current?.getOverview() ?? null) : null;
+  const liveDate = current?.gameInstance?.getLatestSnapshot()?.economy ?? null;
+
+  screens.show(
+    'saves',
+    new SaveScreen({
+      store: ensureSaveStore(),
+      mode: origin === 'pause' ? 'both' : 'load',
+      onBack: () => {
+        if (origin === 'pause' && current && session === current) showPause();
+        else showMainMenu();
+      },
+      onLoad: (record) => {
+        screens.hide();
+        void startLoadedGame(record);
+      },
+      ...(capture ? { capture } : {}),
+      suggestedName: defaultSaveName(liveDate),
+      ...(overview
+        ? { currentLabel: `${overview.company} · ${overview.date} · ${overview.money}` }
+        : {}),
+      onSaved: (slot) => current?.notifySave(`Partie sauvegardée : « ${slot.name} »`),
+    }),
+  );
+}
+
 function showPause(): void {
   const current = session;
   if (!current) return;
@@ -550,6 +708,8 @@ function showPause(): void {
         current.setInputEnabled(true);
         current.resume();
       },
+      onSave: () => showSaveScreen('pause'),
+      onLoad: () => showSaveScreen('pause'),
       onSettings: () => showSettings('pause'),
       onQuit: () => {
         screens.hide();
@@ -638,6 +798,9 @@ function exposeDebug(current: GameSession): void {
     session: current,
     screens,
     endGame: (reason: string) => current.endGame(reason),
+    listSaves: async () => (await ensureSaveStore()).store.list(),
+    captureSave: () => current.captureSave(),
+    restored: current.restoredStateInfo,
   };
   (window as unknown as Record<string, unknown>).__opentt3d = api;
 }

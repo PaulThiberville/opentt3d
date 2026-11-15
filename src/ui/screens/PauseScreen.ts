@@ -12,6 +12,10 @@ export interface PauseScreenOptions {
   onResume: () => void;
   onSettings: () => void;
   onQuit: () => void;
+  /** Ouvre l'écran de sauvegarde (solo uniquement). */
+  onSave?: () => void;
+  /** Ouvre l'écran de chargement (solo uniquement). */
+  onLoad?: () => void;
   /** En réseau, la simulation continue : le menu est local. */
   network?: boolean;
 }
@@ -83,7 +87,35 @@ export class PauseScreen extends BaseScreen {
     });
     this.quitButton.addEventListener('click', () => this.showConfirm());
 
-    this.actions.append(resume, settings, this.quitButton);
+    this.actions.append(resume);
+    if (!options.network && options.onSave) {
+      const save = el('button', {
+        className: 'btn btn-ghost',
+        text: 'Sauvegarder la partie',
+        attrs: { type: 'button' },
+      });
+      save.addEventListener('click', () => options.onSave?.());
+      this.actions.append(save);
+    }
+    if (!options.network && options.onLoad) {
+      const load = el('button', {
+        className: 'btn btn-ghost',
+        text: 'Charger une sauvegarde',
+        attrs: { type: 'button' },
+      });
+      load.addEventListener('click', () => options.onLoad?.());
+      this.actions.append(load);
+    }
+    this.actions.append(settings, this.quitButton);
+
+    if (options.network) {
+      this.actions.append(
+        el('p', {
+          className: 'screen-note',
+          text: 'Les sauvegardes locales sont désactivées pendant une partie réseau : la progression est détenue par l’hôte.',
+        }),
+      );
+    }
 
     this.confirm = el('div', {
       className: 'confirm',
