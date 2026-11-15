@@ -7,6 +7,7 @@
 
 import { COMPANY_NONE, type MapSnapshot, type WorldSnapshot } from '../engine/protocol';
 import { TILE_KINDS, tileIndex } from '../game/mapGrid';
+import { depotKindAt, depotKindLabel } from '../game/vehicleRules';
 import type { Selection } from '../game/Game';
 import type { WorldTarget } from '../render/WorldView';
 import { companyColour } from '../render/tileVisuals';
@@ -170,12 +171,14 @@ export function describeSelection(
         ownerId === COMPANY_NONE
           ? 'Aucune'
           : (snapshot.companies.find((company) => company.id === ownerId)?.name ?? `#${ownerId}`);
+      const depot = depotKindAt(map, x, y);
+      const typeLabel = depot ? depotKindLabel(depot) : tileKindLabel(kind);
       return {
         selection,
-        title: `Tuile (${x}, ${y})`,
-        detail: `${tileKindLabel(kind)} · hauteur ${formatDecimal(Number(height))}`,
+        title: depot ? `${typeLabel} (${x}, ${y})` : `Tuile (${x}, ${y})`,
+        detail: `${typeLabel} · hauteur ${formatDecimal(Number(height))}`,
         stats: [
-          { label: 'Type', value: tileKindLabel(kind) },
+          { label: 'Type', value: typeLabel },
           { label: 'Hauteur', value: formatDecimal(Number(height)) },
           {
             label: 'Propriétaire',

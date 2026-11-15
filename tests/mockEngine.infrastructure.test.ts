@@ -9,6 +9,7 @@ import {
   type StationSettings,
 } from '../src/game/buildRules';
 import { tileIndex } from '../src/game/mapGrid';
+import { DEPOT_TRACK_BIT } from '../src/game/vehicleRules';
 
 async function createEngine(seed = 1234, size = 128): Promise<MockEngine> {
   const engine = new MockEngine();
@@ -221,7 +222,8 @@ describe('MockEngine : dépôts et signaux', () => {
     const index = tileIndex(spot.x, spot.y, built.width);
     expect(built.kind[index]).toBe(TILE_KIND_INDEX.road);
     expect(built.owner[index]).toBe(0);
-    expect(built.trackBits[index]).toBe(1 | 4);
+    expect((built.trackBits[index] ?? 0) & 0x0f).toBe(1 | 4);
+    expect((built.trackBits[index] ?? 0) & DEPOT_TRACK_BIT).toBe(DEPOT_TRACK_BIT);
     expect((after.companies[0]?.money ?? 0) - moneyBefore).toBe(-520);
     expect(after.news.some((item) => item.text.includes('Dépôt routier'))).toBe(true);
   });

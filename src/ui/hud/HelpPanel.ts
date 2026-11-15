@@ -18,6 +18,8 @@ const CONTROLS: [string, string][] = [
   ['R (gare/dépôt)', 'Pivoter l’orientation'],
   ['Ctrl + Z', 'Démolir la dernière construction'],
   ['Clic droit (construction)', 'Annuler le tracé'],
+  ['Clic sur un dépôt', 'Acheter, vendre ou démarrer un véhicule'],
+  ['Ajouter une gare', 'Puis clic sur une gare/dépôt pour compléter la tournée'],
   ['Échap', 'Quitter l’outil / pause'],
   ['Espace', 'Pause'],
 ];
@@ -41,7 +43,7 @@ export class HelpPanel {
     }
     const hint = el('p', {
       className: 'hud-help-hint',
-      text: 'Minimap : clic pour recentrer. Gares, dépôts et signaux : barre du bas, options au-dessus de la barre.',
+      text: 'Minimap : clic pour recentrer. Gares, dépôts et signaux : barre du bas. Un dépôt ouvre l’achat de véhicules et l’éditeur de tournée.',
     });
     this.element.append(title, list, hint);
     this.element.hidden = true;
