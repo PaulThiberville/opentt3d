@@ -71,7 +71,6 @@ import { BuildController } from './buildController';
 import { describeBuildPlan } from './buildHint';
 import { prefersReducedMotion } from './dom';
 import type { NewGameOptions } from './gameOptions';
-import { t } from './i18n';
 import { formatGameDate, formatMoney } from './format';
 import { t } from './i18n';
 import type { BuildToolId } from './hud/Toolbar';
