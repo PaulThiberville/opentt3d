@@ -25,8 +25,10 @@ export const MAX_MESSAGE_BYTES = 256 * 1024;
 /** Channels are short identifiers so they fit Trystero action names. */
 export const MAX_CHANNEL_LENGTH = 24;
 
-/** A save is chunked because a real OpenTTD save can exceed the message cap. */
-export const MAX_SAVE_CHUNK_CHARS = 48 * 1024;
+/** A save is chunked because a real OpenTTD save can exceed the message cap.
+ * 32 KiB of UTF-16 code units is at most ~192 KiB once JSON-escaped, safely
+ * below the 256 KiB transport limit. */
+export const MAX_SAVE_CHUNK_CHARS = 32 * 1024;
 export const MAX_SAVE_CHUNKS = 1024;
 
 /** Player index attached to a command by the host. */
