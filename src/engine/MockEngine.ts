@@ -35,6 +35,7 @@ import {
 import { Prng, StateHash, fbm, valueNoise } from '../game/prng';
 import { decodeBase64, encodeBase64 } from '../game/base64';
 import { sampleHeightWorld } from '../game/mapGrid';
+import { BUILD_TOOL_LABELS, planBuild, type BuildTool } from '../game/buildRules';
 
 /** Ticks moteur par jour de jeu (OpenTTD : `TICKS_PER_DAY`). */
 export const TICKS_PER_DAY = 74;
@@ -1178,6 +1179,89 @@ function updateVehiclesTransforms(world: MockWorld): void {
 }
 
 // ---------------------------------------------------------------------------
+// Construction
+// ---------------------------------------------------------------------------
+
+const UNAVAILABLE_BUILD: Partial<Record<string, string>> = {
+  station: 'Gares : la construction arrive avec l’issue #28.',
+  depot: 'Dépôts : la construction arrive avec l’issue #28.',
+  signal: 'Signaux : la construction arrive avec l’issue #28.',
+  bridge: 'Ponts : construction à venir.',
+  tunnel: 'Tunnels : construction à venir.',
+};
+
+const BUILT_KIND: Record<'road' | 'rail', number> = { road: K.road, rail: K.rail };
+
+/**
+ * Applique une commande de construction. Le mock rejoue les règles partagées
+ * (`buildRules.ts`) avant de toucher la carte : une commande invalide ne change
+ * ni les tableaux, ni la trésorerie, et publie une news d'erreur que le HUD
+ * affiche telle quelle.
+ */
+function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'build' }>): void {
+  const company = world.companies[command.company];
+  if (!company) {
+    addNews(world, 'error', `Construction refusée : entreprise #${command.company} inconnue.`);
+    return;
+  }
+  if (company.bankrupt) {
+    addNews(world, 'error', 'Construction refusée : votre entreprise est en faillite.');
+    return;
+  }
+  if (command.tool !== 'road' && command.tool !== 'rail' && command.tool !== 'clear') {
+    addNews(
+      world,
+      'error',
+      UNAVAILABLE_BUILD[command.tool] ?? `Outil de construction « ${command.tool} » indisponible.`,
+    );
+    return;
+  }
+
+  const tool: BuildTool = command.tool;
+  const axis = command.options?.axis === 'y' ? 'y' : 'x';
+  const plan = planBuild({
+    map: mapSnapshotView(world),
+    tool,
+    from: command.from,
+    to: command.to,
+    axis,
+    company: command.company,
+    budget: company.money,
+  });
+
+  if (!plan.valid) {
+    addNews(world, 'error', `Construction impossible : ${plan.reason ?? 'tracé refusé.'}`);
+    return;
+  }
+
+  for (const tile of plan.tiles) {
+    if (tool === 'clear') {
+      world.kind[tile.index] = K.grass;
+      world.owner[tile.index] = COMPANY_NONE;
+      world.trackBits[tile.index] = 0;
+      world.flags[tile.index] = 0;
+      continue;
+    }
+    world.kind[tile.index] = BUILT_KIND[tool];
+    world.owner[tile.index] = command.company;
+    world.trackBits[tile.index] = tile.connections;
+    world.flags[tile.index] = 0;
+  }
+
+  company.money -= plan.cost;
+  world.mapDirty = true;
+  world.mapVersion += 1;
+
+  const label = BUILD_TOOL_LABELS[tool];
+  const tiles = plan.tiles.length;
+  addNews(
+    world,
+    'info',
+    `${label} : ${tiles} tuile${tiles > 1 ? 's' : ''} pour ${Math.round(plan.cost)} £.`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Simulation
 // ---------------------------------------------------------------------------
 
@@ -1637,8 +1721,11 @@ export class MockEngine implements EngineDriver {
         addNews(world, 'info', `Console : ${command.command}`);
         break;
       case 'build':
+        applyBuild(world, command);
+        break;
       case 'vehicle':
-        // Construction non implémentée dans le mock : elle arrivera avec le WASM.
+        // Achat/ordres de véhicules : arrive avec la vague suivante (#29).
+        addNews(world, 'warning', 'Gestion des véhicules : disponible avec l’issue #29.');
         break;
       default:
         break;
@@ -1682,6 +1769,18 @@ export class MockEngine implements EngineDriver {
       hash.mixInt(vehicle.direction);
       hash.mixInt(vehicle.status);
       hash.mixInt(vehicle.cargoAmount);
+    }
+    // La carte fait partie de l'état : une construction doit changer le hash
+    // pour que le lockstep détecte une divergence de terrain.
+    for (const layer of [
+      world.kind,
+      world.heightMap,
+      world.owner,
+      world.slope,
+      world.flags,
+      world.trackBits,
+    ]) {
+      for (let i = 0; i < layer.length; i += 1) hash.mixInt(layer[i] ?? 0);
     }
     return hash.digest();
   }
