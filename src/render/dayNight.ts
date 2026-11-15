@@ -15,10 +15,11 @@ import type { EconomySnapshot } from '../engine/protocol';
 export const DAY_TICKS = 74;
 
 /**
- * Convention de rendu : une nouvelle journée de jeu démarre en matinée (07:12).
+ * Convention de rendu : une nouvelle journée de jeu démarre en fin de matinée
+ * (10:48), pour éviter qu'une nouvelle partie s'ouvre dans la pénombre.
  * La phase reste linéaire sur 74 ticks et minuit reste à 0, midi à 0,5.
  */
-export const DAY_START_OFFSET = 0.3;
+export const DAY_START_OFFSET = 0.45;
 
 export const TAU = Math.PI * 2;
 /** Élévation maximale du soleil (radians), volontairement sous le zénith. */

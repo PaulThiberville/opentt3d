@@ -115,7 +115,7 @@ export class AttractScene {
       const snapshot = game.getLatestSnapshot();
       if (snapshot) this.applySnapshot(snapshot);
       // Lumière dorée de fin de matinée : la démo met les volumes en valeur.
-      world.setDayNightPhase(0.42);
+      world.setDayNightPhase(0.45);
 
       this.running = true;
       this.lastFrame = 0;
@@ -170,7 +170,7 @@ export class AttractScene {
       const snapshot = game.getLatestSnapshot();
       if (snapshot) this.applySnapshot(snapshot);
       // Lumière dorée de fin de matinée : la démo met les volumes en valeur.
-      world.setDayNightPhase(0.42);
+      world.setDayNightPhase(0.45);
       world.update(delta, game.getInterpolation());
       this.updateCamera(delta, renderer);
       renderer.renderNow();
