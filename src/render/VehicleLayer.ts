@@ -64,6 +64,15 @@ export class VehicleLayer {
   private up = new THREE.Vector3(0, 1, 0);
   private tint = new THREE.Color();
   private modelCounts = new Map<VehicleVariant, number>();
+  private colourCache = new Map<number, { r: number; g: number; b: number }>();
+  private lastSignature = 0;
+  private lastColourSignature = 0;
+  private hasSignature = false;
+  private slotsCreated = 0;
+  /** Uploads de matrices d'instances (diagnostic/tests). */
+  matrixUploads = 0;
+  /** Uploads de couleurs d'instances (diagnostic/tests). */
+  colourUploads = 0;
 
   constructor() {
     this.group.name = 'vehicles';
@@ -95,6 +104,20 @@ export class VehicleLayer {
 
   /** Met à jour toutes les instances à partir des véhicules interpolés. */
   update(vehicles: readonly RenderVehicle[]): void {
+    const signature = vehicleSignature(vehicles);
+    const colourSignature = vehicleColourSignature(vehicles);
+    if (this.hasSignature && signature === this.lastSignature) {
+      // Position, orientation, statut et livrée inchangés (pause, gare…) :
+      // aucun buffer GPU n'est réuploadé.
+      this.updateHalo(vehicles);
+      return;
+    }
+    const coloursChanged = !this.hasSignature || colourSignature !== this.lastColourSignature;
+    this.lastSignature = signature;
+    this.lastColourSignature = colourSignature;
+    this.hasSignature = true;
+    this.slotsCreated = 0;
+
     for (const slot of this.slots.values()) slot.used = 0;
 
     this.modelCounts.clear();
@@ -103,6 +126,10 @@ export class VehicleLayer {
       this.modelCounts.set(variant, (this.modelCounts.get(variant) ?? 0) + 1);
     }
     for (const [variant, count] of this.modelCounts) this.ensureSlot(variant, count);
+
+    // Une nouvelle instance créée doit recevoir ses couleurs même si la
+    // livrée globale n'a pas changé.
+    const mustUploadColours = coloursChanged || this.slotsCreated > 0;
 
     for (const vehicle of vehicles) {
       const variant = variantFor(vehicle.model, vehicle.id);
@@ -117,11 +144,12 @@ export class VehicleLayer {
       this.matrix.compose(this.position, this.quaternion, this.scale);
       slot.mesh.setMatrixAt(index, this.matrix);
 
-      const base = companyColour(vehicle.company);
-      const rgb = hexToRgb(base);
-      const dim = vehicle.status === 0 ? 0.65 : 1;
-      this.tint.setRGB(rgb.r * dim, rgb.g * dim, rgb.b * dim);
-      slot.mesh.setColorAt(index, this.tint);
+      if (mustUploadColours) {
+        const rgb = this.companyRgb(vehicle.company);
+        const dim = vehicle.status === 0 ? 0.65 : 1;
+        this.tint.setRGB(rgb.r * dim, rgb.g * dim, rgb.b * dim);
+        slot.mesh.setColorAt(index, this.tint);
+      }
 
       slot.ids[index] = vehicle.id;
       slot.used = index + 1;
@@ -130,11 +158,25 @@ export class VehicleLayer {
     for (const slot of this.slots.values()) {
       slot.mesh.count = slot.used;
       slot.mesh.instanceMatrix.needsUpdate = true;
-      if (slot.mesh.instanceColor) slot.mesh.instanceColor.needsUpdate = true;
+      this.matrixUploads += 1;
+      if (mustUploadColours && slot.mesh.instanceColor) {
+        slot.mesh.instanceColor.needsUpdate = true;
+        this.colourUploads += 1;
+      }
       slot.mesh.visible = slot.used > 0;
     }
 
+    this.slotsCreated = 0;
     this.updateHalo(vehicles);
+  }
+
+  private companyRgb(company: number): { r: number; g: number; b: number } {
+    let rgb = this.colourCache.get(company);
+    if (!rgb) {
+      rgb = hexToRgb(companyColour(company));
+      this.colourCache.set(company, rgb);
+    }
+    return rgb;
   }
 
   private ensureSlot(variant: VehicleVariant, needed: number): ModelSlot {
@@ -157,6 +199,7 @@ export class VehicleLayer {
     for (let i = 0; i < capacity; i += 1) mesh.setColorAt(i, white);
     mesh.count = 0;
     this.group.add(mesh);
+    this.slotsCreated += 1;
     slot = {
       definition,
       mesh,
@@ -256,5 +299,49 @@ export class VehicleLayer {
     this.haloMaterial.dispose();
     this.library.dispose();
     this.material.dispose();
+    this.colourCache.clear();
+    this.modelCounts.clear();
+    this.hasSignature = false;
+    this.lastSignature = 0;
+    this.lastColourSignature = 0;
+    this.slotsCreated = 0;
   }
+}
+
+const FNV_OFFSET = 0x811c9dc5;
+const FNV_PRIME = 0x01000193;
+
+/** Empreinte des données qui pilotent matrices et couleurs d'instances. */
+export function vehicleSignature(vehicles: readonly RenderVehicle[]): number {
+  let hash = FNV_OFFSET;
+  hash = Math.imul(hash ^ vehicles.length, FNV_PRIME) >>> 0;
+  for (const vehicle of vehicles) {
+    hash = Math.imul(hash ^ vehicle.id, FNV_PRIME) >>> 0;
+    hash = Math.imul(hash ^ quantize(vehicle.x), FNV_PRIME) >>> 0;
+    hash = Math.imul(hash ^ quantize(vehicle.y), FNV_PRIME) >>> 0;
+    hash = Math.imul(hash ^ quantize(vehicle.z), FNV_PRIME) >>> 0;
+    hash = Math.imul(hash ^ (vehicle.direction & 255), FNV_PRIME) >>> 0;
+    hash = Math.imul(hash ^ vehicle.status, FNV_PRIME) >>> 0;
+    hash = Math.imul(hash ^ vehicle.company, FNV_PRIME) >>> 0;
+    for (let index = 0; index < vehicle.model.length; index += 1) {
+      hash = Math.imul(hash ^ vehicle.model.charCodeAt(index), FNV_PRIME) >>> 0;
+    }
+  }
+  return hash >>> 0;
+}
+
+/** Empreinte de la livrée seule : un déplacement ne réuploade pas les couleurs. */
+export function vehicleColourSignature(vehicles: readonly RenderVehicle[]): number {
+  let hash = FNV_OFFSET;
+  hash = Math.imul(hash ^ vehicles.length, FNV_PRIME) >>> 0;
+  for (const vehicle of vehicles) {
+    hash = Math.imul(hash ^ vehicle.id, FNV_PRIME) >>> 0;
+    hash = Math.imul(hash ^ vehicle.company, FNV_PRIME) >>> 0;
+    hash = Math.imul(hash ^ vehicle.status, FNV_PRIME) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+function quantize(value: number): number {
+  return Number.isFinite(value) ? Math.round(value * 100_000) : 0;
 }
