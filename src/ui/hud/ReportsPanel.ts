@@ -261,7 +261,7 @@ export class ReportsPanel {
     const tick = finite(snapshot.meta.tick);
     if (tick === null) return;
     const last = this.history[this.history.length - 1];
-    if (last && tick < last.tick) this.history = [];
+    if (last && tick < (last.tick ?? 0)) this.history = [];
     const current = this.history[this.history.length - 1];
     if (current && current.tick === tick) {
       current.money = money;

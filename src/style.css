@@ -5400,3 +5400,309 @@ body.photo-mode #scene {
     transition: none;
   }
 }
+
+/* ------------------------------------------------- finances et faillite (#165) */
+
+.hud-finance {
+  position: absolute;
+  top: 84px;
+  right: 12px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(380px, calc(100vw - 24px));
+  max-height: min(78vh, calc(100vh - 96px));
+  overflow: auto;
+  padding: 13px;
+  background: linear-gradient(180deg, rgba(24, 34, 43, 0.95), rgba(9, 14, 19, 0.97));
+  border: 1px solid var(--hud-border-strong);
+  border-radius: var(--hud-radius);
+  box-shadow: var(--hud-shadow);
+  backdrop-filter: blur(16px) saturate(1.05);
+  -webkit-backdrop-filter: blur(16px) saturate(1.05);
+  pointer-events: auto;
+  animation: panel-in 190ms var(--ease-out);
+}
+
+.hud-finance-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--hud-border);
+}
+
+.hud-finance-title {
+  flex: 1;
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+}
+
+.hud-finance-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.hud-finance-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 8px;
+  border: 1px solid var(--hud-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.hud-finance-stat .hud-label {
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--hud-muted);
+}
+
+.hud-finance-value,
+.hud-finance-money {
+  color: var(--hud-accent-strong);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-finance-loan {
+  color: var(--hud-company);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-finance-flow {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--hud-muted);
+}
+
+.hud-finance-loans {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.hud-finance-loans .btn {
+  padding: 6px 8px;
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-finance-loan-increase:not(:disabled) {
+  border-color: var(--hud-accent);
+  color: var(--hud-accent-strong);
+}
+
+.hud-finance-loan-decrease:not(:disabled) {
+  border-color: var(--hud-company);
+  color: var(--hud-company);
+}
+
+.hud-finance-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 10px;
+}
+
+.hud-finance-warning {
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid rgba(229, 180, 92, 0.45);
+  border-radius: 8px;
+  background: rgba(229, 180, 92, 0.12);
+  color: var(--hud-warn);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.hud-finance-warning[data-tone='error'] {
+  border-color: rgba(229, 125, 119, 0.5);
+  background: rgba(229, 125, 119, 0.14);
+  color: var(--hud-error);
+}
+
+.hud-finance-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--hud-border);
+}
+
+.hud-finance-chart-wrap {
+  padding: 5px 6px;
+  border: 1px solid var(--hud-border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.hud-finance-chart {
+  display: block;
+  width: 100%;
+  height: 72px;
+}
+
+.hud-finance-chart-grid {
+  stroke: rgba(255, 255, 255, 0.09);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.hud-finance-chart-money {
+  stroke: var(--hud-accent-strong);
+  stroke-width: 1.6;
+  vector-effect: non-scaling-stroke;
+}
+
+.hud-finance-chart-value {
+  stroke: var(--hud-company);
+  stroke-width: 1.3;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.hud-finance-chart-empty {
+  fill: var(--hud-muted);
+  font-size: 10px;
+}
+
+.hud-finance-legend {
+  display: flex;
+  gap: 12px;
+  font-size: 10px;
+  color: var(--hud-muted);
+}
+
+.hud-finance-legend-money::before,
+.hud-finance-legend-value::before {
+  content: '';
+  display: inline-block;
+  width: 12px;
+  height: 2px;
+  margin-right: 5px;
+  vertical-align: middle;
+  background: var(--hud-accent-strong);
+}
+
+.hud-finance-legend-value::before {
+  background: var(--hud-company);
+}
+
+.hud-finance-subsidies {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hud-finance-subsidy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 8px;
+  border: 1px solid var(--hud-border);
+  border-left: 2px solid var(--hud-border-strong);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.hud-finance-subsidy[data-state='awarded'] {
+  border-left-color: var(--hud-accent);
+  background: var(--hud-accent-soft);
+}
+
+.hud-finance-subsidy[data-state='foreign'] {
+  opacity: 0.72;
+}
+
+.hud-finance-subsidy-title {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.hud-finance-subsidy-detail {
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.hud-finance-subsidy-detail.is-good {
+  color: var(--hud-accent);
+}
+
+.hud-place-action-town {
+  border-color: rgba(127, 212, 160, 0.32);
+  color: var(--hud-accent-strong);
+}
+
+.hud-bankruptcy {
+  position: absolute;
+  top: 76px;
+  left: 50%;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(620px, calc(100vw - 24px));
+  padding: 7px 12px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(229, 180, 92, 0.45);
+  border-radius: 999px;
+  background: var(--hud-bg-strong);
+  color: var(--hud-warn);
+  font-size: 11px;
+  box-shadow: var(--hud-shadow-sm);
+  pointer-events: auto;
+  animation: panel-in 190ms var(--ease-out);
+}
+
+.hud-bankruptcy[data-tone='error'] {
+  border-color: rgba(229, 125, 119, 0.55);
+  color: var(--hud-error);
+}
+
+.hud-bankruptcy-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-bankruptcy-action {
+  flex: none;
+  padding: 3px 8px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.hud-bankruptcy-action:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+@media (max-width: 720px) {
+  .hud-finance {
+    top: auto;
+    bottom: 12px;
+    right: 12px;
+    max-height: min(64vh, calc(100vh - 96px));
+  }
+
+  .hud-bankruptcy {
+    top: 72px;
+    max-width: calc(100vw - 24px);
+  }
+}

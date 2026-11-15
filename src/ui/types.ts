@@ -5,7 +5,7 @@
  * les écrans et les modules purs.
  */
 
-import type { WorldSnapshot } from '../engine/protocol';
+import type { TownActionKind, WorldSnapshot } from '../engine/protocol';
 import type { GameSpeed, Selection } from '../game/Game';
 import type { QualityLevel } from '../render/quality';
 import type { NewsKind } from './news';
@@ -49,13 +49,18 @@ export interface PlacePanelSection {
 /**
  * Action de panneau lieu. `supported` est faux quand le protocole v1 n'expose
  * pas la commande : le bouton reste désactivé et `reason` explique l'absence.
+ * `kind: 'town'` porte une action municipale payante (#166).
  */
 export interface PlacePanelAction {
   id: string;
   label: string;
-  kind: 'focus' | 'unsupported';
+  kind: 'focus' | 'unsupported' | 'town';
   supported: boolean;
   reason?: string;
+  /** Coût formaté de l'action municipale, quand `kind === 'town'`. */
+  cost?: string;
+  /** Action transmise au moteur (`town_action`). */
+  townAction?: TownActionKind;
 }
 
 /** Panneau ville, industrie ou gare, alimenté par le seul snapshot. */
@@ -140,6 +145,56 @@ export interface NetworkStatusView {
   tone: 'ok' | 'wait' | 'warn' | 'error';
 }
 
+/** Point d'historique du panneau finances (graphique simple, #165). */
+export interface FinanceHistoryPoint {
+  tick?: number;
+  money: number;
+  income?: number;
+  expenses?: number;
+  /** Valeur d'entreprise, absente des anciens historiques de rapports. */
+  value?: number;
+}
+
+/** Subvention affichée dans le panneau finances (#166/#167). */
+export interface FinanceSubsidyView {
+  id: number;
+  title: string;
+  detail: string;
+  state: 'offer' | 'awarded' | 'foreign' | 'expired';
+  tone: 'good' | 'muted' | 'bad';
+}
+
+/** Panneau finances : trésorerie, prêts, valeur, inflation et subventions. */
+export interface FinanceView {
+  company: string;
+  money: string;
+  loan: string;
+  maxLoan: string;
+  value: string;
+  income: string;
+  expenses: string;
+  interestRate: string;
+  inflation: string;
+  difficulty: string;
+  loanStep: string;
+  increaseLabel: string;
+  decreaseLabel: string;
+  canIncrease: boolean;
+  canDecrease: boolean;
+  monthsOfBankruptcy: number;
+  bankrupt: boolean;
+  warning: string | null;
+  history: FinanceHistoryPoint[];
+  subsidies: FinanceSubsidyView[];
+  hint: string;
+}
+
+/** Alerte faillite persistante du HUD (#165). */
+export interface BankruptcyAlertView {
+  text: string;
+  tone: 'warning' | 'error';
+}
+
 export interface HudState {
   snapshot: WorldSnapshot | null;
   fps: number;
@@ -152,6 +207,10 @@ export interface HudState {
   vehicle?: VehiclePanelView | null;
   /** Panneau ville, industrie ou gare (sélection d'un lieu). */
   place?: PlacePanelView | null;
+  /** Panneau finances (#165), ouvert à la demande. */
+  finance?: FinanceView | null;
+  /** Bandeau faillite persistant (#165). */
+  bankruptcyAlert?: BankruptcyAlertView | null;
   quality: QualityLevel;
   following: boolean;
   drawCalls: number;
@@ -181,13 +240,6 @@ export interface FinanceCategoryView {
   amountLabel: string;
   /** Largeur relative 0..100 pour la barre SVG. */
   percent: number;
-}
-
-export interface FinanceHistoryPoint {
-  tick: number;
-  money: number;
-  income: number;
-  expenses: number;
 }
 
 export interface FinanceRankingRow {

@@ -9,6 +9,7 @@
 
 import type { IndustrySnapshot, StationSnapshot, WorldSnapshot } from '../engine/protocol';
 import type { Selection } from '../game/Game';
+import { townActionCost, townActionLabelKey, townAuthorityRating } from '../game/economyRules';
 import { ordersFromSnapshot } from '../game/vehicleRules';
 import { companyColour } from '../render/tileVisuals';
 import {
@@ -18,7 +19,7 @@ import {
   vehicleLabel,
   vehicleStatusLabel,
 } from './labels';
-import { formatDecimal, formatInt, formatPercent, formatRating } from './format';
+import { formatDecimal, formatInt, formatMoney, formatPercent, formatRating } from './format';
 import { t } from './i18n';
 import type {
   PlacePanelAction,
@@ -167,6 +168,36 @@ export function describePlacePanel(
   }
 }
 
+/** Actions municipales payantes proposées par l'autorité locale (#166). */
+function townActions(town: WorldSnapshot['towns'][number]): PlacePanelAction[] {
+  if (!town.authority) return [];
+  const kinds = ['advertise', 'fund_roads', 'fund_buildings'] as const;
+  return kinds.map((kind) => {
+    const definition = town.authority?.actions[kind];
+    const cost = townActionCost(town, kind);
+    const available = cost !== null && definition?.available !== false;
+    const label = t('authority.actionWithCost', {
+      action: t(townActionLabelKey(kind)),
+      cost: formatMoney(cost ?? definition?.cost ?? 0),
+    });
+    return {
+      id: `town-${kind}`,
+      label,
+      kind: 'town' as const,
+      supported: available,
+      townAction: kind,
+      ...(available
+        ? {}
+        : {
+            reason:
+              definition?.available === false
+                ? t('authority.reason.alreadyFunded')
+                : t('authority.reason.unavailable'),
+          }),
+    };
+  });
+}
+
 /** Panneau ville : démographie, satisfaction, gares et industries proches. */
 export function describeTownPanel(
   snapshot: WorldSnapshot | null,
@@ -176,6 +207,7 @@ export function describeTownPanel(
   if (!snapshot || !town) return null;
   const stations = stationsNear(snapshot, town);
   const industries = industriesNear(snapshot, town);
+  const rating = townAuthorityRating(town);
   const actions: PlacePanelAction[] = [
     {
       id: 'focus',
@@ -183,13 +215,17 @@ export function describeTownPanel(
       kind: 'focus',
       supported: true,
     },
-    {
-      id: 'fund-town',
-      label: t('place.action.fundTown'),
-      kind: 'unsupported',
-      supported: false,
-      reason: t('place.reason.fundTown'),
-    },
+    ...(town.authority
+      ? townActions(town)
+      : [
+          {
+            id: 'fund-town',
+            label: t('place.action.fundTown'),
+            kind: 'unsupported' as const,
+            supported: false,
+            reason: t('place.reason.fundTown'),
+          },
+        ]),
   ];
   return {
     kind: 'town',
@@ -211,8 +247,8 @@ export function describeTownPanel(
       ),
       stat(
         t('place.stat.satisfaction'),
-        formatRating(town.rating),
-        town.rating >= 60 ? 'good' : town.rating >= 30 ? undefined : 'bad',
+        formatRating(rating),
+        rating >= 60 ? 'good' : rating >= 30 ? undefined : 'bad',
       ),
       stat(t('selection.stat.buildings'), formatInt(town.buildings)),
       stat(t('place.stat.nearbyStations'), formatInt(stations.length)),
@@ -299,6 +335,7 @@ export function describeIndustryPanel(
   const serving = vehiclesServing(snapshot, 'industry', industry.id);
   const servedStations = stationsServedBy(snapshot, serving);
   const stockTotal = industry.stocks.reduce((total, entry) => total + entry.amount, 0);
+  const serviceRate = typeof industry.serviceRate === 'number' ? industry.serviceRate : null;
   return {
     kind: 'industry',
     id: industry.id,
@@ -314,6 +351,17 @@ export function describeIndustryPanel(
       stat(t('selection.stat.type'), industryKindLabel(industry.kind)),
       stat(t('selection.stat.production'), formatInt(industry.production)),
       stat(t('selection.stat.transported'), formatInt(industry.transported), 'good'),
+      stat(
+        t('place.stat.service'),
+        serviceRate === null ? t('place.service.unavailable') : formatPercent(serviceRate),
+        serviceRate === null
+          ? 'muted'
+          : serviceRate >= 60
+            ? 'good'
+            : serviceRate < 25
+              ? 'bad'
+              : undefined,
+      ),
       stat(
         t('selection.stat.stocks'),
         t('selection.unit.units', { count: formatInt(stockTotal) }),
@@ -345,6 +393,16 @@ export function describeIndustryPanel(
         empty: t('place.empty.vehicles'),
         items: vehicleItems(serving),
       },
+      {
+        id: 'accepts',
+        title: t('place.section.accepts'),
+        empty: t('place.empty.accepts'),
+        items: (industry.accepts ?? []).map((cargo) => ({
+          id: `accepts-${cargo}`,
+          label: cargoLabel(cargo),
+          detail: t('place.item.accepted'),
+        })),
+      },
     ],
     actions: [
       {
@@ -353,13 +411,17 @@ export function describeIndustryPanel(
         kind: 'focus',
         supported: true,
       },
-      {
-        id: 'subsidize',
-        label: t('place.action.subsidize'),
-        kind: 'unsupported',
-        supported: false,
-        reason: t('place.reason.subsidize'),
-      },
+      ...(snapshot.subsidies
+        ? []
+        : [
+            {
+              id: 'subsidize',
+              label: t('place.action.subsidize'),
+              kind: 'unsupported' as const,
+              supported: false,
+              reason: t('place.reason.subsidize'),
+            },
+          ]),
     ],
     hint: t('place.hint.industry'),
   };
