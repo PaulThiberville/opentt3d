@@ -72,7 +72,8 @@ const BUDGETS = {
   drawCalls: {
     map: { 128: 150, 256: 240, 512: 560 },
     city: { 128: 160, 256: 200, 512: 220 },
-    vehicles: { 128: 120, 256: 180, 512: 380 },
+    // +8 lots de mobilier urbain (#178) : 123 draws observés en 128 medium.
+    vehicles: { 128: 128, 256: 180, 512: 380 },
     build: { 128: 240, 256: 320, 512: 580 },
     hidden: { 128: 140, 256: 240, 512: 560 },
     resize: { 128: 180, 256: 280, 512: 620 },
