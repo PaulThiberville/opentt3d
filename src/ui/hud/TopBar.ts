@@ -21,6 +21,8 @@ export interface TopBarCallbacks {
   onToggleNews: () => void;
   onToggleHelp: () => void;
   onOpenSettings: () => void;
+  /** Ouvre la modale de rapports sur un onglet donné. */
+  onOpenReports: (tab: 'finance' | 'vehicles' | 'stats') => void;
 }
 
 function localCompany(snapshot: WorldSnapshot | null): CompanySnapshot | null {
@@ -46,6 +48,7 @@ export class TopBar {
   private newsLive: HTMLSpanElement;
   private lastUnread = 0;
   private speedButtons: { button: HTMLButtonElement; speed: GameSpeed }[] = [];
+  private reportButtons = new Map<'finance' | 'vehicles' | 'stats', HTMLButtonElement>();
   private cache = new Map<string, string>();
   private lastState: HudState | null = null;
   private stopListening: () => void;
@@ -193,7 +196,46 @@ export class TopBar {
     bindAttr(helpButton, 'title', 'topbar.helpTitle');
     bindAttr(helpButton, 'aria-label', 'topbar.help');
 
-    tools.append(this.qualityButton, this.newsButton, resetButton, settingsButton, helpButton);
+    const reportSpecs = [
+      { tab: 'finance' as const, icon: '£', key: 'reports.tab.finance' as const },
+      { tab: 'vehicles' as const, icon: '▤', key: 'reports.tab.vehicles' as const },
+      { tab: 'stats' as const, icon: '▥', key: 'reports.tab.stats' as const },
+    ];
+    const reportButtons: HTMLButtonElement[] = [];
+    for (const spec of reportSpecs) {
+      const reportButton = el('button', {
+        className: 'hud-button hud-report-button',
+        attrs: {
+          type: 'button',
+          title: t('topbar.reportsTitle'),
+          'aria-label': t(spec.key),
+          'aria-haspopup': 'dialog',
+        },
+        dataset: { reportTab: spec.tab },
+      });
+      reportButton.append(
+        el('span', {
+          className: 'hud-report-icon',
+          text: spec.icon,
+          attrs: { 'aria-hidden': 'true' },
+        }),
+        bindText(el('span', { className: 'hud-report-label' }), spec.key),
+      );
+      bindAttr(reportButton, 'title', 'topbar.reportsTitle');
+      bindAttr(reportButton, 'aria-label', spec.key);
+      reportButton.addEventListener('click', () => this.callbacks.onOpenReports(spec.tab));
+      this.reportButtons.set(spec.tab, reportButton);
+      reportButtons.push(reportButton);
+    }
+
+    tools.append(
+      ...reportButtons,
+      this.qualityButton,
+      this.newsButton,
+      resetButton,
+      settingsButton,
+      helpButton,
+    );
 
     this.element.append(
       brand,
@@ -223,6 +265,11 @@ export class TopBar {
   /** Rend le focus au bouton Actualités après fermeture du panneau. */
   focusNewsButton(): void {
     this.newsButton.focus();
+  }
+
+  /** Rend le focus au bouton de rapports correspondant. */
+  focusReportButton(tab: 'finance' | 'vehicles' | 'stats'): void {
+    this.reportButtons.get(tab)?.focus();
   }
 
   /** Reflète l'état ouvert/fermé du panneau d'actualités. */

@@ -25,6 +25,7 @@ import { Minimap } from './hud/Minimap';
 import { NetworkAlert } from './hud/NetworkAlert';
 import { NewsFeed } from './hud/NewsFeed';
 import { PlacePanel } from './hud/PlacePanel';
+import { ReportsPanel, type ReportTab } from './hud/ReportsPanel';
 import { SelectionPanel } from './hud/SelectionPanel';
 import { Toasts } from './hud/Toasts';
 import { Toolbar, type BuildToolId } from './hud/Toolbar';
@@ -87,6 +88,7 @@ export class Hud {
   private depotPanel: DepotPanel;
   private vehiclePanel: VehiclePanel;
   private placePanel: PlacePanel;
+  private reports: ReportsPanel;
   private minimap: Minimap;
   private newsFeed: NewsFeed;
   private toolbar: Toolbar;
@@ -113,6 +115,7 @@ export class Hud {
       onToggleNews: () => this.toggleNews(),
       onToggleHelp: () => this.toggleHelp(),
       onOpenSettings: () => this.callbacks.onOpenSettings(),
+      onOpenReports: (tab) => this.openReports(tab),
     });
 
     // Bouton mute minimal : ajouté à la barre d'outils existante sans modifier
@@ -174,6 +177,17 @@ export class Hud {
       onClose: () => this.callbacks.onClosePlace(),
       onFocus: (x, y) => this.callbacks.onPlaceFocus(x, y),
       onSelect: (target) => this.callbacks.onPlaceSelect(target),
+    });
+
+    this.reports = new ReportsPanel({
+      onClose: () => this.closeReports(),
+      onSelectVehicle: (vehicleId) => {
+        this.closeReports();
+        this.callbacks.onSelectVehicle(vehicleId);
+      },
+      onStartVehicle: (vehicleId) => this.callbacks.onStartVehicle(vehicleId),
+      onStopVehicle: (vehicleId) => this.callbacks.onStopVehicle(vehicleId),
+      onSellVehicle: (vehicleId) => this.callbacks.onSellVehicle(vehicleId),
     });
 
     this.minimap = new Minimap({
@@ -241,6 +255,7 @@ export class Hud {
       this.depotPanel.element,
       this.vehiclePanel.element,
       this.placePanel.element,
+      this.reports.element,
       this.minimap.element,
       this.newsFeed.element,
       this.toolbar.element,
@@ -292,6 +307,7 @@ export class Hud {
 
   update(state: HudState): void {
     this.topBar.update(state);
+    this.reports.updateSnapshot(state.snapshot);
     this.updateNetworkStatus(state);
     // Le panneau véhicule est prioritaire sur le dépôt, lui-même prioritaire
     // sur le panneau lieu, lui-même prioritaire sur la sélection générique.
@@ -386,7 +402,24 @@ export class Hud {
     this.buildOptions.update(tool, settings);
   }
 
+  openReports(tab: ReportTab = 'finance'): void {
+    if (this.newsFeed.isOpen()) this.closeNews();
+    if (this.help.isOpen()) this.hideHelp();
+    this.reports.open(tab);
+  }
+
+  closeReports(): void {
+    if (!this.reports.isOpen()) return;
+    this.reports.close();
+    this.topBar.focusReportButton(this.reports.activeTab);
+  }
+
+  isReportsOpen(): boolean {
+    return this.reports.isOpen();
+  }
+
   toggleNews(): void {
+    if (this.reports.isOpen()) this.closeReports();
     if (this.newsFeed.isOpen()) {
       this.closeNews();
       return;
@@ -413,6 +446,7 @@ export class Hud {
   }
 
   toggleHelp(): void {
+    if (this.reports.isOpen()) this.closeReports();
     this.help.toggle();
     if (this.help.isOpen()) this.closeNews();
   }
@@ -431,6 +465,10 @@ export class Hud {
 
   closePanels(): boolean {
     let closed = false;
+    if (this.reports.isOpen()) {
+      this.closeReports();
+      closed = true;
+    }
     if (this.newsFeed.isOpen()) {
       this.closeNews();
       closed = true;
@@ -472,6 +510,7 @@ export class Hud {
     this.newsFeed.dispose();
     this.toasts.dispose();
     this.networkAlert.dispose();
+    this.reports.dispose();
     this.buildHint.dispose();
     this.buildOptions.dispose();
     this.buildOptions.element.remove();

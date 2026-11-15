@@ -3327,6 +3327,802 @@ select.input {
   line-height: 1.5;
 }
 
+/* ---------------------------------------------------------------- rapports */
+
+.hud-reports {
+  position: absolute;
+  inset: 0;
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(5, 8, 12, 0.7);
+  backdrop-filter: blur(6px);
+  pointer-events: auto;
+}
+
+.hud-reports-card {
+  display: flex;
+  flex-direction: column;
+  width: min(980px, 100%);
+  max-height: min(88vh, 900px);
+  overflow: hidden;
+  background: var(--panel-gradient);
+  border: 1px solid var(--hud-border-strong);
+  border-radius: 18px;
+  box-shadow:
+    0 34px 90px rgba(0, 0, 0, 0.6),
+    var(--panel-highlight);
+}
+
+.hud-reports-header {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid var(--hud-border);
+}
+
+.hud-reports-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.hud-reports-heading h2 {
+  margin: 0;
+  font-size: 19px;
+  letter-spacing: -0.01em;
+}
+
+.hud-reports-subtitle {
+  margin-top: 3px;
+  color: var(--hud-muted);
+  font-size: 12px;
+}
+
+.hud-reports-close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--hud-border);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--hud-text);
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.hud-reports-close:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.hud-reports-tabs {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  padding: 10px 20px 0;
+  border-bottom: 1px solid var(--hud-border);
+}
+
+.hud-reports-tab {
+  padding: 8px 14px 9px;
+  border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  border-radius: 9px 9px 0 0;
+  background: transparent;
+  color: var(--hud-muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.hud-reports-tab:hover {
+  color: var(--hud-text);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.hud-reports-tab[aria-selected='true'] {
+  border-bottom-color: var(--hud-accent);
+  background: rgba(127, 212, 160, 0.08);
+  color: var(--hud-accent-strong);
+}
+
+.hud-reports-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 20px 20px;
+  scrollbar-width: thin;
+}
+
+.hud-reports-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  outline: none;
+}
+
+.hud-report-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.hud-report-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--hud-border);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.hud-report-stat > span {
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.hud-report-stat strong {
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.hud-report-stat strong.is-good,
+.hud-report-inline-stats dd.is-good,
+.hud-report-vehicle-profit {
+  color: var(--hud-accent);
+}
+
+.hud-report-stat strong.is-bad,
+.hud-report-inline-stats dd.is-bad,
+.hud-report-vehicle-profit.is-bad {
+  color: var(--hud-error);
+}
+
+.hud-report-stat strong.is-muted {
+  color: var(--hud-muted);
+}
+
+.hud-report-inline-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 0;
+  padding: 0 2px;
+}
+
+.hud-report-inline-stats > div {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.hud-report-inline-stats dt {
+  color: var(--hud-muted);
+  font-size: 11px;
+}
+
+.hud-report-inline-stats dd {
+  margin: 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-report-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 2px;
+}
+
+.hud-report-section-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--hud-muted);
+}
+
+.hud-report-empty {
+  margin: 0;
+  padding: 8px 2px;
+  color: var(--hud-muted);
+  font-size: 11.5px;
+}
+
+.hud-report-note {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.hud-report-hint {
+  margin: 4px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--hud-border);
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.hud-report-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.hud-chart-wrap {
+  padding: 4px 2px;
+}
+
+.hud-chart {
+  display: block;
+  width: 100%;
+  height: 92px;
+  overflow: visible;
+}
+
+.hud-chart-area {
+  stroke: none;
+}
+
+.hud-chart-area.is-good {
+  fill: rgba(127, 212, 160, 0.14);
+}
+
+.hud-chart-area.is-bad {
+  fill: rgba(229, 125, 119, 0.14);
+}
+
+.hud-chart-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.hud-chart-line.is-good {
+  stroke: var(--hud-accent);
+}
+
+.hud-chart-line.is-bad {
+  stroke: var(--hud-error);
+}
+
+.hud-chart-line.is-neutral {
+  stroke: var(--hud-info);
+}
+
+.hud-chart-dot.is-good {
+  fill: var(--hud-accent-strong);
+}
+
+.hud-chart-dot.is-bad {
+  fill: var(--hud-error);
+}
+
+.hud-chart-dot.is-neutral {
+  fill: var(--hud-info);
+}
+
+.hud-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  color: var(--hud-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-report-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hud-report-bar-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.hud-report-bar-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11.5px;
+}
+
+.hud-report-bar-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-report-bar-value {
+  flex: none;
+  color: var(--hud-accent-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-meter {
+  display: block;
+  width: 100%;
+  height: 6px;
+  overflow: visible;
+}
+
+.hud-meter-track {
+  fill: rgba(255, 255, 255, 0.08);
+}
+
+.hud-meter-fill.is-good {
+  fill: var(--hud-accent);
+}
+
+.hud-meter-fill.is-bad {
+  fill: var(--hud-error);
+}
+
+.hud-meter-fill.is-neutral {
+  fill: var(--hud-info);
+}
+
+.hud-meter-fill.is-muted {
+  fill: var(--hud-muted);
+}
+
+.hud-report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hud-report-action {
+  padding: 6px 11px;
+  border: 1px solid var(--hud-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--hud-text);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.hud-report-action:hover:not(:disabled) {
+  border-color: var(--hud-border-strong);
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.hud-report-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.hud-report-action:focus-visible,
+.hud-reports-close:focus-visible,
+.hud-reports-tab:focus-visible,
+.hud-report-field select:focus-visible,
+.hud-report-field input:focus-visible {
+  outline: 2px solid var(--hud-accent);
+  outline-offset: 1px;
+}
+
+.hud-report-alert-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hud-report-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--hud-border);
+  border-left: 3px solid var(--hud-info);
+  border-radius: 8px;
+  background: rgba(127, 179, 232, 0.08);
+  font-size: 11.5px;
+}
+
+.hud-report-alert.is-warning {
+  border-left-color: var(--hud-warn);
+  background: rgba(230, 180, 92, 0.09);
+}
+
+.hud-report-alert.is-error {
+  border-left-color: var(--hud-error);
+  background: rgba(229, 125, 119, 0.1);
+}
+
+.hud-report-alert span {
+  color: var(--hud-muted);
+  font-size: 10.5px;
+}
+
+.hud-report-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.hud-report-table th,
+.hud-report-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--hud-border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.hud-report-table th {
+  color: var(--hud-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.hud-report-table tr.is-local {
+  background: rgba(127, 212, 160, 0.07);
+}
+
+.hud-report-number {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.hud-report-company {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.hud-report-company > span:not(.hud-report-dot):not(.hud-report-badge) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-report-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
+}
+
+.hud-report-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--hud-accent-soft);
+  color: var(--hud-accent-strong);
+  font-size: 9.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.hud-report-badge.is-bad {
+  background: rgba(229, 125, 119, 0.16);
+  color: var(--hud-error);
+}
+
+.hud-report-share {
+  min-width: 120px;
+}
+
+.hud-report-share .hud-meter {
+  display: inline-block;
+  width: 62px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.hud-report-share-value {
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-report-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+  align-items: end;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--hud-border);
+}
+
+.hud-report-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.hud-report-field select,
+.hud-report-field input {
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid var(--hud-border);
+  border-radius: 8px;
+  background: rgba(8, 12, 17, 0.66);
+  color: var(--hud-text);
+  font: inherit;
+  font-size: 11.5px;
+}
+
+.hud-report-search {
+  grid-column: span 2;
+}
+
+.hud-report-reset {
+  align-self: end;
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 11px;
+}
+
+.hud-report-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.hud-report-group-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.hud-report-group-chip {
+  padding: 3px 8px;
+  border: 1px solid var(--hud-border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--hud-muted);
+  font-size: 10.5px;
+}
+
+.hud-report-vehicle-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.hud-report-vehicle {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--hud-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.hud-report-vehicle.is-local {
+  border-color: rgba(127, 212, 160, 0.28);
+  background: rgba(127, 212, 160, 0.055);
+}
+
+.hud-report-vehicle-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.hud-report-vehicle-text strong {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+
+.hud-report-data-detail {
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.hud-report-vehicle-profit {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-report-vehicle-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+  max-width: 260px;
+}
+
+.hud-report-data-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hud-report-data-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(120px, 0.7fr);
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--hud-border);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.hud-report-data-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.hud-report-data-text strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.hud-report-data-numbers {
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.hud-report-double-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.hud-report-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.hud-report-icon {
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.9;
+}
+
+.hud-report-label {
+  font-size: 11px;
+}
+
+@media (max-width: 1240px) {
+  .hud-report-label {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .hud-reports {
+    padding: 8px;
+  }
+  .hud-reports-card {
+    max-height: calc(100vh - 16px);
+    border-radius: 14px;
+  }
+  .hud-reports-header {
+    padding: 14px 14px 10px;
+  }
+  .hud-reports-tabs {
+    padding: 8px 14px 0;
+    overflow-x: auto;
+  }
+  .hud-reports-body {
+    padding: 12px 14px 16px;
+  }
+  .hud-report-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hud-report-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .hud-report-search {
+    grid-column: span 2;
+  }
+  .hud-report-vehicle {
+    flex-wrap: wrap;
+  }
+  .hud-report-vehicle-actions {
+    justify-content: flex-start;
+    width: 100%;
+    max-width: none;
+  }
+  .hud-report-data-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .hud-report-double-bars {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 520px) {
+  .hud-reports {
+    padding: 4px;
+  }
+  .hud-reports-card {
+    max-height: calc(100vh - 8px);
+  }
+  .hud-report-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .hud-report-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hud-report-search {
+    grid-column: auto;
+  }
+  .hud-report-table {
+    font-size: 10.5px;
+  }
+  .hud-report-share {
+    min-width: 72px;
+  }
+  .hud-report-share .hud-meter {
+    width: 34px;
+  }
+  .hud-report-table th,
+  .hud-report-table td {
+    padding: 5px 4px;
+  }
+  .hud-report-table th:first-child,
+  .hud-report-table td:first-child {
+    display: none;
+  }
+  .hud-report-company {
+    flex-wrap: wrap;
+  }
+}
+
 /* ---------------------------------------------------------------- erreurs */
 
 .hud-overlay {
