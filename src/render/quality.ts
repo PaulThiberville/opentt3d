@@ -93,6 +93,8 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualitySettings> = {
   high: {
     level: 'high',
     label: 'Haute',
+    // Plafond identique à medium : au-delà de 1,5×, les passes plein écran
+    // (grading, AA) coûtent plus que le gain de netteté perçu sur un écran Retina.
     pixelRatioCap: 1.5,
     antialias: true,
     shadows: true,
