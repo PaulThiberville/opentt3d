@@ -24,6 +24,56 @@ export interface SelectionSummary {
   colour: number | null;
 }
 
+/** Cible cliquable d'un panneau lieu : gare, industrie ou véhicule. */
+export interface PlaceTarget {
+  kind: 'station' | 'industry' | 'vehicle';
+  id: number;
+}
+
+export interface PlacePanelItem {
+  /** Identifiant stable dans la liste (gare, industrie, véhicule). */
+  id: string;
+  label: string;
+  detail: string;
+  /** Présent : l'élément ouvre le panneau correspondant. */
+  target?: PlaceTarget;
+}
+
+export interface PlacePanelSection {
+  id: string;
+  title: string;
+  empty: string;
+  items: PlacePanelItem[];
+}
+
+/**
+ * Action de panneau lieu. `supported` est faux quand le protocole v1 n'expose
+ * pas la commande : le bouton reste désactivé et `reason` explique l'absence.
+ */
+export interface PlacePanelAction {
+  id: string;
+  label: string;
+  kind: 'focus' | 'unsupported';
+  supported: boolean;
+  reason?: string;
+}
+
+/** Panneau ville, industrie ou gare, alimenté par le seul snapshot. */
+export interface PlacePanelView {
+  kind: 'town' | 'industry' | 'station';
+  id: number;
+  /** Centre du lieu, pour recentrer la caméra. */
+  x: number;
+  y: number;
+  title: string;
+  detail: string;
+  colour: number | null;
+  stats: SelectionStat[];
+  sections: PlacePanelSection[];
+  actions: PlacePanelAction[];
+  hint: string;
+}
+
 export interface DepotModelView {
   id: string;
   name: string;
@@ -100,6 +150,8 @@ export interface HudState {
   depot?: DepotPanelView | null;
   /** Panneau véhicule (sélection d'un véhicule). */
   vehicle?: VehiclePanelView | null;
+  /** Panneau ville, industrie ou gare (sélection d'un lieu). */
+  place?: PlacePanelView | null;
   quality: QualityLevel;
   following: boolean;
   drawCalls: number;

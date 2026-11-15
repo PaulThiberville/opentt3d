@@ -23,6 +23,13 @@
  * already covers every tick before N. One transfer is allowed at a time and the
  * window is bounded by `joinTimeoutMs` (15 s by default) so a stuck newcomer
  * cannot freeze the game forever.
+ *
+ * Robustness (issue #39): liveness is message-driven, not transport-driven.
+ * Every peer sends a periodic `hello`; the host declares a silent seat
+ * disconnected after `peerTimeoutMs` and pauses the game explicitly (grace
+ * window, then automatic resume). A client that stops hearing its host elects
+ * the alive peer with the lowest player index; hosting terms make the newest
+ * host authoritative and heal a split brain if the old host comes back.
  */
 
 import type { EngineCommand } from '../engine/protocol.js';
@@ -45,6 +52,7 @@ import {
   isJoinReadyMessage,
   isJoinRejectMessage,
   isJoinRequestMessage,
+  isPeerStateMessage,
   isPlayerId,
   isRecord,
   isResyncMessage,
@@ -56,6 +64,9 @@ import {
   type JoinChunkMessage,
   type JoinRejectReason,
   type NetMessage,
+  type PeerConnectionState,
+  type PeerStateMessage,
+  type PeerStateReason,
   type SaveChunk,
   type TurnCommand,
   type TurnMessage,
@@ -78,7 +89,6 @@ const MAX_CMDS_PER_PLAYER_PER_TURN = 64;
 const MAX_QUEUE_PER_PLAYER = 512;
 const MAX_TURN_COMMANDS = 512;
 const MAX_PENDING_COMMANDS = 1024;
-const READY_RESEND_MS = 1000;
 const READY_TIMEOUT_MS = 5000;
 const PING_EVERY_MS = 1000;
 const NEED_AFTER_MS = 2000;
@@ -93,6 +103,21 @@ const JOIN_REQUEST_RETRY_MS = 1000;
 const JOIN_TIMEOUT_MS = 15000;
 /** Hard protocol cap on player indices (see `isPlayerId`). */
 const MAX_PLAYERS = 64;
+
+/** Presence/heartbeat cadence (#39). No timer: driven by `update()`. */
+const DEFAULT_HEARTBEAT_MS = 1000;
+/** A peer silent for this long is considered disconnected (host side). */
+const DEFAULT_PEER_TIMEOUT_MS = 10000;
+/** A client silent from its host this long starts a migration election. */
+const DEFAULT_HOST_TIMEOUT_MS = 8000;
+/** Grace period before the host resumes without an unresponsive peer. */
+const DEFAULT_PEER_LOSS_GRACE_MS = 20000;
+/** Minimum delay between two election attempts after a host timeout. */
+const HOST_ELECT_RETRY_MS = 2000;
+/** Sliding window used for the ping-loss ratio shown in the HUD. */
+const PING_LOSS_WINDOW_MS = 60000;
+/** A `waitForPeers()` call extends the cooperative pause by this much. */
+const PEER_LOSS_EXTENSION_MS = 20000;
 
 export interface Runner {
   tick(): number;
@@ -132,12 +157,33 @@ export interface NetSessionOptions {
   autoAdmit?: boolean;
   /** Lifetime of one join window and of its save transfer, in milliseconds. */
   joinTimeoutMs?: number;
+  /**
+   * Mapping joueur → entreprise OpenTTD (#99), figé par l'hôte dans le salon.
+   * Quand il est fourni, l'hôte refuse toute commande build/vehicle qui cible
+   * une autre entreprise que celle du joueur émetteur.
+   */
+  companies?: Record<number, number>;
+  /**
+   * Nombre d'entreprises humaines créées (#99), réserves pour retardataires
+   * incluses. Un nouveau venu reçoit la première entreprise libre.
+   */
+  companySeats?: number;
+  /** Presence heartbeat cadence, in milliseconds (#39). Defaults to 1 s. */
+  heartbeatMs?: number;
+  /** Silence after which the host declares a peer disconnected. Defaults to 10 s. */
+  peerTimeoutMs?: number;
+  /** Silence after which a client starts a host election. Defaults to 8 s. */
+  hostTimeoutMs?: number;
+  /** How long the host pauses before expelling an unresponsive peer. Defaults to 20 s. */
+  peerLossGraceMs?: number;
 }
 
 /** Host-side result of `admitPeer`: the seat reserved for the newcomer. */
 export interface JoinAdmission {
   peerId: string;
   player: number;
+  /** Entreprise attribuée au nouveau venu (#99), si le mapping est actif. */
+  company?: number;
 }
 
 /** Client-side progress of the late-join handshake. */
@@ -160,6 +206,8 @@ export interface JoinEvent {
   /** Host side: the peer that joined or was refused. Client side: the host. */
   peerId?: string;
   player?: number;
+  /** Entreprise attribuée par l'hôte (#99). */
+  company?: number;
   tick?: number;
   reason?: JoinRejectReason;
   message?: string;
@@ -183,7 +231,48 @@ export interface NetUpdate {
   waiting: boolean;
   waitingFor: string[];
   desyncs: number;
+  /** Why the simulation is waiting (#39), for an explicit HUD message. */
+  reason?: NetWaitReason;
 }
+
+export type NetWaitReason =
+  'ready' | 'join' | 'lag' | 'peer-lost' | 'host-lost' | 'stalled' | 'joining';
+
+/** HUD-facing view of one seat's connection state (#39). */
+export interface PeerStateSummary {
+  player: number;
+  peerId: string;
+  state: PeerConnectionState;
+}
+
+/** Emitted whenever the host (or a migration) changes a seat's live state. */
+export interface PeerStateEvent extends PeerStateSummary {
+  reason: PeerStateReason;
+  tick: number;
+}
+
+/** Cooperative pause opened when a human peer stops answering (#39). */
+export interface PeerLossPause {
+  players: number[];
+  peerIds: string[];
+  since: number;
+  /** The host resumes without the lost peers at this timestamp. */
+  expiresAt: number;
+}
+
+/** Transport-level diagnostic surfaced to the HUD (relay/NAT errors…). */
+export interface NetNotice {
+  level: 'info' | 'warning' | 'error';
+  /** Stable code so the UI can translate it. */
+  code?: NetNoticeCode;
+  /** Already-human-readable detail (transport error, peer name…). */
+  detail?: string;
+  /** French fallback, used when the UI does not know the code. */
+  message: string;
+}
+
+export type NetNoticeCode =
+  'host-migration' | 'host-unreachable' | 'host-yield' | 'peer-resumed' | 'transport-error';
 
 export interface NetStats {
   ping: number;
@@ -192,6 +281,18 @@ export interface NetStats {
   desyncs: number;
   isHost: boolean;
   lost: boolean;
+  /** Commandes refusées par la validation d'entreprise de l'hôte (#99). */
+  rejected: number;
+  /** Seats currently connected (self included). */
+  peers: number;
+  /** Seats the host declared disconnected, still inside the grace window. */
+  lostPeers: number;
+  /** Ping losses over the last minute, in percent (0..100). */
+  loss: number;
+  /** Milliseconds since the simulation last made progress (0 while running). */
+  turnDelay: number;
+  /** Hosting term; increments on every migration (#39). */
+  term: number;
 }
 
 export interface ChatEvent {
@@ -201,11 +302,28 @@ export interface ChatEvent {
 
 export interface NetSession {
   readonly localPlayer: number;
+  /** Entreprise contrôlée par ce pair (#99), -1 sans mapping. */
+  readonly localCompany: number;
   issue(cmd: EngineCommand): void;
   update(nowMs: number): NetUpdate;
   alpha(nowMs: number): number;
   stats(): NetStats;
   onDesync(fn: () => void): () => void;
+  /** Notifies seat connection transitions (timeout, recovery, expulsion). */
+  onPeerState(fn: (event: PeerStateEvent) => void): () => void;
+  /** Transport diagnostics (relay unreachable, NAT failure…). */
+  onNotice(fn: (notice: NetNotice) => void): () => void;
+  /** Current host-side cooperative pause, or null. */
+  peerLossPause(): PeerLossPause | null;
+  /**
+   * Host side: stops waiting for lost peers, expels them and resumes the
+   * simulation. Returns false when there was nothing to resolve.
+   */
+  resumeAfterPeerLoss(): boolean;
+  /** Host side: extends the grace window by 20 s. */
+  waitForPeers(): boolean;
+  /** Host side: expels one seat immediately (authoritative leave in a turn). */
+  expelPeer(player: number, reason?: PeerStateReason): boolean;
   /** Asks the host for a save and reloads it (client side). */
   requestResync(): void;
   /** Host side: pushes an explicit save (all peers by default). */
@@ -266,6 +384,8 @@ interface SaveAssembly {
 interface PendingJoin {
   peerId: string;
   player: number;
+  /** Entreprise attribuée au retardataire (#99), si le mapping est actif. */
+  company?: number;
   /** Set once the save has been serialised and sent. */
   sent: boolean;
   tick: number;
@@ -283,6 +403,8 @@ interface JoinAssembly {
   epoch: number;
   tick: number;
   player: number;
+  /** Entreprise attribuée par l'hôte (#99). */
+  company?: number;
   id: string;
   hash: string;
   total: number;
@@ -301,6 +423,11 @@ function clamp01(value: number): number {
   if (value <= 0) return 0;
   if (value >= 1) return 1;
   return value;
+}
+
+function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
 function normalizePeers(
@@ -377,6 +504,8 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   let lastNeedAt = -Infinity;
   let lastResyncRequestAt = -Infinity;
   let lastRateNoticeAt = -Infinity;
+  /** Absolute tick a migrated client must reach without waiting (#39). */
+  let catchUpUntil = -1;
   let saveSeq = 0;
   let hostStarted = false;
   let firstUpdateAt: number | null = null;
@@ -393,8 +522,84 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   let joinRequestedPlayer: number | undefined;
   let selfMapped = false;
 
+  // Presence + host migration (#39). Purely clock-driven: `update()` is the
+  // only place timers would have been needed, so no interval is ever leaked.
+  const heartbeatMs = clampInt(options.heartbeatMs, 250, 10000, DEFAULT_HEARTBEAT_MS);
+  const peerTimeoutMs = clampInt(options.peerTimeoutMs, 1000, 60000, DEFAULT_PEER_TIMEOUT_MS);
+  const hostTimeoutMs = clampInt(options.hostTimeoutMs, 1000, 60000, DEFAULT_HOST_TIMEOUT_MS);
+  const peerLossGraceMs = clampInt(
+    options.peerLossGraceMs,
+    1000,
+    120000,
+    DEFAULT_PEER_LOSS_GRACE_MS,
+  );
+  const lastSeenByPeer = new Map<string, number>();
+  let lastHostSeen = 0;
+  let lastHeartbeatAt = -Infinity;
+  let lastElectAt = -Infinity;
+  let hostingTerm = 0;
+  /** Host we decided to replace; alive only for that election (#39). */
+  let failedHostId: string | undefined;
+  let peerLoss: { players: Set<number>; since: number; expiresAt: number } | null = null;
+  /** Client mirror of the host's cooperative pause (#39). */
+  let remotePeerLossAt: number | null = null;
+  let waitSince: number | null = null;
+  let waitReason: NetWaitReason | undefined;
+  let pingSent = 0;
+  let pingFailed = 0;
+  let pingWindowStart = 0;
+
   const { players, peerToPlayer } = normalizePeers(options.peers, transport.selfId, localPlayer);
   selfMapped = peerToPlayer.get(transport.selfId) === localPlayer;
+  for (const player of players.values()) {
+    if (player.peerId !== transport.selfId) lastSeenByPeer.set(player.peerId, currentNow);
+  }
+  lastHostSeen = currentNow;
+
+  // Mapping joueur → entreprise (#99). Il vient du `StartInfo` figé ; l'hôte
+  // refuse une commande qui cible une autre entreprise que celle du joueur.
+  const companyByPlayer = new Map<number, number>();
+  for (const [key, value] of Object.entries(options.companies ?? {})) {
+    const player = Number(key);
+    if (isPlayerId(player) && Number.isInteger(value) && value >= 0 && value < 15) {
+      companyByPlayer.set(player, value);
+    }
+  }
+  const companySeats = Math.max(0, Math.min(15, Math.trunc(options.companySeats ?? 0)));
+  let localCompany = companyByPlayer.get(localPlayer) ?? -1;
+  let rejectedCommands = 0;
+
+  /** Première entreprise humaine libre, ou null si tous les sièges sont pris. */
+  function allocateCompany(): number | null {
+    if (companySeats <= 0) return null;
+    const used = new Set(companyByPlayer.values());
+    for (let company = 0; company < companySeats; company += 1) {
+      if (!used.has(company)) return company;
+    }
+    return null;
+  }
+
+  /** Entreprise attendue pour un joueur (undefined si le mapping est absent). */
+  function expectedCompany(player: number): number | undefined {
+    return companyByPlayer.get(player);
+  }
+
+  function commandCompany(cmd: EngineCommand): number | undefined {
+    return cmd.type === 'build' || cmd.type === 'vehicle' ? cmd.company : undefined;
+  }
+
+  /**
+   * Valide l'entreprise d'une commande. Une commande qui cible l'entreprise
+   * d'un autre joueur est rejetée (compteur `rejected`) sans interrompre le
+   * lockstep. Les moteurs antérieurs sans mapping restent permissifs.
+   */
+  function validateCompany(player: number, cmd: EngineCommand): boolean {
+    const expected = expectedCompany(player);
+    const actual = commandCompany(cmd);
+    if (expected === undefined || actual === undefined || expected === actual) return true;
+    rejectedCommands += 1;
+    return false;
+  }
 
   /** Host: reserved seats / join windows waiting for a `join-request`. */
   const joinWindows = new Map<string, PendingJoin>();
@@ -444,6 +649,8 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   const desyncHandlers = new Set<() => void>();
   const chatHandlers = new Set<(message: ChatEvent) => void>();
   const joinHandlers = new Set<(event: JoinEvent) => void>();
+  const peerStateHandlers = new Set<(event: PeerStateEvent) => void>();
+  const noticeHandlers = new Set<(notice: NetNotice) => void>();
   const offs: (() => void)[] = [];
 
   // ------------------------------------------------------------------ helpers
@@ -522,6 +729,217 @@ export function createNetSession(options: NetSessionOptions): NetSession {
         console.error('[net:session] onJoin handler error', error);
       }
     }
+  }
+
+  function emitPeerState(event: PeerStateEvent): void {
+    for (const fn of [...peerStateHandlers]) {
+      try {
+        fn(event);
+      } catch (error) {
+        console.error('[net:session] onPeerState handler error', error);
+      }
+    }
+  }
+
+  function emitNotice(notice: NetNotice): void {
+    for (const fn of [...noticeHandlers]) {
+      try {
+        fn(notice);
+      } catch (error) {
+        console.error('[net:session] onNotice handler error', error);
+      }
+    }
+  }
+
+  /** Measures RTT to one peer and updates the HUD loss ratio (#39). */
+  function probePing(peerId: string, now: number): void {
+    if (now - pingWindowStart > PING_LOSS_WINDOW_MS) {
+      pingWindowStart = now;
+      pingSent = 0;
+      pingFailed = 0;
+    }
+    pingSent += 1;
+    void transport
+      .ping(peerId)
+      .then((value) => {
+        if (disposed) return;
+        if (value >= 0) ping = value;
+        else pingFailed += 1;
+      })
+      .catch(() => {
+        if (!disposed) pingFailed += 1;
+      });
+  }
+
+  /** Records any message from `peerId` and closes a pending loss window. */
+  function touchPeer(peerId: string): void {
+    if (peerId === transport.selfId) return;
+    lastSeenByPeer.set(peerId, currentNow);
+    if (peerId === hostPeerId) lastHostSeen = currentNow;
+    if (!amHost) return;
+    const player = playerOf(peerId);
+    if (!player || player.left || player.connected) return;
+    if (joinWindows.has(peerId) || joinTransfers.has(peerId)) return;
+    player.connected = true;
+    if (peerLoss) {
+      peerLoss.players.delete(player.index);
+      if (peerLoss.players.size === 0) peerLoss = null;
+    }
+    broadcastPeerState(player.index, 'connected', 'reconnected');
+    emitPeerState({
+      player: player.index,
+      peerId,
+      state: 'connected',
+      reason: 'reconnected',
+      tick: runner.tick(),
+    });
+  }
+
+  function broadcastPeerState(
+    player: number,
+    state: PeerConnectionState,
+    reason: PeerStateReason,
+  ): void {
+    if (!amHost) return;
+    send('peer-state', {
+      k: 'peer-state',
+      player,
+      state,
+      reason,
+      tick: runner.tick(),
+    });
+  }
+
+  /** Host: a seat stopped answering; pause explicitly instead of blocking. */
+  function markPeerLost(player: PlayerRecord, reason: PeerStateReason): void {
+    if (player.left || !player.connected) return;
+    player.connected = false;
+    ready.delete(player.peerId);
+    lastAckByPeer.delete(player.peerId);
+    lastSaveAt.delete(player.peerId);
+    clientHashes.delete(player.peerId);
+    if (joinWindows.has(player.peerId) || joinTransfers.has(player.peerId)) {
+      cancelJoin(player.peerId, 'closed', 'Le pair a disparu pendant la fenêtre de join.');
+      return;
+    }
+    if (!peerLoss) {
+      peerLoss = {
+        players: new Set(),
+        since: currentNow,
+        expiresAt: currentNow + peerLossGraceMs,
+      };
+    }
+    peerLoss.players.add(player.index);
+    peerLoss.expiresAt = Math.max(peerLoss.expiresAt, currentNow + 1000);
+    broadcastPeerState(player.index, 'disconnected', reason);
+    emitPeerState({
+      player: player.index,
+      peerId: player.peerId,
+      state: 'disconnected',
+      reason,
+      tick: runner.tick(),
+    });
+  }
+
+  /** Host: expires peer-loss pauses and recovers a peer that answered again. */
+  function checkPeerLoss(now: number): void {
+    if (!amHost) return;
+    for (const player of players.values()) {
+      if (player.peerId === transport.selfId || player.left || !player.connected) continue;
+      if (joinWindows.has(player.peerId) || joinTransfers.has(player.peerId)) continue;
+      const seen = lastSeenByPeer.get(player.peerId);
+      if (seen === undefined) continue;
+      if (now - seen > peerTimeoutMs) markPeerLost(player, 'timeout');
+    }
+    if (peerLoss && now >= peerLoss.expiresAt) {
+      resumeAfterPeerLoss();
+    }
+  }
+
+  function resumeAfterPeerLoss(): boolean {
+    if (!amHost || disposed || !peerLoss) return false;
+    const indices = [...peerLoss.players].sort((a, b) => a - b);
+    peerLoss = null;
+    for (const index of indices) {
+      const player = players.get(index);
+      if (!player || player.left) continue;
+      queueLeave(index);
+      broadcastPeerState(index, 'left', 'expelled');
+      emitPeerState({
+        player: index,
+        peerId: player.peerId,
+        state: 'left',
+        reason: 'expelled',
+        tick: runner.tick(),
+      });
+    }
+    emitNotice({
+      level: 'info',
+      code: 'peer-resumed',
+      message:
+        indices.length > 0
+          ? `La partie reprend sans ${indices.length} joueur${indices.length > 1 ? 's' : ''} hors ligne.`
+          : 'La partie reprend.',
+    });
+    return true;
+  }
+
+  function waitForPeers(): boolean {
+    if (!amHost || disposed || !peerLoss) return false;
+    peerLoss.expiresAt = currentNow + PEER_LOSS_EXTENSION_MS;
+    return true;
+  }
+
+  function expelPeer(player: number, reason: PeerStateReason = 'expelled'): boolean {
+    if (!amHost || disposed || !isPlayerId(player)) return false;
+    const record = players.get(player);
+    if (!record || record.left) return false;
+    if (record.connected) markPeerLost(record, reason);
+    if (peerLoss) {
+      peerLoss.players.delete(player);
+      if (peerLoss.players.size === 0) peerLoss = null;
+    }
+    queueLeave(player);
+    broadcastPeerState(player, 'left', reason);
+    emitPeerState({
+      player,
+      peerId: record.peerId,
+      state: 'left',
+      reason,
+      tick: runner.tick(),
+    });
+    return true;
+  }
+
+  function peerLossPause(): PeerLossPause | null {
+    if (!peerLoss) return null;
+    const playersList: number[] = [];
+    const peerIds: string[] = [];
+    for (const index of [...peerLoss.players].sort((a, b) => a - b)) {
+      const player = players.get(index);
+      if (!player || player.left) continue;
+      playersList.push(index);
+      peerIds.push(player.peerId);
+    }
+    if (playersList.length === 0) return null;
+    return {
+      players: playersList,
+      peerIds,
+      since: peerLoss.since,
+      expiresAt: peerLoss.expiresAt,
+    };
+  }
+
+  /** Alive means: not left, not the failed host, reachable or recently seen. */
+  function isPeerAlive(player: PlayerRecord, now: number): boolean {
+    if (player.left) return false;
+    if (player.peerId === transport.selfId) return true;
+    if (failedHostId !== undefined && player.peerId === failedHostId) return false;
+    if (transport.peers().includes(player.peerId)) return true;
+    if (!player.connected) return false;
+    const seen = lastSeenByPeer.get(player.peerId);
+    if (seen !== undefined && now - seen <= peerTimeoutMs) return true;
+    return false;
   }
 
   function rememberHash(map: Map<number, string>, tick: number, hash: string): void {
@@ -885,11 +1303,15 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     if (activeSeatCount() >= maxPlayers) return null;
     const player = freePlayerIndex(requested);
     if (player === null) return null;
+    const company = allocateCompany();
+    if (companySeats > 0 && company === null) return null; // aucune entreprise libre
     players.set(player, { index: player, peerId, left: false, connected: false });
     peerToPlayer.set(peerId, player);
+    if (company !== null) companyByPlayer.set(player, company);
     const pending: PendingJoin = {
       peerId,
       player,
+      ...(company === null ? {} : { company }),
       sent: false,
       tick: 0,
       hash: '',
@@ -917,6 +1339,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
         id: pending.id,
         hash: pending.hash,
         ...(engineId ? { engine: engineId } : {}),
+        ...(pending.company === undefined ? {} : { company: pending.company }),
       },
       pending.peerId,
     );
@@ -1165,7 +1588,13 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     clientHashes.delete(from);
     // The new peer must not receive turns before N: the save covers state N.
     sendTurnsTo(from, pending.tick);
-    emitJoin({ ok: true, peerId: from, player: pending.player, tick: pending.tick });
+    emitJoin({
+      ok: true,
+      peerId: from,
+      player: pending.player,
+      ...(pending.company === undefined ? {} : { company: pending.company }),
+      tick: pending.tick,
+    });
   }
 
   // ------------------------------------------------------------ client join
@@ -1221,6 +1650,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     players.set(index, { index, peerId: transport.selfId, left: false, connected: true });
     peerToPlayer.set(transport.selfId, index);
     localPlayer = index;
+    localCompany = companyByPlayer.get(index) ?? localCompany;
     selfMapped = true;
     return true;
   }
@@ -1243,6 +1673,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       epoch: message.epoch,
       tick: message.tick,
       player: message.player,
+      ...(message.company === undefined ? {} : { company: message.company }),
       id: message.id,
       hash: message.hash,
       total: message.total,
@@ -1284,6 +1715,10 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       failJoin('invalid-save', 'La place attribuée est déjà occupée.', true);
       return;
     }
+    if (assembly.company !== undefined) {
+      localCompany = assembly.company;
+      companyByPlayer.set(localPlayer, assembly.company);
+    }
 
     if (assembly.epoch > epoch) epoch = assembly.epoch;
     turns.clear();
@@ -1303,7 +1738,13 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     sendJoinReady(true, loadedTick, hash);
     // Commands issued while waiting for the save are still relevant.
     resendPending();
-    emitJoin({ ok: true, peerId: joinHostId, player: localPlayer, tick: loadedTick });
+    emitJoin({
+      ok: true,
+      peerId: joinHostId,
+      player: localPlayer,
+      ...(localCompany < 0 ? {} : { company: localCompany }),
+      tick: loadedTick,
+    });
   }
 
   function handleJoinChunk(message: JoinChunkMessage, from: string): void {
@@ -1375,13 +1816,30 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     const existing = playerOf(peerId);
     if (existing) {
       if (existing.left) return null;
-      return { peerId, player: existing.index };
+      const company = companyByPlayer.get(existing.index);
+      return {
+        peerId,
+        player: existing.index,
+        ...(company === undefined ? {} : { company }),
+      };
     }
     const pending = joinWindows.get(peerId) ?? joinTransfers.get(peerId);
-    if (pending) return { peerId, player: pending.player };
+    if (pending) {
+      return {
+        peerId,
+        player: pending.player,
+        ...(pending.company === undefined ? {} : { company: pending.company }),
+      };
+    }
     if (!hostStarted) return null;
     const opened = openJoinWindow(peerId, playerIndex);
-    return opened ? { peerId, player: opened.player } : null;
+    return opened
+      ? {
+          peerId,
+          player: opened.player,
+          ...(opened.company === undefined ? {} : { company: opened.company }),
+        }
+      : null;
   }
 
   function closeJoinWindow(peerId?: string): void {
@@ -1436,6 +1894,12 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       throw new TypeError('Commande invalide : elle doit respecter le contrat moteur.');
     }
     if (players.get(localPlayer)?.left) return;
+    if (!validateCompany(localPlayer, cmd)) {
+      console.warn(
+        `[net:session] commande refusée : entreprise ${commandCompany(cmd)} au lieu de ${expectedCompany(localPlayer)} pour le joueur ${localPlayer}.`,
+      );
+      return;
+    }
     const s = ++nextCommandSeq;
     if (amHost) {
       const queued = hostQueue.filter((item) => item.p === localPlayer).length;
@@ -1466,6 +1930,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       const last = Math.max(queuedSeq.get(player.index) ?? -1, seenSeq.get(player.index) ?? -1);
       if (entry.s <= last) continue;
       if (queued >= MAX_QUEUE_PER_PLAYER) break;
+      if (!validateCompany(player.index, entry.c)) continue;
       hostQueue.push({ p: player.index, s: entry.s, cmd: entry.c });
       queuedSeq.set(player.index, entry.s);
       queued++;
@@ -1488,6 +1953,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
         host: amHost,
         epoch,
         d: inputDelay,
+        term: hostingTerm,
       },
       target,
     );
@@ -1497,8 +1963,21 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     const player = playerOf(from);
     if (!player) return;
     if (message.player !== player.index) return; // mapping is authoritative
+    if (message.host && from !== transport.selfId) lastHostSeen = currentNow;
 
     if (amHost) {
+      const incomingTerm = message.term ?? 0;
+      if (
+        message.host &&
+        from !== transport.selfId &&
+        (incomingTerm > hostingTerm || (incomingTerm === hostingTerm && player.index < localPlayer))
+      ) {
+        // Split-brain healing: a peer elected after our own timeout advertises
+        // a newer hosting term (or the same term with a lower deterministic
+        // index). Step down instead of keeping two sequencers.
+        stepDown(from, incomingTerm, message.tick);
+        return;
+      }
       // A reserved seat is not playing yet: only `join-request`/`join-ready`
       // can confirm the handshake and unblock its turns.
       if (joinWindows.has(from) || joinTransfers.has(from)) return;
@@ -1514,6 +1993,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
             host: true,
             epoch,
             d: inputDelay,
+            term: hostingTerm,
             reply: true,
           },
           from,
@@ -1526,33 +2006,80 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     if (!message.host) return;
     // While joining, the join handshake is the only authority: ignore hello.
     if (joinMode && joinPhaseState !== 'joined') return;
-    if (from === hostPeerId) return;
-    if (hostLostSince !== null || hostPeerId === undefined) {
-      // Host migration: accept the peer that took over.
-      hostPeerId = from;
-      migrationCandidate = undefined;
-      hostLostSince = null;
-      lost = false;
-      turns.clear();
-      historyStart = runner.tick();
-      turnsEnd = runner.tick();
-      acc = 0;
-      stallSince = null;
-      sendHello(from);
-      outbox = pending.slice();
-      outboxFlushPending = outbox.length > 0;
+    if (from === hostPeerId && hostLostSince === null) {
+      // A heartbeat also tells a lagging client where the host frontier is
+      // (typically after a migration or a resync): close the gap deterministically.
+      if (message.tick > runner.tick()) catchUpUntil = Math.max(catchUpUntil, message.tick);
+      return;
     }
+    const incomingTerm = message.term ?? 0;
+    if (hostLostSince !== null || hostPeerId === undefined || incomingTerm > hostingTerm) {
+      adoptHost(from, incomingTerm, message.tick);
+    }
+  }
+
+  /** Client: accepts a (new) host and resets the local turn window. */
+  function adoptHost(peerId: string, term: number, hostTick: number): void {
+    hostPeerId = peerId;
+    hostingTerm = Math.max(hostingTerm, term);
+    migrationCandidate = undefined;
+    failedHostId = undefined;
+    hostLostSince = null;
+    lost = false;
+    lastHostSeen = currentNow;
+    turns.clear();
+    historyStart = runner.tick();
+    turnsEnd = runner.tick();
+    acc = 0;
+    stallSince = null;
+    waitSince = null;
+    remotePeerLossAt = null;
+    catchUpUntil = Math.max(catchUpUntil, hostTick);
+    sendHello(peerId);
+    outbox = pending.slice();
+    outboxFlushPending = outbox.length > 0;
+    if (hostTick !== runner.tick()) {
+      // The new host may be behind or ahead: reload its exact state instead of
+      // silently diverging on the next turns.
+      lastResyncRequestAt = -Infinity;
+      requestResync();
+    }
+  }
+
+  /** A former host yields to the newly elected one (higher hosting term). */
+  function stepDown(peerId: string, term: number, hostTick: number): void {
+    amHost = false;
+    hostingTerm = Math.max(hostingTerm, term);
+    hostPeerId = peerId;
+    migrationCandidate = undefined;
+    hostLostSince = null;
+    lost = false;
+    peerLoss = null;
+    joinWindows.clear();
+    joinTransfers.clear();
+    joinPreparing.clear();
+    outTurns = [];
+    // Keep the local player's unconfirmed actions when yielding: they were
+    // meant for the shared history and can still be replayed to the new host.
+    const ownQueued = hostQueue.filter((item) => item.p === localPlayer);
+    hostQueue = [];
+    for (const item of ownQueued) {
+      if (!pending.some((entry) => entry.s === item.s)) {
+        pending.push({ s: item.s, cmd: item.cmd });
+      }
+    }
+    adoptHost(peerId, term, hostTick);
+    emitNotice({
+      level: 'info',
+      code: 'host-yield',
+      message: 'Un autre pair a repris l’hébergement de la partie.',
+    });
   }
 
   function electHost(): void {
     const alive: PlayerRecord[] = [];
     for (const player of players.values()) {
-      if (player.left) continue;
-      if (player.peerId === transport.selfId) {
-        alive.push(player);
-        continue;
-      }
-      if (player.connected && transport.peers().includes(player.peerId)) alive.push(player);
+      if (isPeerAlive(player, currentNow)) alive.push(player);
     }
     alive.sort((a, b) => a.index - b.index);
     const candidate = alive[0];
@@ -1567,18 +2094,29 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     }
     migrationCandidate = candidate.peerId;
     hostPeerId = candidate.peerId;
+    hostLostSince = null;
     outbox = pending.slice();
     outboxFlushPending = outbox.length > 0;
     sendHello(candidate.peerId);
   }
 
   function becomeHost(): void {
+    if (amHost) return;
     const previousHostIndex = hostPeerId ? peerToPlayer.get(hostPeerId) : undefined;
     amHost = true;
     hostPeerId = transport.selfId;
+    failedHostId = undefined;
+    hostingTerm += 1;
     migrationCandidate = undefined;
     hostLostSince = null;
     lost = false;
+    lastHostSeen = currentNow;
+    lastHeartbeatAt = currentNow;
+    // Every peer must answer after a migration: hello inference cannot rely on
+    // the previous host's ready set.
+    for (const [peerId] of [...lastSeenByPeer]) lastSeenByPeer.set(peerId, currentNow);
+    lastSeenByPeer.set(transport.selfId, currentNow);
+    peerLoss = null;
     joinWindows.clear();
     joinTransfers.clear();
     joinPreparing.clear();
@@ -1593,44 +2131,83 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     requeuePendingForHost();
     outTurns = [];
     hostStarted = true;
+    // New epoch: any save produced by the previous host is stale.
+    epoch += 1;
     turnsEnd = Math.max(turnsEnd, runner.tick());
     historyStart = Math.max(0, Math.min(historyStart, runner.tick()));
-    if (previousHostIndex !== undefined) queueLeave(previousHostIndex);
+    if (previousHostIndex !== undefined) {
+      queueLeave(previousHostIndex);
+      broadcastPeerState(previousHostIndex, 'disconnected', 'timeout');
+      const previous = players.get(previousHostIndex);
+      if (previous) {
+        emitPeerState({
+          player: previousHostIndex,
+          peerId: previous.peerId,
+          state: 'disconnected',
+          reason: 'timeout',
+          tick: runner.tick(),
+        });
+      }
+    }
     for (const peer of transport.peers()) {
       ready.add(peer);
       lastAckByPeer.set(peer, runner.tick());
     }
     sendHello();
+    emitNotice({
+      level: 'info',
+      code: 'host-migration',
+      message: 'L’hôte a disparu : ce pair reprend la partie et devient le nouvel hôte.',
+    });
   }
 
   function onPeerLeave(peerId: string): void {
     const player = playerOf(peerId);
     if (player) player.connected = false;
+    lastSeenByPeer.delete(peerId);
     if (amHost) {
       if (joinWindows.has(peerId) || joinTransfers.has(peerId)) {
         cancelJoin(peerId, 'closed', 'Le pair a quitté pendant la fenêtre de join.');
         return;
       }
-      if (player) {
+      if (player && !player.left) {
+        if (peerLoss) {
+          peerLoss.players.delete(player.index);
+          if (peerLoss.players.size === 0) peerLoss = null;
+        }
         queueLeave(player.index);
+        broadcastPeerState(player.index, 'left', 'transport');
+        emitPeerState({
+          player: player.index,
+          peerId,
+          state: 'left',
+          reason: 'transport',
+          tick: runner.tick(),
+        });
       }
       ready.delete(peerId);
       lastAckByPeer.delete(peerId);
       lastSaveAt.delete(peerId);
+      clientHashes.delete(peerId);
       return;
     }
     if (peerId === hostPeerId) {
       hostLostSince = currentNow;
+      failedHostId = peerId;
+      if (player) player.connected = false;
+      lastElectAt = -Infinity;
       electHost();
     }
   }
 
   function onPeerJoin(peerId: string): void {
+    lastSeenByPeer.set(peerId, currentNow);
     if (amHost) {
       if (joinWindows.has(peerId) || joinTransfers.has(peerId)) return;
       const player = playerOf(peerId);
       if (player && !player.left) {
         player.connected = true;
+        lastAckByPeer.set(peerId, runner.tick());
         sendHello(peerId);
       }
     } else if (!hostPeerId || peerId === migrationCandidate) {
@@ -1717,6 +2294,34 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     applySave(assembly.chunks.join(''), message.epoch, assembly.left);
   }
 
+  function handlePeerStateMessage(message: PeerStateMessage, from: string): void {
+    if (amHost || disposed) return;
+    if (from !== hostPeerId) return;
+    if (joinMode && joinPhaseState !== 'joined') return;
+    const player = players.get(message.player);
+    if (!player) return;
+    if (message.state === 'left') {
+      markLeft(message.player);
+      remotePeerLossAt = null;
+    } else {
+      player.connected = message.state === 'connected';
+      if (!player.connected) {
+        ready.delete(player.peerId);
+        lastAckByPeer.delete(player.peerId);
+        remotePeerLossAt = currentNow;
+      } else {
+        remotePeerLossAt = null;
+      }
+    }
+    emitPeerState({
+      player: message.player,
+      peerId: player.peerId,
+      state: message.state,
+      reason: message.reason,
+      tick: message.tick ?? runner.tick(),
+    });
+  }
+
   function handleChatMessage(message: ChatMessage, from: string): void {
     if (!isChatMessage(message)) return;
     const player = playerOf(from);
@@ -1740,88 +2345,76 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   // ------------------------------------------------------------------ handlers
 
-  offs.push(
-    transport.on('hello', (data, from) => {
-      if (!isHelloMessage(data)) return;
-      onHello(data, from);
-    }),
-  );
-  offs.push(
-    transport.on('cmd', (data, from) => {
-      if (amHost && isCmdMessage(data)) acceptClientCommands(from, data.b);
-    }),
-  );
-  offs.push(
-    transport.on('turn', (data, from) => {
-      if (isTurnMessage(data)) onTurn(data, from);
-    }),
-  );
-  offs.push(
-    transport.on('hash', (data, from) => {
-      onHash(data as NetMessage, from);
-    }),
-  );
-  offs.push(
-    transport.on('ack', (data, from) => {
-      if (amHost && isAckMessage(data)) {
-        const player = playerOf(from);
-        if (!player || player.left) return;
-        const previous = lastAckByPeer.get(from) ?? 0;
-        if (data.tick > previous) lastAckByPeer.set(from, data.tick);
-      }
-    }),
-  );
-  offs.push(
-    transport.on('resync', (data, from) => {
-      onResync(data as NetMessage, from);
-    }),
-  );
-  offs.push(
-    transport.on('chat', (data, from) => {
-      if (isChatMessage(data)) handleChatMessage(data, from);
-    }),
-  );
-  offs.push(
-    transport.on('leave', (data, from) => {
-      if (typeof data === 'object' && data !== null) {
-        const player = playerOf(from);
-        if (player) player.connected = false;
-      }
-    }),
-  );
-  offs.push(
-    transport.on(JOIN_CHANNELS.request, (data, from) => {
-      handleJoinRequest(data, from);
-    }),
-  );
-  offs.push(
-    transport.on(JOIN_CHANNELS.accept, (data, from) => {
-      if (isJoinAcceptMessage(data)) handleJoinAccept(data, from);
-    }),
-  );
-  offs.push(
-    transport.on(JOIN_CHANNELS.chunk, (data, from) => {
-      if (isJoinChunkMessage(data)) handleJoinChunk(data, from);
-    }),
-  );
-  offs.push(
-    transport.on(JOIN_CHANNELS.ready, (data, from) => {
-      handleJoinReady(data, from);
-    }),
-  );
-  offs.push(
-    transport.on(JOIN_CHANNELS.reject, (data, from) => {
-      handleJoinReject(data, from);
-    }),
-  );
+  /** Every inbound message proves the sender is alive (#39). */
+  function listen(channel: string, fn: (data: unknown, from: string) => void): void {
+    offs.push(
+      transport.on(channel, (data, from) => {
+        touchPeer(from);
+        fn(data, from);
+      }),
+    );
+  }
+
+  listen('hello', (data, from) => {
+    if (!isHelloMessage(data)) return;
+    onHello(data, from);
+  });
+  listen('cmd', (data, from) => {
+    if (amHost && isCmdMessage(data)) acceptClientCommands(from, data.b);
+  });
+  listen('turn', (data, from) => {
+    if (isTurnMessage(data)) onTurn(data, from);
+  });
+  listen('hash', (data, from) => {
+    onHash(data as NetMessage, from);
+  });
+  listen('ack', (data, from) => {
+    if (amHost && isAckMessage(data)) {
+      const player = playerOf(from);
+      if (!player || player.left) return;
+      const previous = lastAckByPeer.get(from) ?? 0;
+      if (data.tick > previous) lastAckByPeer.set(from, data.tick);
+    }
+  });
+  listen('resync', (data, from) => {
+    onResync(data as NetMessage, from);
+  });
+  listen('chat', (data, from) => {
+    if (isChatMessage(data)) handleChatMessage(data, from);
+  });
+  listen('leave', (data, from) => {
+    if (typeof data === 'object' && data !== null) {
+      const player = playerOf(from);
+      if (player) player.connected = false;
+    }
+  });
+  listen('peer-state', (data, from) => {
+    if (isPeerStateMessage(data)) handlePeerStateMessage(data, from);
+  });
+  listen(JOIN_CHANNELS.request, (data, from) => {
+    handleJoinRequest(data, from);
+  });
+  listen(JOIN_CHANNELS.accept, (data, from) => {
+    if (isJoinAcceptMessage(data)) handleJoinAccept(data, from);
+  });
+  listen(JOIN_CHANNELS.chunk, (data, from) => {
+    if (isJoinChunkMessage(data)) handleJoinChunk(data, from);
+  });
+  listen(JOIN_CHANNELS.ready, (data, from) => {
+    handleJoinReady(data, from);
+  });
+  listen(JOIN_CHANNELS.reject, (data, from) => {
+    handleJoinReject(data, from);
+  });
   offs.push(transport.onPeerJoin(onPeerJoin));
   offs.push(transport.onPeerLeave(onPeerLeave));
   offs.push(
     transport.onError((message) => {
       const now = currentNow;
-      if (now - lastRateNoticeAt < 1000) return;
+      if (now - lastRateNoticeAt < 2000) return;
       lastRateNoticeAt = now;
       console.warn(`[net:session] ${message}`);
+      emitNotice({ level: 'warning', code: 'transport-error', detail: message, message });
     }),
   );
 
@@ -1834,14 +2427,45 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   function updateHost(now: number, dt: number): NetUpdate {
     if (firstUpdateAt === null) firstUpdateAt = now;
+    if (now - lastHeartbeatAt >= heartbeatMs) {
+      lastHeartbeatAt = now;
+      // Host heartbeat: clients use it to detect a silent host even when the
+      // simulation is paused and no turn is flowing.
+      sendHello();
+    }
     expireJoins(now);
+    checkPeerLoss(now);
+    if (now - lastPingAt >= PING_EVERY_MS) {
+      lastPingAt = now;
+      for (const player of expectedClients()) probePing(player.peerId, now);
+    }
     if (joinTransfers.size > 0 || joinPreparing.size > 0) {
       // Simple, deterministic policy: a join pauses the whole simulation. The
       // state is serialised at the current tick N; no turn is executed or sent
       // until the newcomer has confirmed the hash at N (or the window expires).
       acc = 0;
       waitingFor = [...joinPreparing.keys(), ...joinTransfers.keys()];
-      return { ticks: 0, waiting: true, waitingFor: [...waitingFor], desyncs };
+      if (waitSince === null) waitSince = now;
+      waitReason = 'join';
+      return { ticks: 0, waiting: true, waitingFor: [...waitingFor], desyncs, reason: 'join' };
+    }
+    const pause = peerLossPause();
+    if (pause) {
+      // A human peer stopped answering: freeze explicitly and let the host
+      // decide (continue without it, wait, or expel). The grace window bounds
+      // the automatic block, so a party can never hang forever.
+      acc = 0;
+      waitingFor = pause.peerIds;
+      if (waitSince === null) waitSince = now;
+      waitReason = 'peer-lost';
+      flushTurns();
+      return {
+        ticks: 0,
+        waiting: true,
+        waitingFor: [...waitingFor],
+        desyncs,
+        reason: 'peer-lost',
+      };
     }
     const expected = expectedClients();
     if (!hostStarted) {
@@ -1850,7 +2474,9 @@ export function createNetSession(options: NetSessionOptions): NetSession {
         waitingFor = missing.map((player) => player.peerId);
         acc = 0;
         flushTurns();
-        return { ticks: 0, waiting: true, waitingFor: [...waitingFor], desyncs };
+        if (waitSince === null) waitSince = now;
+        waitReason = 'ready';
+        return { ticks: 0, waiting: true, waitingFor: [...waitingFor], desyncs, reason: 'ready' };
       }
       hostStarted = true;
       for (const player of expected) {
@@ -1870,22 +2496,34 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       waitingFor = laggers.map((player) => player.peerId);
       acc = Math.min(acc, NET_TICK_MS);
       flushTurns();
-      return { ticks: 0, waiting: true, waitingFor: [...waitingFor], desyncs };
+      if (waitSince === null) waitSince = now;
+      waitReason = 'lag';
+      return { ticks: 0, waiting: true, waitingFor: [...waitingFor], desyncs, reason: 'lag' };
     }
     if (waitingFor.length > 0) waitingFor = [];
 
     acc = Math.min(acc + dt, NET_TICK_MS * MAX_NORMAL_STEPS);
     let ticks = 0;
-    while (acc >= NET_TICK_MS && ticks < MAX_NORMAL_STEPS) {
+    let extra = 0;
+    while (ticks < MAX_NORMAL_STEPS + CATCHUP_EXTRA) {
       const index = runner.tick();
       while (turnsEnd <= index + inputDelay) finalizeTurn();
       if (!turns.has(index)) break;
+      const canStep = acc >= NET_TICK_MS;
+      const catchingUp =
+        turnsEnd - index > inputDelay + 1 && ticks >= MAX_NORMAL_STEPS && extra < CATCHUP_EXTRA;
+      if (!canStep && !catchingUp) break;
+      if (canStep) acc -= NET_TICK_MS;
+      else extra += 1;
       execTurn();
-      acc -= NET_TICK_MS;
       ticks += 1;
       if (disposed) break;
     }
     if (acc >= NET_TICK_MS) acc %= NET_TICK_MS;
+    if (ticks > 0) {
+      waitSince = null;
+      waitReason = undefined;
+    }
     flushTurns();
     return { ticks, waiting: false, waitingFor: [], desyncs };
   }
@@ -1907,32 +2545,80 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       }
       const waiting = joinPhaseState === 'requesting' || joinPhaseState === 'transfer';
       waitingFor = waiting && joinHostId ? [joinHostId] : [];
-      return { ticks: 0, waiting, waitingFor: [...waitingFor], desyncs };
+      if (waiting && waitSince === null) waitSince = now;
+      if (!waiting) waitSince = null;
+      waitReason = waiting ? 'joining' : undefined;
+      return {
+        ticks: 0,
+        waiting,
+        waitingFor: [...waitingFor],
+        desyncs,
+        ...(waiting ? { reason: 'joining' as const } : {}),
+      };
     }
 
     flushOwnCommands();
 
-    if (now - lastHelloAt >= READY_RESEND_MS) {
+    if (now - lastHelloAt >= heartbeatMs) {
       sendHello(hostPeerId);
+    }
+
+    // Host heartbeat timeout: the transport may keep a dead WebRTC channel
+    // listed for a long time, so liveness is decided by messages, not by
+    // `onPeerLeave`. A deterministic election (lowest alive player index) then
+    // takes over without freezing the remaining peers.
+    if (hostPeerId && hostPeerId !== transport.selfId) {
+      if (now - lastHostSeen > hostTimeoutMs && hostLostSince === null) {
+        hostLostSince = now;
+        failedHostId = hostPeerId;
+        const hostRecord = playerOf(hostPeerId);
+        if (hostRecord) hostRecord.connected = false;
+        emitNotice({
+          level: 'warning',
+          code: 'host-unreachable',
+          message: 'L’hôte ne répond plus : recherche d’un nouveau pair pour reprendre la partie…',
+        });
+      }
+    }
+    if (hostLostSince !== null && now - lastElectAt >= HOST_ELECT_RETRY_MS) {
+      lastElectAt = now;
+      electHost();
     }
 
     if (!hostPeerId || hostLostSince !== null) {
       if (hostLostSince === null) hostLostSince = now;
       if (hostLostSince !== null && now - hostLostSince > LOST_AFTER_MS) lost = true;
       waitingFor = migrationCandidate ? [migrationCandidate] : [];
-      return { ticks: 0, waiting: true, waitingFor: [...waitingFor], desyncs };
+      if (waitSince === null) waitSince = now;
+      waitReason = 'host-lost';
+      return {
+        ticks: 0,
+        waiting: true,
+        waitingFor: [...waitingFor],
+        desyncs,
+        reason: 'host-lost',
+      };
+    }
+
+    if (remotePeerLossAt !== null) {
+      // The host explicitly paused because a peer stopped answering: every
+      // client freezes too, otherwise peers would drift ahead of the host and
+      // ignore the turns finalized after the resume.
+      waitingFor = [];
+      if (waitSince === null) waitSince = now;
+      waitReason = 'peer-lost';
+      return {
+        ticks: 0,
+        waiting: true,
+        waitingFor: [],
+        desyncs,
+        reason: 'peer-lost',
+      };
     }
 
     if (now - lastPingAt >= PING_EVERY_MS) {
       lastPingAt = now;
-      void transport
-        .ping(hostPeerId)
-        .then((value) => {
-          if (!disposed && value >= 0) ping = value;
-        })
-        .catch(() => {
-          // The host may be leaving; migration handles it.
-        });
+      probePing(hostPeerId, now);
     }
 
     acc = Math.min(acc + dt, NET_TICK_MS * (MAX_NORMAL_STEPS + CATCHUP_EXTRA));
@@ -1947,11 +2633,14 @@ export function createNetSession(options: NetSessionOptions): NetSession {
         break;
       }
       const canStep = acc >= NET_TICK_MS;
-      const catchingUp = turnsEnd - index > inputDelay + 1 && extra < CATCHUP_EXTRA;
+      const behindTarget = index < catchUpUntil;
+      const catchingUp =
+        behindTarget || (turnsEnd - index > inputDelay + 1 && extra < CATCHUP_EXTRA);
       if (!canStep && !catchingUp) break;
       if (canStep) acc -= NET_TICK_MS;
-      else extra += 1;
+      else if (!behindTarget) extra += 1;
       execTurn();
+      if (runner.tick() >= catchUpUntil) catchUpUntil = -1;
       ticks += 1;
       if (ticks >= MAX_NORMAL_STEPS + CATCHUP_EXTRA) break;
     }
@@ -1959,7 +2648,12 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     // Un client qui suit exactement la frontière exécute des ticks à chaque
     // mise à jour puis s'arrête faute du tour suivant : ce n'est pas un stall.
     // Seule une absence totale de progrès doit déclencher hello/resync.
-    if (ticks > 0) stallSince = null;
+    if (ticks > 0) {
+      stallSince = null;
+      waitSince = null;
+      waitReason = undefined;
+      remotePeerLossAt = null;
+    }
     if (stalled) {
       acc = Math.min(acc, NET_TICK_MS);
       if (stallSince === null) stallSince = now;
@@ -1974,14 +2668,38 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
     const waiting = stalled && stallSince !== null && now - stallSince >= STALL_NOTICE_MS;
     waitingFor = waiting && hostPeerId ? [hostPeerId] : [];
-    return { ticks, waiting, waitingFor: [...waitingFor], desyncs };
+    if (waiting) {
+      if (waitSince === null) waitSince = now;
+      waitReason = remotePeerLossAt !== null ? 'peer-lost' : 'stalled';
+    } else if (waitReason === 'stalled' || waitReason === 'peer-lost') {
+      waitSince = null;
+      waitReason = undefined;
+    }
+    return {
+      ticks,
+      waiting,
+      waitingFor: [...waitingFor],
+      desyncs,
+      ...(waiting ? { reason: waitReason } : {}),
+    };
   }
 
   function update(nowMs: number): NetUpdate {
     if (disposed) return { ...NO_UPDATE, desyncs };
     currentNow = Number.isFinite(nowMs) ? nowMs : currentNow;
-    const dt = lastNow === null ? 0 : Math.min(1000, Math.max(0, currentNow - lastNow));
+    const previous = lastNow;
+    const firstUpdate = previous === null;
+    const dt = previous === null ? 0 : Math.min(1000, Math.max(0, currentNow - previous));
     lastNow = currentNow;
+    if (firstUpdate) {
+      // Absolute clocks (`performance.now()`) do not start at zero: presence
+      // bookkeeping must start at the first update, not at construction.
+      lastHostSeen = currentNow;
+      lastHeartbeatAt = currentNow - heartbeatMs;
+      for (const peerId of [...lastSeenByPeer.keys()]) {
+        lastSeenByPeer.set(peerId, currentNow);
+      }
+    }
 
     if (amHost) return updateHost(currentNow, dt);
     return updateClient(currentNow, dt);
@@ -1995,6 +2713,15 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   }
 
   function stats(): NetStats {
+    let peers = 0;
+    let lostPeers = 0;
+    for (const player of players.values()) {
+      if (player.left) continue;
+      if (player.connected) peers += 1;
+      else lostPeers += 1;
+    }
+    const loss = pingSent > 0 ? Math.min(100, Math.round((pingFailed / pingSent) * 100)) : 0;
+    const turnDelay = waitSince === null ? 0 : Math.max(0, Math.round(currentNow - waitSince));
     return {
       ping,
       delayTicks: inputDelay,
@@ -2002,6 +2729,12 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       desyncs,
       isHost: amHost,
       lost,
+      rejected: rejectedCommands,
+      peers,
+      lostPeers,
+      loss,
+      turnDelay,
+      term: hostingTerm,
     };
   }
 
@@ -2032,6 +2765,22 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     chatHandlers.add(fn);
     return () => {
       chatHandlers.delete(fn);
+    };
+  }
+
+  function onPeerState(fn: (event: PeerStateEvent) => void): () => void {
+    if (typeof fn !== 'function') throw new TypeError('Un handler doit être une fonction');
+    peerStateHandlers.add(fn);
+    return () => {
+      peerStateHandlers.delete(fn);
+    };
+  }
+
+  function onNotice(fn: (notice: NetNotice) => void): () => void {
+    if (typeof fn !== 'function') throw new TypeError('Un handler doit être une fonction');
+    noticeHandlers.add(fn);
+    return () => {
+      noticeHandlers.delete(fn);
     };
   }
 
@@ -2094,11 +2843,15 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     desyncHandlers.clear();
     chatHandlers.clear();
     joinHandlers.clear();
+    peerStateHandlers.clear();
+    noticeHandlers.clear();
     saveAssemblies.clear();
     joinWindows.clear();
     joinTransfers.clear();
     joinPreparing.clear();
     joinAssembly = null;
+    peerLoss = null;
+    lastSeenByPeer.clear();
     transport.leave();
   }
 
@@ -2106,11 +2859,20 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     get localPlayer() {
       return localPlayer;
     },
+    get localCompany() {
+      return localCompany;
+    },
     issue,
     update,
     alpha,
     stats,
     onDesync,
+    onPeerState,
+    onNotice,
+    peerLossPause,
+    resumeAfterPeerLoss,
+    waitForPeers,
+    expelPeer,
     requestResync,
     provideSave,
     requestJoin,

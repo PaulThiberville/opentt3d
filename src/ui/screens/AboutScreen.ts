@@ -3,6 +3,7 @@
  */
 
 import { el } from '../dom';
+import { t } from '../i18n';
 import { BaseScreen } from './BaseScreen';
 
 export interface AboutScreenOptions {
@@ -15,42 +16,38 @@ export class AboutScreen extends BaseScreen {
   constructor(options: AboutScreenOptions) {
     super('panel-screen about-screen');
     this.options = options;
+    this.element.setAttribute('aria-label', t('about.eyebrow'));
 
     const panel = el('div', { className: 'panel panel-wide' });
     const header = el('div', { className: 'panel-header' });
     header.append(
-      el('span', { className: 'panel-eyebrow', text: 'À propos' }),
+      el('span', { className: 'panel-eyebrow', text: t('about.eyebrow') }),
       el('h1', { className: 'panel-title', text: 'OpenTT3D' }),
-      el('p', {
-        className: 'panel-subtitle',
-        text: 'Un fork expérimental d’OpenTTD qui conserve la simulation d’origine et remplace la présentation isométrique par une scène Three.js.',
-      }),
+      el('p', { className: 'panel-subtitle', text: t('about.subtitle') }),
     );
+    const version = el('p', {
+      className: 'about-version',
+      text: `Version ${__APP_VERSION__}`,
+    });
 
     const body = el('div', { className: 'about-grid' });
     body.append(
-      this.section('Principe', [
-        'Le moteur OpenTTD reste la source de vérité (WASM à terme). Le frontend lit des snapshots, interpole et affiche : l’UI ne simule jamais.',
-        'Cette vague utilise le MockEngine déterministe : carte, villes, industries, réseaux et véhicules sont générés localement.',
+      this.section(t('about.principles.title'), [
+        t('about.principles.engine'),
+        t('about.principles.mock'),
       ]),
-      this.section('Interface', [
-        'DOM + CSS sans framework, écrans et HUD modulaires, navigation clavier et focus visible.',
-        'Aucun innerHTML avec des données de jeu : seuls textContent et les attributs sont utilisés.',
+      this.section(t('about.interface.title'), [
+        t('about.interface.stack'),
+        t('about.interface.safety'),
       ]),
-      this.section('Technique', [
-        'Vite 8, TypeScript strict, Three.js 0.187, Vitest 5.',
-        'Rendu low-poly stylisé, presets qualité, minimap 2D et panneaux tycoon.',
-      ]),
-      this.section('Licence', [
-        'GPL-2.0-or-later. Projet non affilié à Transport Tycoon ou à Chris Sawyer.',
-        'Les sources du moteur et les crédits complets sont dans le dépôt GitHub.',
-      ]),
+      this.section(t('about.tech.title'), [t('about.tech.stack'), t('about.tech.render')]),
+      this.section(t('about.license.title'), [t('about.license.gpl'), t('about.license.sources')]),
     );
 
     const links = el('div', { className: 'about-links' });
     const repo = el('a', {
       className: 'btn btn-ghost',
-      text: 'Dépôt GitHub',
+      text: t('about.repo'),
       attrs: {
         href: 'https://github.com/PaulThiberville/opentt3d',
         target: '_blank',
@@ -59,7 +56,7 @@ export class AboutScreen extends BaseScreen {
     });
     const wiki = el('a', {
       className: 'btn btn-ghost',
-      text: 'Wiki du projet',
+      text: t('about.wiki'),
       attrs: {
         href: 'https://github.com/PaulThiberville/opentt3d/wiki',
         target: '_blank',
@@ -71,13 +68,13 @@ export class AboutScreen extends BaseScreen {
     const actions = el('div', { className: 'panel-actions' });
     const back = el('button', {
       className: 'btn btn-primary',
-      text: 'Retour au menu',
+      text: t('common.backToMenu'),
       attrs: { type: 'button', 'data-autofocus': '' },
     });
     back.addEventListener('click', () => options.onBack());
     actions.append(back);
 
-    panel.append(header, body, links, actions);
+    panel.append(header, version, body, links, actions);
     this.element.append(panel);
   }
 

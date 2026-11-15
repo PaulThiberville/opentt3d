@@ -1,9 +1,13 @@
 node_modules/
 dist/
+dist-perf/
+perf-artifacts/
+release/
 coverage/
 .DS_Store
 *.log
 .vite/
+e2e-out/
 
 # Moteur : sources upstream, artefacts de build et caches locaux
 engine/upstream/
@@ -19,3 +23,7 @@ public/engine/
 .idea/
 .vscode/
 *.swp
+
+# Artefacts d’outils/agents
+.playwright-cli/
+e2e-out/

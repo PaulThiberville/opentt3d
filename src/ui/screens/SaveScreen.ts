@@ -20,7 +20,8 @@ import {
   type SaveRecord,
   type SaveSlot,
 } from '../saveFormat';
-import { formatGameDate } from '../format';
+import { formatGameDate, formatInt } from '../format';
+import { t } from '../i18n';
 import {
   describeSaveError,
   downloadSaveFile,
@@ -78,23 +79,20 @@ export class SaveScreen extends BaseScreen {
     const panel = el('div', { className: 'panel panel-wide save-panel' });
     const header = el('div', { className: 'panel-header' });
     header.append(
-      el('span', { className: 'panel-eyebrow', text: 'Sauvegardes locales' }),
+      el('span', { className: 'panel-eyebrow', text: t('save.eyebrow') }),
       el('h1', {
         className: 'panel-title',
-        text: options.mode === 'both' ? 'Sauvegarder / Charger' : 'Charger une partie',
+        text: t(options.mode === 'both' ? 'save.title.both' : 'save.title.load'),
       }),
       el('p', {
         className: 'panel-subtitle',
-        text:
-          options.mode === 'both'
-            ? 'Vos sauvegardes restent dans ce navigateur. Exportez un conteneur .ot3s pour la conserver ailleurs.'
-            : 'Reprenez une partie enregistrée dans ce navigateur, ou importez un conteneur .ot3s exporté depuis une autre machine.',
+        text: t(options.mode === 'both' ? 'save.subtitle.both' : 'save.subtitle.load'),
       }),
     );
 
     this.storageNote = el('p', {
       className: 'screen-note save-storage',
-      text: 'Ouverture du stockage local…',
+      text: t('save.storage.opening'),
     });
 
     this.statusEl = el('p', {
@@ -112,15 +110,15 @@ export class SaveScreen extends BaseScreen {
 
     const listHeader = el('div', { className: 'save-list-header' });
     listHeader.append(
-      el('h2', { className: 'save-list-title', text: 'Sauvegardes' }),
+      el('h2', { className: 'save-list-title', text: t('save.list.title') }),
       el('span', {
         className: 'save-list-hint',
-        text: 'Autosave toutes les 5 min · 3 slots conservés.',
+        text: t('save.list.hint'),
       }),
     );
 
     this.listEl = el('div', { className: 'save-list', attrs: { role: 'list' } });
-    this.listEl.append(el('p', { className: 'save-empty', text: 'Chargement des sauvegardes…' }));
+    this.listEl.append(el('p', { className: 'save-empty', text: t('save.list.loading') }));
     this.listEl.addEventListener('scroll', this.handleListScroll, { passive: true });
     this.listShell = el('div', { className: 'save-list-shell' });
     this.listShell.append(this.listEl);
@@ -132,7 +130,7 @@ export class SaveScreen extends BaseScreen {
     this.fileInput.hidden = true;
     this.fileInput.addEventListener('change', () => void this.importFromPicker());
 
-    this.importButton = button('Importer un fichier…', {
+    this.importButton = button(t('save.import'), {
       variant: 'ghost',
       className: 'save-import-button',
       onClick: () => this.fileInput.click(),
@@ -143,7 +141,7 @@ export class SaveScreen extends BaseScreen {
       this.importButton,
       el('p', {
         className: 'field-hint',
-        text: 'Conteneur .ot3s ou sauvegarde mock .json · 32 Mio maximum · validé avant écriture.',
+        text: t('save.import.hint'),
       }),
       this.fileInput,
     );
@@ -153,7 +151,7 @@ export class SaveScreen extends BaseScreen {
     panel.append(header, this.storageNote, this.statusEl, body);
 
     const actions = el('div', { className: 'panel-actions' });
-    this.backButton = button(options.mode === 'both' ? 'Retour à la pause' : 'Retour au menu', {
+    this.backButton = button(t(options.mode === 'both' ? 'save.back.pause' : 'common.backToMenu'), {
       variant: 'ghost',
       onClick: () => options.onBack(),
     });
@@ -167,7 +165,7 @@ export class SaveScreen extends BaseScreen {
     const wrapper = el('div', { className: 'save-current' });
     const header = el('div', { className: 'save-current-header' });
     header.append(
-      el('h2', { className: 'save-list-title', text: 'Sauvegarder la partie en cours' }),
+      el('h2', { className: 'save-list-title', text: t('save.current.title') }),
       ...(this.options.currentLabel
         ? [el('span', { className: 'save-current-label', text: this.options.currentLabel })]
         : []),
@@ -187,7 +185,7 @@ export class SaveScreen extends BaseScreen {
       },
     });
     input.value = this.options.suggestedName ?? defaultSaveName(null);
-    const submit = button('Sauvegarder maintenant', {
+    const submit = button(t('save.saveNow'), {
       variant: 'primary',
       onClick: () => undefined,
     });
@@ -247,12 +245,12 @@ export class SaveScreen extends BaseScreen {
     if (!store || this.disposed) return;
     const estimate = await store.estimate();
     if (this.disposed || !estimate) return;
-    const base = this.handle?.persistent
-      ? 'Stockage local IndexedDB'
-      : 'Stockage mémoire (session uniquement)';
-    this.storageNote.textContent = `${base} · ${formatSaveSize(
-      estimate.usage,
-    )} utilisés sur ${formatSaveSize(estimate.quota)}.`;
+    const base = t(this.handle?.persistent ? 'save.storage.indexed' : 'save.storage.memory');
+    this.storageNote.textContent = t('save.storage.usage', {
+      base,
+      usage: formatSaveSize(estimate.usage),
+      quota: formatSaveSize(estimate.quota),
+    });
   }
 
   private renderList(): void {
@@ -262,12 +260,9 @@ export class SaveScreen extends BaseScreen {
     if (this.slots.length === 0) {
       const empty = el('div', { className: 'save-empty' });
       empty.append(
-        el('strong', { text: 'Aucune sauvegarde locale.' }),
+        el('strong', { text: t('save.empty.title') }),
         el('span', {
-          text:
-            this.options.mode === 'both'
-              ? 'Nommez la partie ci-dessus puis cliquez sur « Sauvegarder maintenant ».'
-              : 'Lancez une partie, ouvrez la pause puis « Sauvegarder ». Vous pouvez aussi importer un fichier.',
+          text: t(this.options.mode === 'both' ? 'save.empty.both' : 'save.empty.load'),
         }),
       );
       this.listEl.append(empty);
@@ -286,9 +281,11 @@ export class SaveScreen extends BaseScreen {
     const title = el('div', { className: 'save-row-title' });
     title.append(el('span', { className: 'save-name', text: slot.name }));
     if (slot.kind === 'autosave') {
-      title.append(el('span', { className: 'save-tag save-tag-auto', text: 'Autosave' }));
+      title.append(
+        el('span', { className: 'save-tag save-tag-auto', text: t('save.tag.autosave') }),
+      );
     } else if (slot.kind === 'import') {
-      title.append(el('span', { className: 'save-tag', text: 'Import' }));
+      title.append(el('span', { className: 'save-tag', text: t('save.tag.import') }));
     }
     title.append(
       el('span', {
@@ -299,29 +296,31 @@ export class SaveScreen extends BaseScreen {
 
     const details: string[] = [];
     details.push(
-      slot.gameDate ? `Date de jeu : ${formatGameDate(slot.gameDate)}` : 'Date de jeu inconnue',
+      slot.gameDate
+        ? t('save.detail.date', { date: formatGameDate(slot.gameDate) })
+        : t('save.detail.dateUnknown'),
     );
-    if (slot.mapSize) details.push(`Carte ${slot.mapSize}×${slot.mapSize}`);
+    if (slot.mapSize) details.push(t('save.detail.map', { size: slot.mapSize }));
     details.push(formatSaveSize(slot.size));
-    if (slot.seed !== null) details.push(`Graine ${slot.seed}`);
-    if (slot.tick > 0) details.push(`Tick ${new Intl.NumberFormat('fr-FR').format(slot.tick)}`);
+    if (slot.seed !== null) details.push(t('save.detail.seed', { seed: slot.seed }));
+    if (slot.tick > 0) details.push(t('save.detail.tick', { tick: formatInt(slot.tick) }));
     if (slot.companies.length > 0) {
       const shown = slot.companies.slice(0, 3).join(', ');
       const more = slot.companies.length > 3 ? ` +${slot.companies.length - 3}` : '';
-      details.push(`Entreprises : ${shown}${more}`);
+      details.push(t('save.detail.companies', { names: `${shown}${more}` }));
     }
-    details.push(`Enregistré le ${formatSaveTimestamp(slot.createdAt)}`);
+    details.push(t('save.detail.created', { date: formatSaveTimestamp(slot.createdAt) }));
 
     const meta = el('p', { className: 'save-meta', text: details.join(' · ') });
 
     const actions = el('div', { className: 'save-row-actions' });
-    const load = button('Charger', {
+    const load = button(t('save.action.load'), {
       variant: 'primary',
       className: 'save-action',
       disabled: this.busy,
       onClick: () => void this.loadSlot(slot),
     });
-    const exportButton = button('Exporter', {
+    const exportButton = button(t('save.action.export'), {
       variant: 'ghost',
       className: 'save-action',
       disabled: this.busy,
@@ -330,13 +329,13 @@ export class SaveScreen extends BaseScreen {
     actions.append(load, exportButton);
 
     if (this.pendingDelete === slot.id) {
-      const confirm = button('Supprimer', {
+      const confirm = button(t('save.action.delete'), {
         variant: 'danger',
         className: 'save-action',
         disabled: this.busy,
         onClick: () => void this.deleteSlot(slot),
       });
-      const cancel = button('Annuler', {
+      const cancel = button(t('common.cancel'), {
         variant: 'ghost',
         className: 'save-action',
         disabled: this.busy,
@@ -348,7 +347,7 @@ export class SaveScreen extends BaseScreen {
       actions.append(confirm, cancel);
     } else {
       actions.append(
-        button('Supprimer', {
+        button(t('save.action.delete'), {
           variant: 'ghost',
           className: 'save-action save-action-danger',
           disabled: this.busy,
@@ -371,11 +370,11 @@ export class SaveScreen extends BaseScreen {
     if (!store || this.busy) return;
     this.busy = true;
     this.renderList();
-    this.showStatus(`Lecture de « ${slot.name} »…`, 'info');
+    this.showStatus(t('save.reading', { name: slot.name }), 'info');
     try {
       const record = await store.get(slot.id);
       if (this.disposed) return;
-      if (!record) throw new Error('Cette sauvegarde n’existe plus dans le stockage local.');
+      if (!record) throw new Error(t('save.missing'));
       this.options.onLoad(record);
     } catch (error) {
       if (this.disposed) return;
@@ -392,10 +391,10 @@ export class SaveScreen extends BaseScreen {
     this.renderList();
     try {
       const record = await store.get(slot.id);
-      if (!record) throw new Error('Cette sauvegarde n’existe plus dans le stockage local.');
+      if (!record) throw new Error(t('save.missing'));
       const fileName = downloadSaveFile(record);
       if (this.disposed) return;
-      this.showStatus(`Fichier exporté : ${fileName}.`, 'success');
+      this.showStatus(t('save.exported', { name: fileName }), 'success');
     } catch (error) {
       if (this.disposed) return;
       this.showStatus(describeSaveError(error), 'error');

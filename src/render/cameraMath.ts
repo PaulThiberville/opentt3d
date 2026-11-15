@@ -35,6 +35,12 @@ export const MAX_DISTANCE = 340;
 export const TARGET_MARGIN = 2;
 /** Hauteur minimale de la caméra au-dessus du terrain. */
 export const CAMERA_GROUND_CLEARANCE = 2.4;
+/** Champ de vision : bornes sûres, du téléobjectif au grand-angle doux. */
+export const MIN_FOV = 30;
+export const MAX_FOV = 68;
+/** Multiplicateur de vitesse des entrées caméra (pan, orbite, zoom clavier). */
+export const MIN_SPEED_MULTIPLIER = 0.4;
+export const MAX_SPEED_MULTIPLIER = 2.5;
 
 export function clampPitch(pitch: number): number {
   return clamp(pitch, MIN_PITCH, MAX_PITCH);
@@ -42,6 +48,23 @@ export function clampPitch(pitch: number): number {
 
 export function clampDistance(distance: number): number {
   return clamp(distance, MIN_DISTANCE, MAX_DISTANCE);
+}
+
+/** Borne le FOV dans une plage qui garde l'horizon et le terrain lisibles. */
+export function clampFov(fov: number): number {
+  if (!Number.isFinite(fov)) return 52;
+  return clamp(fov, MIN_FOV, MAX_FOV);
+}
+
+/** Borne la vitesse des entrées caméra (0,4× pour un cadrage photo, 2,5× max). */
+export function clampSpeedMultiplier(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return clamp(value, MIN_SPEED_MULTIPLIER, MAX_SPEED_MULTIPLIER);
+}
+
+/** Hauteur de la caméra au-dessus de la cible pour une inclinaison/distance. */
+export function cameraHeight(pitch: number, distance: number): number {
+  return Math.sin(clampPitch(pitch)) * clampDistance(distance);
 }
 
 /** Borne la cible à l'intérieur de la carte (mutation en place). */

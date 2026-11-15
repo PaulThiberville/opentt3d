@@ -4,6 +4,7 @@
 
 import type { NewsKind } from '../news';
 import { el } from '../dom';
+import { t, type TranslationKey } from '../i18n';
 
 export class Toasts {
   readonly element: HTMLElement;
@@ -13,14 +14,21 @@ export class Toasts {
   constructor() {
     this.element = el('div', {
       className: 'hud-toasts',
-      attrs: { 'aria-live': 'polite', 'aria-atomic': 'false' },
+      attrs: {
+        role: 'status',
+        'aria-live': 'polite',
+        'aria-atomic': 'false',
+        'aria-relevant': 'additions',
+      },
     });
   }
 
   push(kind: NewsKind, text: string): void {
     const toast = el('div', { className: `hud-toast hud-toast-${kind}` });
+    const kindKey = `toasts.${kind}` as TranslationKey;
     toast.append(
-      el('span', { className: 'hud-toast-dot' }),
+      el('span', { className: 'hud-toast-dot', attrs: { 'aria-hidden': 'true' } }),
+      el('span', { className: 'sr-only', text: `${t(kindKey)} : ` }),
       el('div', { className: 'hud-toast-body', text }),
     );
     this.element.append(toast);

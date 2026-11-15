@@ -227,7 +227,7 @@ interface Palette {
 
 const PALETTES: Record<IndustryArchetype, Palette> = {
   mine: { wall: 0x80715c, roof: 0x5b4b3c, accent: 0x6d5c48, stack: 0x4a4a4f, stock: 0x2b2a2c },
-  power: { wall: 0x9a9a96, roof: 0x6f7378, accent: 0x8a3f32, stack: 0x9b4a3a, stock: 0x2c2c2e },
+  power: { wall: 0x9a9a96, roof: 0x6f7378, accent: 0x8a3f32, stack: 0x7c4b41, stock: 0x2c2c2e },
   factory: {
     wall: 0x9a9184,
     roof: 0x5b626b,

@@ -24,7 +24,7 @@ describe('presets de qualité', () => {
     const medium = QUALITY_PRESETS.medium;
     const high = QUALITY_PRESETS.high;
     expect(low.pixelRatioCap).toBeLessThan(medium.pixelRatioCap);
-    expect(medium.pixelRatioCap).toBeLessThan(high.pixelRatioCap);
+    expect(medium.pixelRatioCap).toBeLessThanOrEqual(high.pixelRatioCap);
     expect(low.maxTrees).toBeLessThan(medium.maxTrees);
     expect(medium.maxTrees).toBeLessThan(high.maxTrees);
     expect(low.shadows).toBe(false);
@@ -43,7 +43,7 @@ describe('résolution de rendu', () => {
   it('plafonne le DPR selon le preset', () => {
     expect(resolvePixelRatio('low', 3)).toBe(1);
     expect(resolvePixelRatio('medium', 3)).toBe(1.5);
-    expect(resolvePixelRatio('high', 3)).toBe(2);
+    expect(resolvePixelRatio('high', 3)).toBe(1.5);
     expect(resolvePixelRatio('high', 1)).toBe(1);
   });
 

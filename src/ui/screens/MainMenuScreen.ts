@@ -4,6 +4,7 @@
  */
 
 import { el, enableListNavigation } from '../dom';
+import { t } from '../i18n';
 import { BaseScreen } from './BaseScreen';
 
 export interface MainMenuOptions {
@@ -16,6 +17,8 @@ export interface MainMenuOptions {
   unavailableReason?: string | null;
   /** Complément affiché sous « Multijoueur » (mode local, avertissement). */
   multiplayerNote?: string;
+  /** Une simulation tourne derrière le menu : affiche le badge « en direct ». */
+  liveSimulation?: boolean;
 }
 
 interface MenuItemOptions {
@@ -57,8 +60,11 @@ export class MainMenuScreen extends BaseScreen {
 
   constructor(options: MainMenuOptions) {
     super('menu-screen');
+    this.element.setAttribute('aria-label', t('menu.navLabel'));
 
     const layout = el('div', { className: 'menu-layout' });
+    const main = el('div', { className: 'menu-main' });
+    const column = el('div', { className: 'menu-column' });
 
     const hero = el('div', { className: 'menu-hero' });
     const brand = el('div', { className: 'menu-brand' });
@@ -68,74 +74,74 @@ export class MainMenuScreen extends BaseScreen {
     );
     hero.append(
       brand,
-      el('h1', { className: 'menu-title', text: 'Bâtissez votre empire' }),
+      el('h1', { className: 'menu-title', text: t('menu.heroTitle') }),
       el('p', {
         className: 'menu-tagline',
-        text: 'Transport Tycoon en 3D : villes vivantes, industries, trains, camions, bateaux et avions sur une carte générée.',
+        text: t('menu.heroTagline'),
       }),
     );
     const badges = el('div', { className: 'menu-badges' });
     badges.append(
-      el('span', { className: 'badge', text: 'Moteur mock déterministe' }),
-      el('span', { className: 'badge', text: 'DOM + Three.js' }),
-      el('span', { className: 'badge', text: 'GPL-2.0' }),
+      el('span', { className: 'badge', text: t('menu.badge.mock') }),
+      el('span', { className: 'badge', text: t('menu.badge.stack') }),
+      el('span', { className: 'badge', text: t('menu.badge.license') }),
     );
     hero.append(badges);
 
     const actions = el('nav', {
       className: 'menu-actions',
-      attrs: { 'aria-label': 'Menu principal', 'data-menu': '' },
+      attrs: { 'aria-label': t('menu.navLabel'), 'data-menu': '' },
     });
     const soloDisabled = Boolean(options.unavailableReason);
     actions.append(
       menuItem({
-        label: 'Nouvelle partie',
-        note: soloDisabled ? 'WebGL indisponible' : 'Solo · monde mock',
+        label: t('menu.newGame.label'),
+        note: soloDisabled ? t('menu.unavailable.note') : t('menu.newGame.note'),
         primary: true,
         autofocus: true,
         disabled: soloDisabled,
         onClick: () => {
           if (soloDisabled) {
-            this.showNotice(options.unavailableReason ?? 'Le rendu 3D est indisponible.');
+            this.showNotice(options.unavailableReason ?? t('menu.unavailable.fallback'));
             return;
           }
           options.onSolo();
         },
       }),
       menuItem({
-        label: 'Multijoueur',
+        label: t('menu.multiplayer.label'),
         note:
           options.multiplayerNote ??
-          (soloDisabled ? 'WebGL indisponible' : 'Salon P2P · création, invitation et chat'),
+          (soloDisabled ? t('menu.unavailable.note') : t('menu.multiplayer.note')),
         disabled: soloDisabled,
         onClick: () => {
           if (soloDisabled) {
-            this.showNotice(options.unavailableReason ?? 'Le rendu 3D est indisponible.');
+            this.showNotice(options.unavailableReason ?? t('menu.unavailable.fallback'));
             return;
           }
           options.onMultiplayer();
         },
       }),
       menuItem({
-        label: 'Charger une partie',
-        note: soloDisabled ? 'WebGL indisponible' : 'Sauvegardes locales · import de fichier .ot3s',
+        label: t('menu.load.label'),
+        note: soloDisabled ? t('menu.unavailable.note') : t('menu.load.note'),
         disabled: soloDisabled,
         onClick: () => {
           if (soloDisabled) {
-            this.showNotice(options.unavailableReason ?? 'Le rendu 3D est indisponible.');
+            this.showNotice(options.unavailableReason ?? t('menu.unavailable.fallback'));
             return;
           }
           options.onLoad();
         },
       }),
       menuItem({
-        label: 'Réglages',
-        note: 'Qualité, volumes, langue, relais P2P',
+        label: t('menu.settings.label'),
+        note: t('menu.settings.note'),
         onClick: () => options.onSettings(),
       }),
       menuItem({
-        label: 'À propos',
-        note: 'Licence, crédits et état du projet',
+        label: t('menu.about.label'),
+        note: t('menu.about.note'),
         onClick: () => options.onAbout(),
       }),
     );
@@ -149,20 +155,31 @@ export class MainMenuScreen extends BaseScreen {
 
     const footer = el('footer', { className: 'menu-footer' });
     footer.append(
-      el('span', { text: 'OpenTT3D · fork 3D d’OpenTTD, non affilié à Transport Tycoon.' }),
+      el('span', { text: t('menu.footer') }),
       el('span', {
         className: 'menu-footer-hint',
-        text: '↑ ↓ pour naviguer · Entrée pour valider',
+        text: t('menu.footerHint'),
       }),
     );
 
-    layout.append(hero, actions, this.notice, footer);
+    column.append(hero, actions, this.notice);
+    main.append(column);
+    layout.append(main, footer);
     this.element.append(layout);
+
+    if (options.liveSimulation) {
+      const live = el('div', { className: 'menu-live' });
+      live.append(
+        el('span', { className: 'menu-live-dot', attrs: { 'aria-hidden': 'true' } }),
+        el('span', { text: t('menu.live') }),
+      );
+      this.element.append(live);
+    }
     this.cleanupNavigation = enableListNavigation(actions);
 
     if (options.unavailableReason) {
       const alert = el('p', { className: 'alert alert-error', text: options.unavailableReason });
-      layout.insertBefore(alert, actions);
+      column.insertBefore(alert, actions);
     }
   }
 

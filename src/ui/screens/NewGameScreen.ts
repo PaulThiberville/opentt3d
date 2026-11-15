@@ -3,9 +3,12 @@
  * IA, climat et année de départ. Validation centralisée dans `gameOptions`.
  */
 
-import { QUALITY_LEVELS, QUALITY_PRESETS } from '../../render/quality';
+import { QUALITY_LEVELS } from '../../render/quality';
 import type { EngineMode } from '../../engine/loadEngine';
+import type { EngineAvailability } from '../engineAvailability';
+import { EnginePicker } from '../enginePicker';
 import { el, fieldLabel, enableListNavigation } from '../dom';
+import { qualityLabel, t, tn, type TranslationKey } from '../i18n';
 import {
   AI_COMPANIES,
   CLIMATES,
@@ -22,11 +25,33 @@ import { BaseScreen } from './BaseScreen';
 
 export interface NewGameScreenOptions {
   initial: NewGameOptions;
-  onStart: (options: NewGameOptions) => void;
+  onStart: (options: NewGameOptions, engine: EngineMode) => void;
   onBack: () => void;
-  /** Moteur qui sera utilisé (?engine=mock|wasm). */
+  /** Moteur proposé par défaut (réglage persistant ou `?engine=`). */
   engineMode?: EngineMode;
+  /** Moteur persisté, pour distinguer le réglage d'un forçage URL. */
+  storedEngineMode?: EngineMode;
+  /** `?engine=` explicite : verrouille le sélecteur. */
+  engineUrlMode?: EngineMode | null;
+  /** Disponibilité des artefacts WASM, mise à jour en asynchrone. */
+  engineAvailability?: EngineAvailability | null;
+  /** Le joueur change de moteur : le réglage peut être persisté. */
+  onEngineChange?: (mode: EngineMode) => void;
 }
+
+const DIFFICULTY_KEYS: Record<number, TranslationKey> = {
+  0: 'difficulty.easy',
+  1: 'difficulty.normal',
+  2: 'difficulty.hard',
+  3: 'difficulty.expert',
+};
+
+const CLIMATE_KEYS: Record<string, TranslationKey> = {
+  temperate: 'climate.temperate',
+  subarctic: 'climate.subarctic',
+  subtropical: 'climate.subtropical',
+  toyland: 'climate.toyland',
+};
 
 export class NewGameScreen extends BaseScreen {
   private options: NewGameScreenOptions;
@@ -38,24 +63,55 @@ export class NewGameScreen extends BaseScreen {
   private yearInput: HTMLInputElement;
   private sizeInputs: HTMLInputElement[] = [];
   private cleanupNavigation: () => void;
+  private enginePicker!: EnginePicker;
+  private engineStored: EngineMode;
+  private unsubscribeEngine: (() => void) | null = null;
 
   constructor(options: NewGameScreenOptions) {
     super('panel-screen new-game-screen');
     this.options = options;
+    this.engineStored = options.storedEngineMode ?? options.engineMode ?? 'mock';
     const initial = options.initial;
 
     const panel = el('div', { className: 'panel panel-wide' });
     const header = el('div', { className: 'panel-header' });
     header.append(
-      el('span', { className: 'panel-eyebrow', text: 'Nouvelle partie' }),
-      el('h1', { className: 'panel-title', text: 'Générer un monde' }),
+      el('span', { className: 'panel-eyebrow', text: t('newgame.eyebrow') }),
+      el('h1', { className: 'panel-title', text: t('newgame.title') }),
       el('p', {
         className: 'panel-subtitle',
-        text: 'La carte, les villes, les industries et les réseaux de départ sont générés de façon déterministe à partir de la graine.',
+        text: t('newgame.subtitle'),
       }),
     );
 
     const form = el('form', { className: 'form', attrs: { novalidate: '' } });
+
+    // Moteur -----------------------------------------------------------------
+    this.enginePicker = new EnginePicker({
+      idPrefix: 'new',
+      legend: t('newgame.engine.label'),
+      hint: t('newgame.engine.hint'),
+      storedMode: this.engineStored,
+      urlMode: options.engineUrlMode ?? null,
+      artifacts: options.engineAvailability?.get() ?? null,
+      onChange: (mode) => {
+        this.engineStored = mode;
+        options.onEngineChange?.(mode);
+      },
+    });
+    const availability = options.engineAvailability ?? null;
+    if (availability) {
+      this.unsubscribeEngine = availability.subscribe((artifacts) => {
+        const state = this.enginePicker.update({
+          artifacts,
+          storedMode: this.engineStored,
+        });
+        if (state.downgraded && !state.locked) {
+          this.engineStored = state.mode;
+          options.onEngineChange?.(state.mode);
+        }
+      });
+    }
 
     // Graine -----------------------------------------------------------------
     this.seedInput = el('input', {
@@ -74,19 +130,19 @@ export class NewGameScreen extends BaseScreen {
     const seedRow = el('div', { className: 'field-row' });
     const randomButton = el('button', {
       className: 'btn btn-ghost',
-      text: 'Aléatoire',
-      attrs: { type: 'button', title: 'Tirer une nouvelle graine' },
+      text: t('newgame.random'),
+      attrs: { type: 'button', title: t('newgame.randomTitle') },
     });
     randomButton.addEventListener('click', () => {
       this.seedInput.value = String(randomSeed());
       this.seedInput.focus();
     });
     seedRow.append(this.seedInput, randomButton);
-    const seedField = this.field('Graine', 'seed', seedRow);
+    const seedField = this.field(t('newgame.seed.label'), 'seed', seedRow);
     seedField.append(
       el('p', {
         className: 'field-hint',
-        text: 'Entier ou hexadécimal (0x…). Une même graine donne le même monde.',
+        text: t('newgame.seed.hint'),
       }),
     );
 
@@ -95,7 +151,7 @@ export class NewGameScreen extends BaseScreen {
       className: 'field field-full',
       dataset: { field: 'size' },
     });
-    sizeField.append(el('legend', { className: 'field-label', text: 'Taille de carte' }));
+    sizeField.append(el('legend', { className: 'field-label', text: t('newgame.size.label') }));
     const segments = el('div', { className: 'segmented' });
     for (const size of MAP_SIZES) {
       const label = el('label', { className: 'segment' });
@@ -115,35 +171,42 @@ export class NewGameScreen extends BaseScreen {
     sizeField.append(
       el('p', {
         className: 'field-hint',
-        text: '128 pour une partie rapide, 256 pour l’expérience par défaut, 512 pour une grande carte. Le moteur WASM exige des puissances de 2.',
+        text: t('newgame.size.hint'),
       }),
     );
 
     // Qualité ----------------------------------------------------------------
     this.qualitySelect = this.select(
       'new-quality',
-      QUALITY_LEVELS.map((level) => ({ value: level, label: QUALITY_PRESETS[level].label })),
+      QUALITY_LEVELS.map((level) => ({ value: level, label: qualityLabel(level) })),
       initial.quality,
     );
-    const qualityField = this.field('Qualité de rendu', 'quality', this.qualitySelect);
+    const qualityField = this.field(t('newgame.quality.label'), 'quality', this.qualitySelect);
     qualityField.append(
       el('p', {
         className: 'field-hint',
-        text: 'Peut être changée en jeu depuis le HUD ou les réglages.',
+        text: t('newgame.quality.hint'),
       }),
     );
 
     // Difficulté --------------------------------------------------------------
     this.difficultySelect = this.select(
       'new-difficulty',
-      DIFFICULTIES.map((entry) => ({ value: `${entry.value}`, label: entry.label })),
+      DIFFICULTIES.map((entry) => ({
+        value: `${entry.value}`,
+        label: t(DIFFICULTY_KEYS[entry.value] ?? 'difficulty.normal'),
+      })),
       `${initial.difficulty}`,
     );
-    const difficultyField = this.field('Difficulté', 'difficulty', this.difficultySelect);
+    const difficultyField = this.field(
+      t('newgame.difficulty.label'),
+      'difficulty',
+      this.difficultySelect,
+    );
     difficultyField.append(
       el('p', {
         className: 'field-hint',
-        text: 'Transmise au moteur ; l’effet complet arrive avec le WASM.',
+        text: t('newgame.difficulty.hint'),
       }),
     );
 
@@ -152,20 +215,22 @@ export class NewGameScreen extends BaseScreen {
       'new-ai',
       AI_COMPANIES.map((count) => ({
         value: `${count}`,
-        label:
-          count === 0 ? 'Aucune (bac à sable)' : `${count} entreprise${count > 1 ? 's' : ''} IA`,
+        label: count === 0 ? t('newgame.ai.none') : tn(count, 'newgame.ai.one', 'newgame.ai.other'),
       })),
       `${initial.aiCompanies}`,
     );
-    const aiField = this.field('Entreprises IA', 'aiCompanies', this.aiSelect);
+    const aiField = this.field(t('newgame.ai.label'), 'aiCompanies', this.aiSelect);
 
     // Climat -----------------------------------------------------------------
     this.climateSelect = this.select(
       'new-climate',
-      CLIMATES.map((entry) => ({ value: entry.value, label: entry.label })),
+      CLIMATES.map((entry) => ({
+        value: entry.value,
+        label: t(CLIMATE_KEYS[entry.value] ?? 'climate.temperate'),
+      })),
       initial.climate,
     );
-    const climateField = this.field('Climat', 'climate', this.climateSelect);
+    const climateField = this.field(t('newgame.climate.label'), 'climate', this.climateSelect);
 
     // Année ------------------------------------------------------------------
     this.yearInput = el('input', {
@@ -180,9 +245,10 @@ export class NewGameScreen extends BaseScreen {
       },
     });
     this.yearInput.value = `${initial.startYear}`;
-    const yearField = this.field('Année de départ', 'startYear', this.yearInput);
+    const yearField = this.field(t('newgame.year.label'), 'startYear', this.yearInput);
 
     form.append(
+      this.enginePicker.element,
       seedField,
       sizeField,
       qualityField,
@@ -195,13 +261,13 @@ export class NewGameScreen extends BaseScreen {
     const actions = el('div', { className: 'panel-actions' });
     const back = el('button', {
       className: 'btn btn-ghost',
-      text: 'Retour',
+      text: t('newgame.back'),
       attrs: { type: 'button' },
     });
     back.addEventListener('click', () => options.onBack());
     const start = el('button', {
       className: 'btn btn-primary',
-      text: 'Démarrer la partie',
+      text: t('newgame.start'),
       attrs: { type: 'submit' },
     });
     actions.append(back, start);
@@ -212,39 +278,15 @@ export class NewGameScreen extends BaseScreen {
       this.submit();
     });
 
-    panel.append(header, this.engineInfo(), form);
+    panel.append(header, form);
     this.element.append(panel);
     this.cleanupNavigation = enableListNavigation(panel);
 
     const footer = el('p', {
       className: 'screen-note',
-      text: 'Astuce : Échap revient au menu. Aucune donnée n’est envoyée sur le réseau.',
+      text: t('newgame.footer'),
     });
     panel.append(footer);
-  }
-
-  /** Indicateur du moteur actif et avertissement sur les options non gérées. */
-  private engineInfo(): HTMLElement {
-    const mode = this.options.engineMode ?? 'mock';
-    const block = el('div', { className: 'field-hint' });
-    const badges = el('div', { className: 'menu-badges' });
-    badges.append(
-      el('span', {
-        className: 'badge',
-        text: mode === 'wasm' ? 'Moteur WASM (OpenTTD réel)' : 'Moteur simulé (Mock)',
-      }),
-    );
-    block.append(badges);
-    block.append(
-      el('p', {
-        className: 'field-hint',
-        text:
-          mode === 'wasm'
-            ? 'Les options (climat, année, difficulté, IA) sont transmises au pont OpenTTD. Villes et industries sont des cibles : le nombre final peut varier.'
-            : 'Simulation déterministe locale. Ajoutez ?engine=wasm à l’URL pour tester le moteur OpenTTD réel.',
-      }),
-    );
-    return block;
   }
 
   protected override onKeyDown(event: KeyboardEvent): void {
@@ -296,7 +338,7 @@ export class NewGameScreen extends BaseScreen {
       this.showErrors(result.errors);
       return;
     }
-    this.options.onStart(result.value);
+    this.options.onStart(result.value, this.enginePicker.selection);
   }
 
   private clearErrors(): void {
@@ -322,6 +364,8 @@ export class NewGameScreen extends BaseScreen {
   }
 
   override dispose(): void {
+    this.unsubscribeEngine?.();
+    this.unsubscribeEngine = null;
     this.cleanupNavigation();
     super.dispose();
   }

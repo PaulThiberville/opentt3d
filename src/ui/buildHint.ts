@@ -7,52 +7,56 @@
 
 import { stationFootprint, type BuildPlan, type BuildTool } from '../game/buildRules';
 import { formatInt, formatMoney } from './format';
+import { t, type TranslationKey } from './i18n';
 
 export interface BuildHintView {
   tone: 'idle' | 'valid' | 'invalid';
   text: string;
 }
 
-const TOOL_LABELS: Record<BuildTool, string> = {
-  road: 'Routes',
-  rail: 'Rails',
-  clear: 'Démolition',
-  station: 'Gares',
-  depot: 'Dépôts',
-  signal: 'Signaux',
+const TOOL_LABEL_KEYS: Record<BuildTool, TranslationKey> = {
+  road: 'toolbar.road.label',
+  rail: 'toolbar.rail.label',
+  clear: 'build.tool.clear',
+  station: 'toolbar.station.label',
+  depot: 'toolbar.depot.label',
+  signal: 'toolbar.signal.label',
 };
 
-const TOOL_HINTS: Record<BuildTool, string> = {
-  road: 'cliquez ou glissez d’une tuile à l’autre',
-  rail: 'cliquez ou glissez d’une tuile à l’autre',
-  clear: 'cliquez ou glissez pour démolir un tronçon',
-  station: 'choisissez taille et orientation, puis cliquez pour poser',
-  depot: 'cliquez à côté d’une voie',
-  signal: 'cliquez ou glissez le long d’une voie ferrée',
+const TOOL_HINT_KEYS: Record<BuildTool, TranslationKey> = {
+  road: 'build.hint.road',
+  rail: 'build.hint.rail',
+  clear: 'build.hint.clear',
+  station: 'build.hint.station',
+  depot: 'build.hint.depot',
+  signal: 'build.hint.signal',
 };
+
+function countLabel(plan: BuildPlan): string {
+  const count = plan.tiles.length;
+  const formatted = formatInt(count);
+  if (plan.tool === 'signal') {
+    return t(count > 1 ? 'build.count.signal.other' : 'build.count.signal.one', {
+      count: formatted,
+    });
+  }
+  if (plan.tool === 'station' && plan.station?.kind === 'road') {
+    return t('build.count.tile.one', { count: '1' });
+  }
+  if (plan.tool === 'depot') return t('build.count.tile.one', { count: '1' });
+  return t(count > 1 ? 'build.count.tile.other' : 'build.count.tile.one', {
+    count: formatted,
+  });
+}
 
 function stationLabel(plan: BuildPlan): string {
   const settings = plan.station;
-  if (!settings) return 'Gare';
+  if (!settings) return t('build.station.generic');
   if (settings.kind === 'road') {
-    return settings.driveThrough ? 'Gare routière en passage' : 'Gare routière';
+    return t(settings.driveThrough ? 'build.station.roadThrough' : 'build.station.road');
   }
   const footprint = stationFootprint(settings);
-  return `Gare ferroviaire ${footprint.width}×${footprint.height}`;
-}
-
-function countLabel(plan: BuildPlan): string {
-  if (plan.tool === 'station' && plan.station?.kind === 'rail') {
-    return `${formatInt(plan.tiles.length)} tuiles`;
-  }
-  if (plan.tool === 'station' && plan.station?.kind === 'road') return '1 tuile';
-  if (plan.tool === 'depot') return '1 tuile';
-  if (plan.tool === 'signal') {
-    const count = plan.tiles.length;
-    return count > 1 ? `${formatInt(count)} signaux` : '1 signal';
-  }
-  const count = plan.tiles.length;
-  return `${formatInt(count)} tuile${count > 1 ? 's' : ''}`;
+  return t('build.station.rail', { width: footprint.width, height: footprint.height });
 }
 
 export function describeBuildPlan(
@@ -60,23 +64,32 @@ export function describeBuildPlan(
   tool: BuildTool | null,
 ): BuildHintView | null {
   if (!tool) return null;
-  const label = TOOL_LABELS[tool];
+  const label = t(TOOL_LABEL_KEYS[tool]);
   if (!plan || plan.tiles.length === 0) {
-    const rotate = tool === 'station' || tool === 'depot' ? ' · R pivote' : '';
+    const rotate = tool === 'station' || tool === 'depot' ? t('build.idle.rotate') : '';
     return {
       tone: 'idle',
-      text: `${label} : ${TOOL_HINTS[tool]}${rotate} · clic droit annule · Échap quitte`,
+      text: t('build.idle', { label, hint: t(TOOL_HINT_KEYS[tool]), rotate }),
     };
   }
   if (!plan.valid) {
     return {
       tone: 'invalid',
-      text: `${label} : impossible — ${plan.reason ?? 'tracé invalide'}`,
+      text: t('build.invalid', {
+        label,
+        reason: plan.reason ?? t('build.invalid.reason'),
+      }),
     };
   }
-  const detail = plan.tool === 'station' ? `${stationLabel(plan)} · ` : '';
+  const detail =
+    plan.tool === 'station' ? t('build.station.detail', { station: stationLabel(plan) }) : '';
   return {
     tone: 'valid',
-    text: `${label} : ${detail}${countLabel(plan)} · ${formatMoney(plan.cost)}`,
+    text: t('build.valid', {
+      label,
+      detail,
+      count: countLabel(plan),
+      cost: formatMoney(plan.cost),
+    }),
   };
 }

@@ -8,56 +8,57 @@
 
 import type { BuildTool } from '../../game/buildRules';
 import { el } from '../dom';
+import { bindText, onLanguageChange, t, type TranslationKey } from '../i18n';
 
 export type BuildToolId = BuildTool;
 
 interface ToolDefinition {
   id: BuildToolId;
   icon: string;
-  label: string;
-  hint: string;
+  labelKey: TranslationKey;
+  hintKey: TranslationKey;
 }
 
 const TOOLS: ToolDefinition[] = [
   {
     id: 'road',
     icon: '▤',
-    label: 'Routes',
-    hint: 'Cliquer puis glisser sur la carte pour construire une route.',
+    labelKey: 'toolbar.road.label',
+    hintKey: 'toolbar.road.hint',
   },
   {
     id: 'rail',
     icon: '╪',
-    label: 'Rails',
-    hint: 'Cliquer puis glisser sur la carte pour construire une voie ferrée.',
+    labelKey: 'toolbar.rail.label',
+    hintKey: 'toolbar.rail.hint',
   },
   {
     id: 'station',
     icon: '▣',
-    label: 'Gares',
-    hint: 'Gare ferroviaire ou routière : cliquez pour poser, R pivote, taille dans la barre d’options.',
+    labelKey: 'toolbar.station.label',
+    hintKey: 'toolbar.station.hint',
   },
   {
     id: 'depot',
     icon: '◫',
-    label: 'Dépôts',
-    hint: 'Dépôt route ou rail : posez-le à côté d’une voie, R oriente l’entrée.',
+    labelKey: 'toolbar.depot.label',
+    hintKey: 'toolbar.depot.hint',
   },
   {
     id: 'signal',
     icon: '◉',
-    label: 'Signaux',
-    hint: 'Signal de bloc : cliquez (ou glissez) sur une voie ferrée existante.',
+    labelKey: 'toolbar.signal.label',
+    hintKey: 'toolbar.signal.hint',
   },
 ];
 
-const SHORT_LABELS: Record<BuildToolId, string> = {
-  road: 'routes',
-  rail: 'rails',
-  station: 'gares',
-  depot: 'dépôts',
-  signal: 'signaux',
-  clear: 'démolition',
+const SHORT_LABELS: Record<BuildToolId, TranslationKey> = {
+  road: 'toolbar.short.road',
+  rail: 'toolbar.short.rail',
+  station: 'toolbar.short.station',
+  depot: 'toolbar.short.depot',
+  signal: 'toolbar.short.signal',
+  clear: 'toolbar.short.road',
 };
 
 export interface ToolbarOptions {
@@ -68,11 +69,13 @@ export class Toolbar {
   readonly element: HTMLElement;
 
   private buttons = new Map<ToolDefinition['id'], HTMLButtonElement>();
+  private active: BuildToolId | null = null;
+  private stopListening: () => void;
 
   constructor(options: ToolbarOptions) {
     this.element = el('nav', {
       className: 'hud-toolbar',
-      attrs: { 'aria-label': 'Outils de construction' },
+      attrs: { 'aria-label': t('toolbar.label') },
     });
     for (const tool of TOOLS) {
       const button = el('button', {
@@ -80,9 +83,9 @@ export class Toolbar {
         attrs: {
           type: 'button',
           'aria-pressed': 'false',
-          'aria-disabled': 'false',
-          title: tool.hint,
-          'data-tooltip': tool.hint,
+          'aria-label': t(tool.labelKey),
+          title: t(tool.hintKey),
+          'data-tooltip': t(tool.hintKey),
         },
         dataset: { tool: tool.id },
       });
@@ -92,30 +95,46 @@ export class Toolbar {
           text: tool.icon,
           attrs: { 'aria-hidden': 'true' },
         }),
-        el('span', { className: 'hud-tool-label', text: tool.label }),
+        bindText(el('span', { className: 'hud-tool-label' }), tool.labelKey),
       );
       button.addEventListener('click', () => options.onToggleTool(tool.id));
       this.buttons.set(tool.id, button);
       this.element.append(button);
     }
+    this.stopListening = onLanguageChange(() => this.refreshLabels());
   }
 
   /** Met en évidence l'outil armé (ou aucun). */
   setActive(tool: BuildToolId | null): void {
+    this.active = tool;
     for (const [id, button] of this.buttons) {
       const active = id === tool;
       button.classList.toggle('is-active', active);
       button.setAttribute('aria-pressed', active ? 'true' : 'false');
-      const definition = TOOLS.find((candidate) => candidate.id === id);
-      if (definition) {
-        button.title = active
-          ? `${definition.label} — outil actif (Échap pour quitter)`
-          : definition.hint;
-      }
     }
+    this.refreshLabels();
+  }
+
+  private refreshLabels(): void {
     this.element.setAttribute(
       'aria-label',
-      tool ? `Outils de construction — ${SHORT_LABELS[tool]} actif` : 'Outils de construction',
+      this.active
+        ? t('toolbar.labelActive', { tool: t(SHORT_LABELS[this.active]) })
+        : t('toolbar.label'),
     );
+    for (const tool of TOOLS) {
+      const button = this.buttons.get(tool.id);
+      if (!button) continue;
+      button.setAttribute('aria-label', t(tool.labelKey));
+      const hint = t(tool.hintKey);
+      const text =
+        tool.id === this.active ? t('toolbar.activeTooltip', { label: t(tool.labelKey) }) : hint;
+      button.title = text;
+      button.dataset.tooltip = text;
+    }
+  }
+
+  dispose(): void {
+    this.stopListening();
   }
 }

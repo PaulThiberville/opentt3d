@@ -14,8 +14,9 @@ export type {
   RateLimitOptions,
   Transport,
   TransportKind,
+  TurnServerConfig,
 } from './transport.js';
-export { createMemoryBus, createTransport } from './transport.js';
+export { createMemoryBus, createTransport, describeTransportError } from './transport.js';
 
 export type {
   ChatEvent,
@@ -23,10 +24,16 @@ export type {
   JoinEvent,
   JoinPhase,
   JoinProgress,
+  NetNotice,
+  NetNoticeCode,
   NetSession,
   NetSessionOptions,
   NetStats,
   NetUpdate,
+  NetWaitReason,
+  PeerLossPause,
+  PeerStateEvent,
+  PeerStateSummary,
   PeersMap,
   Runner,
 } from './session.js';
@@ -49,6 +56,9 @@ export type {
   LeaveMessage,
   NetMessage,
   NetMessageKind,
+  PeerConnectionState,
+  PeerStateMessage,
+  PeerStateReason,
   PlayerId,
   ResyncMessage,
   SaveChunk,
@@ -82,6 +92,9 @@ export {
   isJoinRequestMessage,
   isLeaveCommand,
   isLeaveMessage,
+  isPeerConnectionState,
+  isPeerStateMessage,
+  isPeerStateReason,
   isResyncMessage,
   isTurnCommand,
   isTurnMessage,

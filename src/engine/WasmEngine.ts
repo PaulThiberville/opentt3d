@@ -29,6 +29,7 @@ import {
 } from './loadEngine';
 import { parseWorldJson } from './worldJson';
 import {
+  type CompanyId,
   type EngineCommand,
   type EngineDriver,
   type EngineInitOptions,
@@ -53,7 +54,7 @@ function describeError(error: unknown): string {
   return describeUnknownError(error);
 }
 
-/** Configuration transmise à `ottd_new_game_ex` (clés du pont, #60). */
+/** Configuration transmise à `ottd_new_game_ex` (clés du pont, #60/#99). */
 function buildGameConfig(options: NewGameOptions): string {
   const config: Record<string, unknown> = {
     climate: options.climate ?? 'temperate',
@@ -62,6 +63,12 @@ function buildGameConfig(options: NewGameOptions): string {
     ai_companies: options.aiCompanies ?? 0,
     map_size: Math.trunc(options.width),
   };
+  if (options.companies && options.companies.length > 0) {
+    config.companies = options.companies.map((company) => ({
+      name: company.name,
+      colour: Math.max(0, Math.min(15, Math.trunc(company.colour))),
+    }));
+  }
   return JSON.stringify(config);
 }
 
@@ -106,6 +113,10 @@ export class WasmEngine implements EngineDriver {
   private onWarning: ((message: string) => void) | null = null;
   /** Résultats de commandes à injecter dans le prochain snapshot. */
   private pendingNews: WorldSnapshot['news'] = [];
+  /** Entreprise contrôlée par ce module (#99), si explicitement choisie. */
+  private localCompany: CompanyId | null = null;
+  /** Entreprise demandée par l'appelant, réappliquée après chaque chargement. */
+  private desiredLocalCompany: CompanyId | null = null;
 
   constructor(options: WasmEngineOptions = {}) {
     this.factory = options.factory;
@@ -260,10 +271,46 @@ export class WasmEngine implements EngineDriver {
     this.paused = false;
     this.speed = 1;
     this.tick = module._ottd_tick();
+    this.desiredLocalCompany = null;
+    this.syncLocalCompany(module);
 
     // La génération est synchrone dans le pont, mais un build plus lent peut
     // pomper quelques ticks : on vérifie la carte avec une marge bornée.
     this.ensureMapReady(module, width, height);
+  }
+
+  /** Entreprise contrôlée par ce module (dernière valeur appliquée). */
+  get localCompanyId(): CompanyId | null {
+    return this.localCompany;
+  }
+
+  /**
+   * Choisit l'entreprise locale (#99) : le snapshot la marque `isLocal` et les
+   * commandes sans `company` la ciblent. N'affecte ni l'état simulé ni le hash.
+   */
+  setLocalCompany(company: CompanyId): boolean {
+    const module = this.requireModule();
+    if (!this.inGame) return false;
+    const setter = module._ottd_set_local_company;
+    if (typeof setter !== 'function') {
+      this.warn('Entreprise locale indisponible : ce build du pont ne l’expose pas (#99).');
+      return false;
+    }
+    const code = setter(Math.trunc(company));
+    if (code !== 0) {
+      this.warn(this.bridgeError('ottd_set_local_company', code));
+      return false;
+    }
+    this.localCompany = company;
+    this.desiredLocalCompany = company;
+    return true;
+  }
+
+  /** Relit l'entreprise locale du pont (première entreprise après `newGame`). */
+  private syncLocalCompany(module: EmscriptenModule): void {
+    if (typeof module._ottd_company_id !== 'function') return;
+    const id = module._ottd_company_id();
+    this.localCompany = id >= 0 ? id : null;
   }
 
   step(ticks: number): number {
@@ -451,6 +498,11 @@ export class WasmEngine implements EngineDriver {
       this.tick = module._ottd_tick();
       this.pendingNews = [];
       this.warnings = [];
+      // Le pont restaure l'entreprise locale des métadonnées ; en réseau,
+      // chaque pair réapplique la sienne (#99). En solo, le choix sauvegardé
+      // fait foi.
+      if (this.desiredLocalCompany !== null) this.setLocalCompany(this.desiredLocalCompany);
+      else this.syncLocalCompany(module);
     } finally {
       module._free(pointer);
     }

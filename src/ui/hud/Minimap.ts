@@ -12,15 +12,20 @@ import type { Selection } from '../../game/Game';
 import { TILE_KINDS, tileIndex } from '../../game/mapGrid';
 import { companyColour } from '../../render/tileVisuals';
 import { el } from '../dom';
+import { bindAttr, bindText, t } from '../i18n';
 import {
   cameraFootprint,
+  computeMapSignature,
   computeMinimapLayout,
   minimapToWorld,
+  RedrawThrottle,
   worldToMinimap,
   type MinimapLayout,
   type Point,
 } from '../minimapMath';
 import type { CameraView } from '../types';
+
+const MINIMAP_REDRAW_INTERVAL_MS = 100;
 
 const MINIMAP_COLORS: Record<TileKind, number> = {
   void: 0x0a0f15,
@@ -104,39 +109,59 @@ export class Minimap {
   private mapLabel: HTMLSpanElement;
   private observer: ResizeObserver | null = null;
   private baseDirty = true;
+  private mapSignature = 0;
+  private hasMapSignature = false;
+  private throttle = new RedrawThrottle(MINIMAP_REDRAW_INTERVAL_MS);
+  private cachedRect: DOMRect | null = null;
+  private baseRebuilds = 0;
+  private draws = 0;
 
   constructor(options: MinimapOptions) {
     this.element = el('aside', {
       className: 'hud-minimap',
-      attrs: { 'aria-label': 'Minimap' },
+      attrs: { 'aria-label': t('minimap.label') },
     });
+    bindAttr(this.element, 'aria-label', 'minimap.label');
     const header = el('div', { className: 'hud-minimap-header' });
-    header.append(el('h3', { text: 'Minimap' }));
+    header.append(bindText(el('h3'), 'minimap.title'));
     this.mapLabel = el('span', { className: 'hud-minimap-size', text: '—' });
     header.append(this.mapLabel);
 
     this.canvas = el('canvas', {
       className: 'hud-minimap-canvas',
       attrs: {
-        'aria-label': 'Carte du monde : cliquer pour recentrer la caméra',
+        'aria-label': t('minimap.aria'),
+        'aria-describedby': 'hud-minimap-hint',
         role: 'img',
-        title: 'Clic : recentrer la caméra',
+        tabindex: '0',
+        'aria-keyshortcuts': 'Enter Space',
+        title: t('minimap.titleAttr'),
       },
     });
     this.ctx = this.canvas.getContext('2d');
     this.base = document.createElement('canvas');
     this.layout = computeMinimapLayout(1, 1, 1, 1);
 
-    const hint = el('div', {
-      className: 'hud-minimap-hint',
-      text: 'Clic : recentrer · cadre = caméra',
-    });
+    bindAttr(this.canvas, 'aria-label', 'minimap.aria');
+    bindAttr(this.canvas, 'title', 'minimap.titleAttr');
+    const hint = bindText(
+      el('div', { className: 'hud-minimap-hint', attrs: { id: 'hud-minimap-hint' } }),
+      'minimap.hint',
+    );
     this.element.append(header, this.canvas, hint);
+
+    this.canvas.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      const map = this.map;
+      if (!map) return;
+      event.preventDefault();
+      options.onRecenter(map.width / 2, map.height / 2);
+    });
 
     this.canvas.addEventListener('click', (event) => {
       const map = this.map;
       if (!map) return;
-      const rect = this.canvas.getBoundingClientRect();
+      const rect = this.cachedRect ?? this.canvas.getBoundingClientRect();
       const world = minimapToWorld(
         event.clientX - rect.left,
         event.clientY - rect.top,
@@ -151,8 +176,18 @@ export class Minimap {
       this.observer = new ResizeObserver(() => this.resize());
       this.observer.observe(this.canvas);
     }
+    if (typeof window !== 'undefined') {
+      // Le cache du rectangle ne sert qu'au clic : une lecture par resize ou
+      // par scroll suffit, jamais une lecture par frame.
+      window.addEventListener('scroll', this.refreshRect, true);
+    }
     this.resize();
   }
+
+  private refreshRect = (): void => {
+    if (typeof this.canvas.getBoundingClientRect !== 'function') return;
+    this.cachedRect = this.canvas.getBoundingClientRect();
+  };
 
   setSnapshot(snapshot: WorldSnapshot | null): void {
     this.snapshot = snapshot;
@@ -171,15 +206,35 @@ export class Minimap {
   }
 
   private setMap(map: MapSnapshot): void {
+    const previous = this.map;
+    const signature = computeMapSignature(map);
     this.map = map;
-    this.mapLabel.textContent = `${map.width} × ${map.height}`;
-    this.canvas.style.aspectRatio = `${map.width} / ${map.height}`;
+    if (this.hasMapSignature && signature === this.mapSignature) return;
+    this.mapSignature = signature;
+    this.hasMapSignature = true;
+    const sizeChanged = !previous || previous.width !== map.width || previous.height !== map.height;
+    if (sizeChanged) {
+      this.mapLabel.textContent = `${map.width} × ${map.height}`;
+      this.canvas.style.aspectRatio = `${map.width} / ${map.height}`;
+      this.applyLayout();
+    }
     this.baseDirty = true;
-    this.resize();
+    this.draw();
+  }
+
+  private applyLayout(): void {
+    const map = this.map;
+    this.layout = computeMinimapLayout(
+      map?.width ?? 1,
+      map?.height ?? 1,
+      this.cssWidth,
+      this.cssHeight,
+    );
   }
 
   private resize(): void {
     const rect = this.canvas.getBoundingClientRect();
+    this.cachedRect = rect;
     this.cssWidth = Math.max(1, Math.round(rect.width));
     this.cssHeight = Math.max(1, Math.round(rect.height));
     this.dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
@@ -190,14 +245,18 @@ export class Minimap {
       this.canvas.height = pixelHeight;
       this.baseDirty = true;
     }
-    const map = this.map;
-    this.layout = computeMinimapLayout(
-      map?.width ?? 1,
-      map?.height ?? 1,
-      this.cssWidth,
-      this.cssHeight,
-    );
-    this.draw();
+    this.applyLayout();
+    this.draw(true);
+  }
+
+  /** Nombre de reconstructions de l'ImageData de base (diagnostic/tests). */
+  get baseRebuildCount(): number {
+    return this.baseRebuilds;
+  }
+
+  /** Nombre de redraws effectifs (diagnostic/tests). */
+  get drawCount(): number {
+    return this.draws;
   }
 
   private rebuildBase(): void {
@@ -235,12 +294,24 @@ export class Minimap {
     }
     context.putImageData(image, 0, 0);
     this.baseDirty = false;
+    this.baseRebuilds += 1;
   }
 
-  private draw(): void {
+  private now(): number {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+      return performance.now();
+    }
+    return Date.now();
+  }
+
+  private draw(force = false): void {
     const ctx = this.ctx;
     if (!ctx) return;
+    // Un snapshot WASM arrive à ~5 Hz : inutile de reconstruire le fond pour
+    // une carte identique, ni de redessiner plus vite que le HUD.
+    if (!this.throttle.shouldDraw(this.now(), force)) return;
     if (this.baseDirty) this.rebuildBase();
+    this.draws += 1;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     if (this.map && this.base.width > 0) ctx.drawImage(this.base, 0, 0);
@@ -361,7 +432,10 @@ export class Minimap {
   dispose(): void {
     this.observer?.disconnect();
     this.observer = null;
+    if (typeof window !== 'undefined') window.removeEventListener('scroll', this.refreshRect, true);
+    this.cachedRect = null;
     this.ctx = null;
+    this.throttle.reset();
     this.element.remove();
   }
 }

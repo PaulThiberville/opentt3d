@@ -1,5 +1,8 @@
 node_modules/
 dist/
+dist-perf/
+perf-artifacts/
+release/
 coverage/
 package-lock.json
 engine/upstream/
@@ -8,3 +11,7 @@ engine/build-host/
 engine/.cache/
 public/
 *.wasm
+
+# Artefacts d’outils/agents
+.playwright-cli/
+e2e-out/

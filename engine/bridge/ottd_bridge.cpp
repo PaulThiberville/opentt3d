@@ -187,7 +187,16 @@ uint8_t Log2(uint32_t value)
  * | `disasters`                    | booléen         | force `difficulty.disasters` |
  * | `map_size` / `mapSize` / `size`| entier 64..4096 (puissance de 2) | doit correspondre à `w` et `h` |
  * | `game_name` / `gameName`       | chaîne          | mémorisé et renvoyé dans le snapshot (aucun champ OpenTTD équivalent) |
+ * | `companies` (#99)              | tableau d'objets `{name, colour}` | entreprises humaines créées au démarrage, ids 0..n-1 dans l'ordre ; absent = une seule entreprise locale |
  */
+
+/** Nom et couleur d'une entreprise humaine créée au démarrage (#99). */
+struct CompanyProfile {
+	std::string name;
+	/** Couleur OpenTTD 0..15 ; -1 conserve la couleur générée. */
+	int colour = -1;
+};
+
 struct GameSetupConfig {
 	std::optional<LandscapeType> landscape;
 	std::optional<int> start_year;
@@ -198,6 +207,8 @@ struct GameSetupConfig {
 	std::optional<int> map_size;
 	std::optional<bool> disasters;
 	std::optional<std::string> game_name;
+	/** Profils des entreprises humaines (#99). Vide = une entreprise par défaut. */
+	std::vector<CompanyProfile> companies;
 };
 
 /** Configuration appliquée à la partie courante (pour le snapshot JSON). */
@@ -480,6 +491,93 @@ bool ParseGameConfig(std::string_view json, GameSetupConfig &config, std::string
 				return JsonFail(error, "configuration : « game_name » doit être une chaîne");
 			}
 			config.game_name = value;
+		} else if (key == "companies") {
+			/* Tableau d'objets `{name, colour?}` : profil de chaque entreprise
+			 * humaine, dans l'ordre des ids 0..n-1 (#99). */
+			if (pos >= json.size() || json[pos] != '[') {
+				return JsonFail(error, "configuration : « companies » doit être un tableau");
+			}
+			pos++;
+			SkipJsonSpace(json, pos);
+			std::vector<CompanyProfile> companies;
+			if (pos < json.size() && json[pos] == ']') {
+				pos++;
+			} else {
+				for (;;) {
+					SkipJsonSpace(json, pos);
+					if (pos >= json.size() || json[pos] != '{') {
+						return JsonFail(error, "configuration : chaque entreprise doit être un objet");
+					}
+					pos++;
+					CompanyProfile profile;
+					bool first_company_field = true;
+					for (;;) {
+						SkipJsonSpace(json, pos);
+						if (pos >= json.size()) {
+							return JsonFail(error, "configuration : entreprise JSON incomplète");
+						}
+						if (json[pos] == '}') {
+							pos++;
+							break;
+						}
+						if (!first_company_field) {
+							if (json[pos] != ',') {
+								return JsonFail(error, "configuration : virgule attendue entre les champs d'entreprise");
+							}
+							pos++;
+							SkipJsonSpace(json, pos);
+						}
+						first_company_field = false;
+
+						std::string field;
+						if (!ParseJsonString(json, pos, field, error)) return false;
+						SkipJsonSpace(json, pos);
+						if (pos >= json.size() || json[pos] != ':') {
+							return JsonFail(error, fmt::format("configuration : « : » attendu après « {} »", field));
+						}
+						pos++;
+						SkipJsonSpace(json, pos);
+
+						if (field == "name") {
+							if (pos >= json.size() || json[pos] != '"' ||
+									!ParseJsonString(json, pos, profile.name, error)) {
+								return JsonFail(error, "configuration : « companies[].name » doit être une chaîne");
+							}
+						} else if (field == "colour" || field == "color") {
+							int colour = 0;
+							if (!ReadJsonInt(json, pos, colour, error)) return false;
+							if (colour < 0 || colour > 15) {
+								return JsonFail(error, fmt::format(
+									"configuration : couleur d'entreprise {} hors bornes (0..15)", colour));
+							}
+							profile.colour = colour;
+						} else {
+							return JsonFail(error, fmt::format(
+								"configuration : champ d'entreprise inconnu « {} »", field));
+						}
+					}
+					if (profile.name.empty()) {
+						return JsonFail(error, "configuration : « companies[].name » est requis");
+					}
+					companies.push_back(std::move(profile));
+					SkipJsonSpace(json, pos);
+					if (pos >= json.size()) return JsonFail(error, "configuration : tableau « companies » incomplet");
+					if (json[pos] == ',') {
+						pos++;
+						continue;
+					}
+					if (json[pos] == ']') {
+						pos++;
+						break;
+					}
+					return JsonFail(error, "configuration : virgule attendue dans « companies »");
+				}
+			}
+			if (companies.size() > MAX_COMPANIES) {
+				return JsonFail(error, fmt::format(
+					"configuration : {} entreprises humaines au maximum", static_cast<int>(MAX_COMPANIES)));
+			}
+			config.companies = std::move(companies);
 		} else {
 			return JsonFail(error, fmt::format("configuration : champ inconnu « {} »", key));
 		}
@@ -595,6 +693,14 @@ bool ApplyGameConfig(const GameSetupConfig &config, uint32_t w, uint32_t h, std:
 		if (count < 0 || count >= static_cast<int>(MAX_COMPANIES)) {
 			return JsonFail(error, fmt::format(
 				"configuration : nombre d'IA {} hors bornes (0..{})", count, MAX_COMPANIES - 1));
+		}
+		/* Les entreprises humaines (#99) occupent les premiers emplacements :
+		 * le total humains + IA doit tenir dans MAX_COMPANIES. */
+		const int humans = config.companies.empty() ? 1 : static_cast<int>(config.companies.size());
+		if (humans + count > static_cast<int>(MAX_COMPANIES)) {
+			return JsonFail(error, fmt::format(
+				"configuration : {} entreprises humaines + {} IA dépassent la limite de {}",
+				humans, count, static_cast<int>(MAX_COMPANIES)));
 		}
 		/* Reflète la demande dans les réglages de difficulté (fenêtre IA,
 		 * remplacement des faillites) ; la création effective est faite
@@ -1437,6 +1543,59 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 	/* `news` et `events` restent vides en v1 : le moteur ne journalise pas
 	 * encore ces informations de façon exploitable (voir wiki). */
 	out += ",\"news\":[],\"events\":[]}";
+}
+
+/**
+ * Crée les entreprises humaines de la partie (#99).
+ *
+ * Les ids sont attribués dans l'ordre croissant des emplacements libres, donc
+ * de façon déterministe : sur tous les pairs, la i-ème entreprise humaine a le
+ * même id et le même profil. Sans profil explicite, une seule entreprise est
+ * créée (comportement historique).
+ *
+ * @param profiles noms/couleurs des entreprises humaines (ordre des ids).
+ * @param[out] first_company id de la première entreprise créée.
+ * @param[out] error message lisible si la création est incomplète.
+ * @return nombre d'entreprises effectivement créées.
+ */
+int StartHumanCompanies(const std::vector<CompanyProfile> &profiles, CompanyID &first_company, std::string &error)
+{
+	first_company = CompanyID::Invalid();
+	const int count = profiles.empty() ? 1 : static_cast<int>(profiles.size());
+	int started = 0;
+	for (int i = 0; i < count; i++) {
+		CompanyID company_id = CompanyID::Invalid();
+		for (CompanyID candidate = CompanyID::Begin(); candidate < MAX_COMPANIES; ++candidate) {
+			if (!Company::IsValidID(candidate)) {
+				company_id = candidate;
+				break;
+			}
+		}
+		if (company_id == CompanyID::Invalid()) {
+			error = fmt::format("plus d'emplacement libre pour l'entreprise humaine {} sur {}", i, count);
+			break;
+		}
+
+		Company *company = DoStartupNewCompany(false, company_id);
+		if (company == nullptr) {
+			error = fmt::format("création de l'entreprise humaine {} refusée", company_id.base());
+			break;
+		}
+
+		if (i < static_cast<int>(profiles.size())) {
+			const CompanyProfile &profile = profiles[i];
+			if (!profile.name.empty()) company->name = profile.name;
+			if (profile.colour >= 0 && profile.colour <= 15) {
+				company->colour = static_cast<Colours>(profile.colour);
+				_company_colours[company->index] = company->colour;
+				ResetCompanyLivery(company);
+			}
+		}
+
+		if (first_company == CompanyID::Invalid()) first_company = company_id;
+		started++;
+	}
+	return started;
 }
 
 /**
@@ -2895,6 +3054,11 @@ bool ResolveCompany(const JsonValue &root, CompanyID &company, std::string &erro
 			!Company::IsValidID(CompanyID(static_cast<uint8_t>(id)))) {
 		return JsonFail(error, fmt::format("entreprise {} inexistante", id));
 	}
+	const Company *target = Company::Get(CompanyID(static_cast<uint8_t>(id)));
+	if (target->is_ai) {
+		return JsonFail(error, fmt::format(
+			"entreprise {} contrôlée par une IA : commande refusée", id));
+	}
 	company = CompanyID(static_cast<uint8_t>(id));
 	return true;
 }
@@ -3008,12 +3172,20 @@ enum OttdSaveLoadStatus : int {
  *   sauvegarde OpenTTD standard (format .sav avec en-tête et compression).
  *
  * Les métadonnées conservent la configuration du pont (climat, année,
- * difficulté, IA, villes, industries, nom) et les avertissements de partie,
- * que le .sav OpenTTD ne contient pas.
+ * difficulté, IA, villes, industries, nom), les profils d'entreprises
+ * humaines (#99), l'entreprise locale (`_local_company`) et les avertissements
+ * de partie, que le .sav OpenTTD ne contient pas.
+ *
+ * Version 2 : ajoute après les avertissements `u32 nb_entreprises`, puis pour
+ * chacune `u32 longueur + nom UTF-8 + u8 couleur`, puis `u8 entreprise_locale`
+ * (0xFF = aucune). La version 1 reste lisible.
  */
 static constexpr uint32_t OTTD_SAVE_MAGIC = 0x5333544F; ///< "OT3S" en little-endian.
-static constexpr uint16_t OTTD_SAVE_VERSION = 1;
+static constexpr uint16_t OTTD_SAVE_VERSION = 2;
+static constexpr uint16_t OTTD_SAVE_VERSION_MIN = 1;
 static constexpr uint16_t OTTD_SAVE_HEADER_SIZE = 32;
+/** Sentinelle « aucune entreprise locale » dans les métadonnées v2. */
+static constexpr uint8_t OTTD_NO_LOCAL_COMPANY = 0xFF;
 
 /** Filtre de sauvegarde qui accumule les octets dans un vecteur. */
 class OttdMemorySaveFilter final : public SaveFilter {
@@ -3100,6 +3272,8 @@ void AppendSaveString(std::vector<uint8_t> &out, std::string_view text)
  *   32 u32 longueur du nom de partie
  *   36 nom (UTF-8), puis u32 nombre d'avertissements et, pour chacun,
  *      u32 longueur + octets UTF-8.
+ *   v2 : u32 nombre d'entreprises humaines, puis pour chacune
+ *      u32 longueur + nom UTF-8 + u8 couleur, puis u8 entreprise locale.
  */
 void BuildSaveMetadata(std::vector<uint8_t> &meta)
 {
@@ -3131,16 +3305,32 @@ void BuildSaveMetadata(std::vector<uint8_t> &meta)
 
 	AppendSaveU32(meta, static_cast<uint32_t>(_ottd_warnings.size()));
 	for (const std::string &warning : _ottd_warnings) AppendSaveString(meta, warning);
+
+	/* v2 : profils d'entreprises humaines et entreprise locale (#99). */
+	AppendSaveU32(meta, static_cast<uint32_t>(config.companies.size()));
+	for (const CompanyProfile &profile : config.companies) {
+		AppendSaveString(meta, profile.name);
+		meta.push_back(profile.colour >= 0 && profile.colour <= 15
+			? static_cast<uint8_t>(profile.colour)
+			: OTTD_NO_LOCAL_COMPANY);
+	}
+	meta.push_back(Company::IsValidID(_local_company)
+		? _local_company.base()
+		: OTTD_NO_LOCAL_COMPANY);
 }
 
 /**
  * Relit les métadonnées du pont.
+ * @param version version du conteneur (1 ou 2).
+ * @param[out] local_company entreprise locale sauvegardée, ou 0xFF.
  * @return true si le bloc est cohérent et entièrement consommé.
  */
-bool ParseSaveMetadata(const uint8_t *data, size_t size, GameSetupConfig &config, std::vector<std::string> &warnings)
+bool ParseSaveMetadata(const uint8_t *data, size_t size, uint16_t version,
+		GameSetupConfig &config, std::vector<std::string> &warnings, uint8_t &local_company)
 {
 	config = GameSetupConfig{};
 	warnings.clear();
+	local_company = OTTD_NO_LOCAL_COMPANY;
 	if (size < 40) return false;
 
 	const uint8_t flags = data[0];
@@ -3191,6 +3381,26 @@ bool ParseSaveMetadata(const uint8_t *data, size_t size, GameSetupConfig &config
 		std::string warning;
 		if (!read_string(warning)) return false;
 		warnings.push_back(std::move(warning));
+	}
+
+	if (version >= 2) {
+		uint32_t company_count = 0;
+		if (!read_length(company_count) || company_count > static_cast<uint32_t>(MAX_COMPANIES)) {
+			return false;
+		}
+		config.companies.reserve(company_count);
+		for (uint32_t i = 0; i < company_count; i++) {
+			CompanyProfile profile;
+			if (!read_string(profile.name)) return false;
+			if (pos >= size) return false;
+			const uint8_t colour = data[pos++];
+			if (colour != OTTD_NO_LOCAL_COMPANY && colour > 15) return false;
+			profile.colour = colour == OTTD_NO_LOCAL_COMPANY ? -1 : static_cast<int>(colour);
+			config.companies.push_back(std::move(profile));
+		}
+		if (pos >= size) return false;
+		local_company = data[pos++];
+		if (local_company != OTTD_NO_LOCAL_COMPANY && local_company >= MAX_COMPANIES) return false;
 	}
 
 	return pos == size;
@@ -3274,7 +3484,8 @@ SaveOrLoadResult LoadPayload(const uint8_t *data, size_t size)
 }
 
 /** Finalise un chargement réussi : entreprise locale, compteurs, métadonnées. */
-void ApplyLoadedState(const GameSetupConfig &config, const std::vector<std::string> &warnings)
+void ApplyLoadedState(const GameSetupConfig &config, const std::vector<std::string> &warnings,
+		uint8_t local_company = OTTD_NO_LOCAL_COMPANY)
 {
 	_ottd_active_config = config;
 	_ottd_warnings = warnings;
@@ -3285,9 +3496,13 @@ void ApplyLoadedState(const GameSetupConfig &config, const std::vector<std::stri
 	_ottd_save_cache_valid = false;
 	_ottd_error.clear();
 
-	/* Comme `OnStartGame` : le .sav ne contient pas l'entreprise locale. */
+	/* Le .sav ne contient pas l'entreprise locale : on restaure celle des
+	 * métadonnées (#99), sinon la première entreprise jouable. */
 	_current_company = _local_company;
-	const CompanyID company = GetFirstPlayableCompanyID();
+	const CompanyID saved = local_company != OTTD_NO_LOCAL_COMPANY
+		? CompanyID(local_company)
+		: CompanyID::Invalid();
+	const CompanyID company = Company::IsValidID(saved) ? saved : GetFirstPlayableCompanyID();
 	SetLocalCompany(Company::IsValidID(company) ? company : COMPANY_SPECTATOR);
 
 	_ottd_in_game = _game_mode == GM_NORMAL;
@@ -3425,17 +3640,30 @@ static int StartGame(uint32_t seed, uint32_t w, uint32_t h, const GameSetupConfi
 		return 3;
 	}
 
-	/* Le pilote web n'a pas de GUI : OpenTTD se comporte comme un serveur
-	 * dédié et ne crée aucune entreprise. On en crée une pour que la partie
-	 * soit jouable et pour que le HUD ait quelque chose à afficher. */
-	if (Company::GetNumItems() == 0) {
-		DoStartupNewCompany(false, CompanyID::Begin());
-		SetLocalCompany(CompanyID::Begin());
-	}
-
 	_ottd_active_config = config;
 
 	int result = 0;
+
+	/* Le pilote web n'a pas de GUI : OpenTTD se comporte comme un serveur
+	 * dédié et ne crée aucune entreprise. On crée les entreprises humaines
+	 * (#99) — une seule sans profil explicite — puis les IA. Chaque module
+	 * choisit ensuite son entreprise avec `ottd_set_local_company()`. */
+	CompanyID first_human = CompanyID::Invalid();
+	if (config.companies.empty() && Company::GetNumItems() > 0) {
+		first_human = CompanyID::Begin();
+	} else {
+		std::string company_error;
+		const int human_expected = config.companies.empty() ? 1 : static_cast<int>(config.companies.size());
+		const int human_started = StartHumanCompanies(config.companies, first_human, company_error);
+		if (human_started < human_expected) {
+			_ottd_warnings.push_back(fmt::format(
+				"Entreprises humaines créées : {}/{} ({})", human_started, human_expected, company_error));
+			result = 5;
+			SetError(_ottd_warnings.back());
+		}
+	}
+	if (Company::IsValidID(first_human)) SetLocalCompany(first_human);
+
 	const int ai_count = config.ai_companies.value_or(0);
 	if (ai_count > 0) {
 		std::string ai_error;
@@ -3634,6 +3862,41 @@ EMSCRIPTEN_KEEPALIVE int ottd_company_id(void)
 }
 
 /**
+ * Choisit l'entreprise contrôlée par ce module (#99).
+ *
+ * Chaque pair réseau appelle cette fonction avec l'entreprise du joueur local.
+ * L'état simulé est inchangé : seul le contexte local (`_local_company`,
+ * `isLocal` dans le snapshot, entreprise par défaut des commandes) change.
+ *
+ * @param company 0..14, entreprise existante et non contrôlée par une IA.
+ * @return 0 en cas de succès, 1 sans partie, 5 si l'entreprise est invalide.
+ */
+EMSCRIPTEN_KEEPALIVE int ottd_set_local_company(int company)
+{
+	if (!_ottd_booted) {
+		SetError("ottd_set_local_company() appelé avant ottd_boot()");
+		return 1;
+	}
+	if (!_ottd_in_game) {
+		SetError("ottd_set_local_company() appelé sans partie en cours");
+		return 1;
+	}
+	if (company < 0 || company >= static_cast<int>(MAX_COMPANIES) ||
+			!Company::IsValidID(CompanyID(static_cast<uint8_t>(company)))) {
+		SetError(fmt::format("entreprise locale {} inexistante", company));
+		return 5;
+	}
+	const Company *target = Company::Get(CompanyID(static_cast<uint8_t>(company)));
+	if (target->is_ai) {
+		SetError(fmt::format("entreprise {} contrôlée par une IA", company));
+		return 5;
+	}
+
+	SetLocalCompany(CompanyID(static_cast<uint8_t>(company)));
+	return 0;
+}
+
+/**
  * Taille du conteneur de sauvegarde mémoire de l'état courant (issue #61).
  *
  * La sauvegarde est produite une fois puis mise en cache jusqu'au prochain
@@ -3723,8 +3986,9 @@ EMSCRIPTEN_KEEPALIVE int ottd_load(const uint8_t *data, int length)
 		return OTTD_SL_CORRUPT;
 	}
 	const uint16_t version = ReadU16(data + 4);
-	if (version != OTTD_SAVE_VERSION) {
-		SetError(fmt::format("version de sauvegarde {} non supportée (attendu {})", version, OTTD_SAVE_VERSION));
+	if (version < OTTD_SAVE_VERSION_MIN || version > OTTD_SAVE_VERSION) {
+		SetError(fmt::format("version de sauvegarde {} non supportée (attendu {}..{})",
+			version, OTTD_SAVE_VERSION_MIN, OTTD_SAVE_VERSION));
 		return OTTD_SL_CORRUPT;
 	}
 	const uint16_t header_size = ReadU16(data + 6);
@@ -3753,7 +4017,8 @@ EMSCRIPTEN_KEEPALIVE int ottd_load(const uint8_t *data, int length)
 
 	GameSetupConfig config;
 	std::vector<std::string> warnings;
-	if (!ParseSaveMetadata(metadata, metadata_size, config, warnings)) {
+	uint8_t saved_local_company = OTTD_NO_LOCAL_COMPANY;
+	if (!ParseSaveMetadata(metadata, metadata_size, version, config, warnings, saved_local_company)) {
 		SetError("sauvegarde corrompue : métadonnées du pont invalides");
 		return OTTD_SL_CORRUPT;
 	}
@@ -3772,11 +4037,14 @@ EMSCRIPTEN_KEEPALIVE int ottd_load(const uint8_t *data, int length)
 	}
 	const GameSetupConfig previous_config = _ottd_active_config;
 	const std::vector<std::string> previous_warnings = _ottd_warnings;
+	const uint8_t previous_local_company = Company::IsValidID(_local_company)
+		? _local_company.base()
+		: OTTD_NO_LOCAL_COMPANY;
 
 	_ottd_in_game = false;
 	const SaveOrLoadResult result = LoadPayload(payload, payload_size);
 	if (result == SL_OK) {
-		ApplyLoadedState(config, warnings);
+		ApplyLoadedState(config, warnings, saved_local_company);
 		return OTTD_SL_OK;
 	}
 
@@ -3789,7 +4057,7 @@ EMSCRIPTEN_KEEPALIVE int ottd_load(const uint8_t *data, int length)
 
 	const SaveOrLoadResult restored = LoadPayload(backup_payload.data(), backup_payload.size());
 	if (restored == SL_OK) {
-		ApplyLoadedState(previous_config, previous_warnings);
+		ApplyLoadedState(previous_config, previous_warnings, previous_local_company);
 		SetError(fmt::format("chargement refusé ({}), état précédent restauré", load_error));
 		return OTTD_SL_LOAD_FAILED;
 	}

@@ -5,6 +5,7 @@
  */
 
 import { el } from '../dom';
+import { bindText, t } from '../i18n';
 import { BaseScreen } from './BaseScreen';
 
 export interface LoadingScreenOptions {
@@ -18,6 +19,7 @@ export class LoadingScreen extends BaseScreen {
   private message: HTMLParagraphElement;
   private progress: HTMLDivElement;
   private progressTrack: HTMLDivElement;
+  private progressValue: HTMLSpanElement;
   private spinner: HTMLDivElement;
   private cancelButton: HTMLButtonElement;
   private errorMode = false;
@@ -26,11 +28,32 @@ export class LoadingScreen extends BaseScreen {
   constructor(options: LoadingScreenOptions) {
     super('loading-screen');
     this.options = options;
+    this.element.setAttribute('aria-label', t('loading.title'));
+    this.element.setAttribute('aria-busy', 'true');
 
     const card = el('div', { className: 'panel loading-card' });
-    this.spinner = el('div', { className: 'spinner' });
-    this.title = el('h1', { className: 'panel-title', text: 'Chargement' });
-    this.message = el('p', { className: 'loading-message', text: 'Préparation du monde…' });
+    const brand = el('div', { className: 'loading-brand' });
+    brand.append(
+      el('span', {
+        className: 'loading-brand-mark',
+        text: '◆',
+        attrs: { 'aria-hidden': 'true' },
+      }),
+      el('span', { className: 'loading-brand-name', text: 'OpenTT3D' }),
+    );
+    this.spinner = el('div', {
+      className: 'spinner',
+      attrs: { 'aria-hidden': 'true' },
+    });
+    const halo = el('div', { className: 'loading-halo' });
+    halo.append(this.spinner);
+    this.title = el('h1', { className: 'panel-title loading-title', text: t('loading.title') });
+    const eyebrow = bindText(el('p', { className: 'loading-eyebrow' }), 'loading.eyebrow');
+    this.message = el('p', {
+      className: 'loading-message',
+      text: t('loading.prepare'),
+      attrs: { role: 'status', 'aria-live': 'polite' },
+    });
     this.progressTrack = el('div', {
       className: 'progress',
       attrs: {
@@ -38,28 +61,50 @@ export class LoadingScreen extends BaseScreen {
         'aria-valuemin': '0',
         'aria-valuemax': '100',
         'aria-valuenow': '0',
-        'aria-label': 'Progression du chargement',
+        'aria-label': t('loading.progressLabel'),
       },
     });
     this.progress = el('div', { className: 'progress-fill' });
     this.progressTrack.append(this.progress);
+    const progressRow = el('div', { className: 'loading-progress-row' });
+    progressRow.append(
+      bindText(el('span', { className: 'loading-progress-label' }), 'loading.progressShort'),
+    );
+    this.progressValue = el('span', {
+      className: 'loading-progress-value',
+      text: '0 %',
+      attrs: { 'aria-hidden': 'true' },
+    });
+    progressRow.append(this.progressValue);
 
     this.cancelButton = el('button', {
-      className: 'btn btn-ghost',
-      text: 'Annuler le chargement',
+      className: 'btn btn-ghost loading-cancel',
+      text: t('loading.cancel'),
       attrs: { type: 'button' },
     });
     this.cancelButton.addEventListener('click', () => this.cancel());
 
-    card.append(this.spinner, this.title, this.message, this.progressTrack, this.cancelButton);
+    card.append(
+      brand,
+      halo,
+      eyebrow,
+      this.title,
+      this.message,
+      this.progressTrack,
+      progressRow,
+      this.cancelButton,
+    );
     this.element.append(card);
   }
 
   setProgress(value: number, message?: string): void {
     if (this.errorMode) return;
     const clamped = Math.max(0, Math.min(1, value));
-    this.progress.style.width = `${Math.round(clamped * 100)}%`;
-    this.progressTrack.setAttribute('aria-valuenow', `${Math.round(clamped * 100)}`);
+    const percent = Math.round(clamped * 100);
+    this.progress.style.width = `${percent}%`;
+    this.progressTrack.setAttribute('aria-valuenow', `${percent}`);
+    this.progressTrack.setAttribute('aria-valuetext', `${percent} %`);
+    this.progressValue.textContent = `${percent} %`;
     if (message) this.message.textContent = message;
   }
 
@@ -67,14 +112,16 @@ export class LoadingScreen extends BaseScreen {
     if (this.errorMode) return;
     this.cancelRequested = true;
     this.cancelButton.disabled = true;
-    this.cancelButton.textContent = 'Annulation…';
-    this.message.textContent = 'Annulation en cours…';
+    this.cancelButton.textContent = t('loading.cancelling');
+    this.message.textContent = t('loading.cancellingMessage');
   }
 
   setError(title: string, message: string): void {
     this.errorMode = true;
-    this.spinner.hidden = true;
+    this.element.setAttribute('aria-busy', 'false');
+    this.spinner.parentElement?.setAttribute('hidden', '');
     this.progressTrack.hidden = true;
+    this.progressValue.parentElement?.setAttribute('hidden', '');
     this.cancelButton.hidden = true;
     this.title.textContent = title;
     this.title.classList.add('is-error');
@@ -82,7 +129,7 @@ export class LoadingScreen extends BaseScreen {
 
     const back = el('button', {
       className: 'btn btn-primary',
-      text: 'Retour au menu',
+      text: t('common.backToMenu'),
       attrs: { type: 'button', 'data-autofocus': '' },
     });
     back.addEventListener('click', () => this.options.onClose());

@@ -11,6 +11,7 @@ import type { MapSnapshot, WorldSnapshot } from '../engine/protocol';
 import { VehicleInterpolator, type RenderVehicle } from '../game/vehicleInterpolation';
 import type { InterpolationState } from '../game/Game';
 import type { BuildPlan, BuildPoint } from '../game/buildRules';
+import { AtmosphereLayer } from './AtmosphereLayer';
 import { BuildOverlay } from './BuildOverlay';
 import { CameraController } from './CameraController';
 import { CityLayer } from './CityLayer';
@@ -19,14 +20,16 @@ import { IndustryLayer } from './IndustryLayer';
 import { Picking, type PickResult } from './Picking';
 import { SignalLayer } from './SignalLayer';
 import { TerrainLayer } from './TerrainLayer';
+import { TrackLayer } from './TrackLayer';
 import { VegetationLayer } from './VegetationLayer';
 import { VehicleLayer } from './VehicleLayer';
 import { phaseFromEconomy, sunState } from './dayNight';
+import { DEFAULT_DAY_NIGHT_CYCLE_SECONDS, DayNightCycle } from './dayNightCycle';
 import { qualitySettings, type QualityLevel } from './quality';
 
 /** Surface minimale du renderer pour piloter le cycle jour/nuit. */
 export interface TimeOfDaySink {
-  setTimeOfDay(fraction: number): void;
+  setTimeOfDay(fraction: number, immediate?: boolean): void;
   readonly nightAmount: number;
 }
 
@@ -42,6 +45,8 @@ export interface WorldViewOptions {
   quality: QualityLevel;
   /** Receveur du cycle jour/nuit (le `Renderer`). */
   timeOfDay?: TimeOfDaySink;
+  /** Cycle visuel : activation et durée d'une journée complète. */
+  dayNight?: { enabled: boolean; cycleSeconds: number };
   onSelect?: (target: WorldTarget | null) => void;
   onHover?: (target: WorldTarget | null) => void;
   onNotice?: (text: string) => void;
@@ -51,16 +56,20 @@ export interface WorldViewOptions {
   onBuildMove?: (tile: BuildPoint | null) => void;
   onBuildEnd?: (tile: BuildPoint | null) => void;
   onBuildCancel?: () => void;
+  /** Force la réduction des animations (tests, réglage explicite). */
+  reducedMotion?: boolean;
 }
 
 export class WorldView {
   readonly terrain = new TerrainLayer();
+  readonly tracks = new TrackLayer();
   readonly cityLayer = new CityLayer();
   readonly industries = new IndustryLayer();
   readonly vegetation = new VegetationLayer();
   readonly vehicles = new VehicleLayer();
   readonly signals = new SignalLayer();
   readonly depots = new DepotLayer();
+  readonly atmosphere = new AtmosphereLayer();
 
   private scene: THREE.Scene;
   private canvas: HTMLCanvasElement;
@@ -74,6 +83,8 @@ export class WorldView {
   private selectedVehicle: number | null = null;
   private currentMap: MapSnapshot | null = null;
   private timeOfDay?: TimeOfDaySink;
+  private dayNight: DayNightCycle;
+  private phaseInitialized = false;
   private night = 0;
   private onSelect?: (target: WorldTarget | null) => void;
   private onHover?: (target: WorldTarget | null) => void;
@@ -86,6 +97,7 @@ export class WorldView {
   private buildOverlay = new BuildOverlay();
   private buildMode = false;
   private lastHoverKey: string | null = null;
+  private reducedMotion: boolean;
 
   constructor(options: WorldViewOptions) {
     this.scene = options.scene;
@@ -93,6 +105,10 @@ export class WorldView {
     this.camera = options.camera;
     this.quality = options.quality;
     this.timeOfDay = options.timeOfDay;
+    this.dayNight = new DayNightCycle({
+      enabled: options.dayNight?.enabled ?? true,
+      cycleSeconds: options.dayNight?.cycleSeconds ?? DEFAULT_DAY_NIGHT_CYCLE_SECONDS,
+    });
     this.onSelect = options.onSelect;
     this.onHover = options.onHover;
     this.onNotice = options.onNotice;
@@ -101,14 +117,21 @@ export class WorldView {
     this.onBuildMove = options.onBuildMove;
     this.onBuildEnd = options.onBuildEnd;
     this.onBuildCancel = options.onBuildCancel;
+    this.reducedMotion =
+      options.reducedMotion ??
+      (typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        : false);
 
     this.scene.add(this.terrain.group);
+    this.scene.add(this.tracks.group);
     this.scene.add(this.cityLayer.group);
     this.scene.add(this.industries.group);
     this.scene.add(this.vegetation.group);
     this.scene.add(this.vehicles.group);
     this.scene.add(this.signals.group);
     this.scene.add(this.depots.group);
+    this.scene.add(this.atmosphere.group);
     this.scene.add(this.buildOverlay.group);
 
     this.picking = new Picking(
@@ -132,6 +155,7 @@ export class WorldView {
     this.controller.attach();
     this.controller.update(0);
     this.applyQuality(options.quality);
+    this.applyReducedMotion(this.reducedMotion);
   }
 
   /** Applique un snapshot (carte en delta, entités complètes). */
@@ -139,8 +163,13 @@ export class WorldView {
     const map = snapshot.map;
     if (map) {
       const first = !this.mapApplied;
-      if (first) this.terrain.setMap(map);
-      else this.terrain.applyDelta(map);
+      if (first) {
+        this.terrain.setMap(map);
+        this.tracks.setMap(map, snapshot.stations);
+      } else {
+        this.terrain.applyDelta(map);
+        this.tracks.applyDelta(map, snapshot.stations);
+      }
       this.currentMap = map;
       this.cityLayer.build(snapshot.towns, map);
       this.industries.build(snapshot.industries, map, this.quality);
@@ -155,18 +184,64 @@ export class WorldView {
     // Les dépôts sont complets à chaque snapshot ; la carte ne sert qu'à la
     // hauteur du sol (la dernière carte connue est conservée).
     this.depots.setDepots(snapshot.depots, this.currentMap);
-    const phase = phaseFromEconomy(snapshot.economy);
-    this.night = sunState(phase).night;
-    this.timeOfDay?.setTimeOfDay(phase);
-    this.applyNight(this.night);
+    this.cityLayer.setStations(snapshot.stations, this.currentMap);
+    this.atmosphere.applyWorld(this.currentMap, snapshot.towns, snapshot.stations);
+    // L'heure visuelle ne suit le calendrier moteur qu'une fois : ensuite elle
+    // avance au temps réel, indépendamment de la vitesse de jeu.
+    if (!this.phaseInitialized) {
+      this.phaseInitialized = true;
+      this.dayNight.setPhase(phaseFromEconomy(snapshot.economy));
+      this.applyDayNightPhase(true);
+      this.applyNight(this.night);
+    }
     this.signals.update(snapshot.meta.tick);
   }
 
   /** Diffuse le facteur nuit aux couches qui ont un rendu nocturne. */
   private applyNight(amount: number): void {
     this.terrain.setNight(amount);
+    this.tracks.setNight(amount);
     this.vehicles.setNight(amount);
     this.cityLayer.setNight(amount);
+    this.industries.setNight(amount);
+    this.depots.setNight(amount);
+    this.atmosphere.setNight(amount);
+  }
+
+  /** Phase visuelle courante (0 = minuit, 0,5 = midi). */
+  get dayNightPhase(): number {
+    return this.dayNight.phase;
+  }
+
+  /** 0 = jour, 1 = nuit profonde, selon l'heure visuelle. */
+  get dayNightAmount(): number {
+    return sunState(this.dayNight.phase).night;
+  }
+
+  /** Force l'heure visuelle (démo de menu, captures) sans attendre un snapshot. */
+  setDayNightPhase(phase: number): void {
+    this.dayNight.setPhase(phase);
+    this.applyDayNightPhase(true);
+    this.applyNight(this.timeOfDay?.nightAmount ?? this.night);
+  }
+
+  /** Applique immédiatement l'activation et la durée du cycle visuel. */
+  setDayNightCycle(enabled: boolean, cycleSeconds: number): void {
+    this.dayNight.setCycleSeconds(cycleSeconds);
+    this.dayNight.setEnabled(enabled);
+    this.applyDayNightPhase(true);
+    this.applyNight(this.timeOfDay?.nightAmount ?? this.night);
+  }
+
+  /** Fige l'heure avec le jeu (pause, menu). */
+  setDayNightPaused(paused: boolean): void {
+    this.dayNight.setPaused(paused);
+  }
+
+  private applyDayNightPhase(immediate = false): void {
+    const phase = this.dayNight.phase;
+    this.night = sunState(phase).night;
+    this.timeOfDay?.setTimeOfDay(phase, immediate);
   }
 
   /** Frame : interpolation, entités, caméra, picking au survol. */
@@ -180,8 +255,13 @@ export class WorldView {
 
     this.controller.update(deltaSeconds);
     this.terrain.update(deltaSeconds);
-    this.vegetation.update(deltaSeconds);
+    this.tracks.update(this.camera.position);
+    this.vegetation.update(deltaSeconds, this.camera.position);
+    this.cityLayer.update(this.camera.position);
     this.industries.update(deltaSeconds, this.camera.position);
+    this.atmosphere.update(deltaSeconds, this.camera.position, this.dayNight.phase);
+    this.dayNight.advance(deltaSeconds);
+    this.applyDayNightPhase();
     this.applyNight(this.timeOfDay?.nightAmount ?? this.night);
     if (this.buildMode) this.updateBuildHover();
     else this.updateHover();
@@ -196,6 +276,7 @@ export class WorldView {
     if (this.buildMode === enabled) return;
     this.buildMode = enabled;
     this.buildOverlay.clear();
+    if (!enabled) this.atmosphere.setConstructionSite(null);
     this.picking.clearHover();
     this.lastHoverKey = null;
     if (enabled) {
@@ -218,6 +299,15 @@ export class WorldView {
   /** Affiche le fantôme du plan courant (ou le masque avec `null`). */
   setBuildPlan(plan: BuildPlan | null): void {
     this.buildOverlay.setPlan(plan, this.currentMap);
+    // Poussière de chantier : uniquement sur un tracé accepté, au centre.
+    if (plan && plan.valid) {
+      this.atmosphere.setConstructionSite({
+        x: (plan.from.x + plan.to.x) / 2 + 0.5,
+        z: (plan.from.y + plan.to.y) / 2 + 0.5,
+      });
+    } else {
+      this.atmosphere.setConstructionSite(null);
+    }
   }
 
   /** Tuile de terrain sous un point NDC (ignore véhicules et bâtiments). */
@@ -335,12 +425,29 @@ export class WorldView {
     this.industries.setQuality(level);
   }
 
+  /** Active/coupe toutes les particules animées (accessibilité). */
+  setReducedMotion(enabled: boolean): void {
+    this.reducedMotion = enabled;
+    this.applyReducedMotion(enabled);
+  }
+
+  private applyReducedMotion(enabled: boolean): void {
+    this.atmosphere.setReducedMotion(enabled);
+    this.vegetation.setReducedMotion(enabled);
+    this.industries.setReducedMotion(enabled);
+    this.vehicles.setReducedMotion(enabled);
+  }
+
   private applyQuality(level: QualityLevel): void {
     this.terrain.setQuality(level);
+    this.tracks.setQuality(level);
+    this.cityLayer.setQuality(level);
     this.cityLayer.setShadows(level === 'high');
     this.cityLayer.setNightLights(qualitySettings(level).nightWindows);
     this.vehicles.setShadows(level === 'high');
+    this.vehicles.setQuality(level);
     this.industries.setShadows(level === 'high');
+    this.atmosphere.setQuality(level);
   }
 
   getCameraController(): CameraController {
@@ -363,6 +470,10 @@ export class WorldView {
     return this.cityLayer.buildingCount;
   }
 
+  getStationCount(): number {
+    return this.cityLayer.stationCountValue;
+  }
+
   getIndustryCount(): number {
     return this.industries.industryCount;
   }
@@ -383,12 +494,24 @@ export class WorldView {
     return this.depots.count;
   }
 
+  getTrackChunkCount(): number {
+    return this.tracks.chunkCount;
+  }
+
+  getTrackTriangleCount(): number {
+    return this.tracks.triangleCount;
+  }
+
   getDrawCalls(): number {
     return (
       this.vehicles.drawCallCount +
       this.cityLayer.drawCallCount +
       this.vegetation.drawCallCount +
-      this.industries.drawCallCount
+      this.industries.drawCallCount +
+      this.depots.drawCallCount +
+      this.tracks.drawCallCount +
+      this.atmosphere.drawCallCount +
+      this.vehicles.accessoryDrawCalls
     );
   }
 
@@ -401,20 +524,24 @@ export class WorldView {
     this.scene.remove(this.picking.group);
     this.picking.dispose();
     this.scene.remove(this.terrain.group);
+    this.scene.remove(this.tracks.group);
     this.scene.remove(this.cityLayer.group);
     this.scene.remove(this.industries.group);
     this.scene.remove(this.vegetation.group);
     this.scene.remove(this.vehicles.group);
     this.scene.remove(this.signals.group);
     this.scene.remove(this.depots.group);
+    this.scene.remove(this.atmosphere.group);
     this.scene.remove(this.buildOverlay.group);
     this.terrain.dispose();
+    this.tracks.dispose();
     this.cityLayer.dispose();
     this.industries.dispose();
     this.vegetation.dispose();
     this.vehicles.dispose();
     this.signals.dispose();
     this.depots.dispose();
+    this.atmosphere.dispose();
     this.buildOverlay.dispose();
     this.renderVehicles = [];
     this.currentMap = null;

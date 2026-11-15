@@ -143,7 +143,17 @@ export interface StartPlayer {
   companyName: string;
   ai: AIDifficulty | null;
   isHost: boolean;
+  /**
+   * Entreprise OpenTTD contrôlée par ce joueur (#99). Le mapping est construit
+   * par l'hôte et figé dans le `StartPayload` : il est identique sur tous les
+   * pairs. Absent sur les payloads antérieurs à #99 (le pont retombe alors sur
+   * une entreprise locale unique).
+   */
+  company?: number;
 }
+
+/** Nombre maximal d'entreprises (humaines ou IA) exposées par le pont. */
+export const MAX_START_COMPANIES = 15;
 
 /** Human player index → peer id. AI slots have no peer. */
 export type StartPeers = Record<number, string>;
@@ -159,11 +169,18 @@ export interface StartPayload {
   engineBuild: string;
   players: StartPlayer[];
   peers: StartPeers;
+  /**
+   * Nombre d'entreprises humaines créées au démarrage (#99), réserves pour les
+   * retardataires incluses. Absent : une entreprise par joueur humain.
+   */
+  companySeats?: number;
 }
 
 /** Everything a peer needs to build its lockstep session. */
 export interface StartInfo extends StartPayload {
   localPlayer: number;
+  /** Entreprise contrôlée par le joueur local (#99). */
+  localCompany?: number;
   isHost: boolean;
   transport: Transport;
 }
@@ -440,7 +457,9 @@ export function isStartPlayer(value: unknown): value is StartPlayer {
     typeof value.companyName === 'string' &&
     value.companyName.length <= 64 &&
     (value.ai === null || isAIDifficulty(value.ai)) &&
-    typeof value.isHost === 'boolean'
+    typeof value.isHost === 'boolean' &&
+    (value.company === undefined ||
+      (isInt(value.company) && value.company >= 0 && value.company < MAX_START_COMPANIES))
   );
 }
 
@@ -458,6 +477,22 @@ export function isStartPayload(value: unknown): value is StartPayload {
   if (!Array.isArray(value.players)) return false;
   if (value.players.length < 1 || value.players.length > MAX_LOBBY_PLAYERS) return false;
   if (!value.players.every(isStartPlayer)) return false;
+  if (
+    value.companySeats !== undefined &&
+    (!isInt(value.companySeats) ||
+      value.companySeats < 1 ||
+      value.companySeats > MAX_START_COMPANIES)
+  ) {
+    return false;
+  }
+  // Le mapping joueur → entreprise doit être unique et tenir dans les sièges.
+  const companies = new Set<number>();
+  for (const player of value.players) {
+    if (player.company === undefined) continue;
+    if (companies.has(player.company)) return false;
+    if (value.companySeats !== undefined && player.company >= value.companySeats) return false;
+    companies.add(player.company);
+  }
   return isStartPeers(value.peers);
 }
 

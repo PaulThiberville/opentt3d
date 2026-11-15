@@ -7,6 +7,7 @@
 
 import { button, el } from '../dom';
 import { formatInt, formatMoney } from '../format';
+import { t } from '../i18n';
 import type { DepotPanelView } from '../types';
 
 export interface DepotPanelOptions {
@@ -32,7 +33,7 @@ export class DepotPanel {
     this.options = options;
     this.element = el('aside', {
       className: 'hud-depot',
-      attrs: { 'aria-live': 'polite', 'aria-label': 'Dépôt' },
+      attrs: { 'aria-live': 'polite', 'aria-label': t('depot.label') },
     });
     const header = el('div', { className: 'hud-panel-header' });
     const text = el('div', { className: 'hud-panel-heading' });
@@ -43,7 +44,7 @@ export class DepotPanel {
     const close = el('button', {
       className: 'hud-panel-close',
       text: '×',
-      attrs: { type: 'button', title: 'Fermer le dépôt', 'aria-label': 'Fermer le dépôt' },
+      attrs: { type: 'button', title: t('depot.close'), 'aria-label': t('depot.close') },
     });
     close.addEventListener('click', () => this.options.onClose());
     header.append(text, this.money, close);
@@ -65,7 +66,7 @@ export class DepotPanel {
     if (signature === this.signature) return;
     this.signature = signature;
     this.title.textContent = view.title;
-    this.detail.textContent = `Achat et gestion · ${view.detail}`;
+    this.detail.textContent = t('depot.headerDetail', { detail: view.detail });
     this.money.textContent = view.money;
     this.hint.textContent = view.hint;
     this.render(view);
@@ -73,7 +74,7 @@ export class DepotPanel {
 
   private render(view: DepotPanelView): void {
     this.body.replaceChildren();
-    const modelsTitle = el('h3', { className: 'hud-panel-section', text: 'Modèles disponibles' });
+    const modelsTitle = el('h3', { className: 'hud-panel-section', text: t('depot.models') });
     const models = el('div', { className: 'hud-depot-models' });
     for (const model of view.models) {
       const row = el('div', { className: 'hud-depot-model' });
@@ -82,7 +83,11 @@ export class DepotPanel {
         el('div', { className: 'hud-depot-model-name', text: model.name }),
         el('div', {
           className: 'hud-depot-model-specs',
-          text: `${model.cargo} · ${model.capacity} unités · ${model.speed} tuiles/j`,
+          text: t('depot.modelSpecs', {
+            cargo: model.cargo,
+            capacity: model.capacity,
+            speed: model.speed,
+          }),
         }),
         el('div', { className: 'hud-depot-model-note', text: model.description }),
       );
@@ -91,19 +96,22 @@ export class DepotPanel {
         el('div', { className: 'hud-depot-model-price', text: formatMoney(model.cost) }),
         el('div', {
           className: 'hud-depot-model-maintenance',
-          text: `entretien ${formatInt(model.maintenance)} £/an`,
+          text: t('depot.maintenance', { value: formatInt(model.maintenance) }),
         }),
       );
-      const buy = button('Acheter', {
+      const buy = button(t('depot.buy'), {
         variant: 'primary',
         className: 'hud-depot-buy',
         disabled: !model.affordable,
         attrs: {
           type: 'button',
           title: model.affordable
-            ? `Acheter ${model.name}`
-            : `Trésorerie insuffisante pour ${model.name}`,
-          'aria-label': `Acheter ${model.name} pour ${formatInt(model.cost)} livres`,
+            ? t('depot.buyTitle', { name: model.name })
+            : t('depot.buyBlocked', { name: model.name }),
+          'aria-label': t('depot.buyAria', {
+            name: model.name,
+            value: formatInt(model.cost),
+          }),
         },
         onClick: () => this.options.onBuy(model.id),
       });
@@ -112,10 +120,10 @@ export class DepotPanel {
       models.append(row);
     }
     if (view.models.length === 0) {
-      models.append(el('div', { className: 'hud-panel-empty', text: 'Aucun modèle disponible.' }));
+      models.append(el('div', { className: 'hud-panel-empty', text: t('depot.none') }));
     }
 
-    const vehiclesTitle = el('h3', { className: 'hud-panel-section', text: 'Véhicules sur place' });
+    const vehiclesTitle = el('h3', { className: 'hud-panel-section', text: t('depot.vehicles') });
     const vehicles = el('div', { className: 'hud-depot-vehicles' });
     for (const vehicle of view.vehicles) {
       const row = el('div', { className: 'hud-depot-vehicle' });
@@ -126,23 +134,21 @@ export class DepotPanel {
       );
       const actions = el('div', { className: 'hud-depot-vehicle-actions' });
       actions.append(
-        button('Sélectionner', {
+        button(t('depot.select'), {
           className: 'hud-depot-action',
           onClick: () => this.options.onSelectVehicle(vehicle.id),
         }),
-        button('Démarrer', {
+        button(t('depot.start'), {
           variant: 'primary',
           className: 'hud-depot-action',
           disabled: !vehicle.canStart,
           attrs: {
             type: 'button',
-            title: vehicle.canStart
-              ? 'Démarrer la tournée'
-              : 'Ajoutez d’abord une gare à la tournée',
+            title: vehicle.canStart ? t('depot.startTitle') : t('depot.startBlocked'),
           },
           onClick: () => this.options.onStartVehicle(vehicle.id),
         }),
-        button('Vendre', {
+        button(t('depot.sell'), {
           variant: 'danger',
           className: 'hud-depot-action',
           onClick: () => this.options.onSellVehicle(vehicle.id),
@@ -152,9 +158,7 @@ export class DepotPanel {
       vehicles.append(row);
     }
     if (view.vehicles.length === 0) {
-      vehicles.append(
-        el('div', { className: 'hud-panel-empty', text: 'Aucun véhicule dans ce dépôt.' }),
-      );
+      vehicles.append(el('div', { className: 'hud-panel-empty', text: t('depot.noVehicles') }));
     }
 
     this.body.append(modelsTitle, models, vehiclesTitle, vehicles);

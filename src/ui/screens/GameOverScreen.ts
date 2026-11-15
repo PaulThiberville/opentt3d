@@ -8,6 +8,7 @@
 
 import { el } from '../dom';
 import type { GameOverSummary } from '../types';
+import { t } from '../i18n';
 import { BaseScreen } from './BaseScreen';
 
 export interface GameOverScreenOptions {
@@ -32,42 +33,43 @@ export class GameOverScreen extends BaseScreen {
   constructor(options: GameOverScreenOptions) {
     super('game-over-screen');
     this.options = options;
+    this.element.setAttribute('aria-label', t('gameover.eyebrow'));
     const summary = options.summary;
 
     const panel = el('div', { className: 'panel panel-wide game-over-panel' });
     const header = el('div', { className: 'panel-header' });
     header.append(
-      el('span', { className: 'panel-eyebrow', text: 'Fin de partie' }),
+      el('span', { className: 'panel-eyebrow', text: t('gameover.eyebrow') }),
       el('h1', { className: 'panel-title', text: summary.title }),
       el('p', { className: 'panel-subtitle', text: summary.reason }),
     );
 
     const grid = el('div', { className: 'stat-grid' });
     grid.append(
-      stat('Entreprise', summary.company),
-      stat('Date', summary.date),
-      stat('Trésorerie', summary.money),
-      stat('Valeur', summary.value),
-      stat('Véhicules', `${summary.vehicles}`),
-      stat('Gares et arrêts', `${summary.stations}`),
+      stat(t('gameover.stats.company'), summary.company),
+      stat(t('gameover.stats.date'), summary.date),
+      stat(t('gameover.stats.money'), summary.money),
+      stat(t('gameover.stats.value'), summary.value),
+      stat(t('gameover.stats.vehicles'), `${summary.vehicles}`),
+      stat(t('gameover.stats.stations'), `${summary.stations}`),
     );
 
     const note = el('p', {
       className: 'screen-note',
-      text: 'Écran de démonstration : le moteur mock n’a pas de condition de victoire. Le classement complet et les statistiques arriveront avec le moteur WASM.',
+      text: t('gameover.note'),
     });
 
     const actions = el('div', { className: 'panel-actions' });
     const menu = el('button', {
       className: 'btn btn-ghost',
-      text: 'Retour au menu',
+      text: t('common.backToMenu'),
       attrs: { type: 'button' },
     });
     menu.addEventListener('click', () => options.onMenu());
     if (options.onReplay) {
       const replay = el('button', {
         className: 'btn btn-primary',
-        text: 'Rejouer avec les mêmes options',
+        text: t('gameover.replay'),
         attrs: { type: 'button', 'data-autofocus': '' },
       });
       replay.addEventListener('click', () => options.onReplay?.());

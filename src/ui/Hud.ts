@@ -12,15 +12,19 @@ import { createBuildSettings } from '../game/buildRules';
 import type { QualityLevel } from '../render/quality';
 import type { BuildHintView } from './buildHint';
 import { el } from './dom';
+import { onLanguageChange, t } from './i18n';
 import { formatShortGameDate, type GameDateLike } from './format';
 import { NewsQueue, type NewsKind } from './news';
-import type { CameraView, HudState, SelectionSummary } from './types';
+import type { NetworkAlertView } from './netlobby';
+import type { CameraView, HudState, PlaceTarget, SelectionSummary } from './types';
 import { BuildHint } from './hud/BuildHint';
 import { BuildOptions } from './hud/BuildOptions';
 import { DepotPanel } from './hud/DepotPanel';
 import { HelpPanel } from './hud/HelpPanel';
 import { Minimap } from './hud/Minimap';
+import { NetworkAlert } from './hud/NetworkAlert';
 import { NewsFeed } from './hud/NewsFeed';
+import { PlacePanel } from './hud/PlacePanel';
 import { SelectionPanel } from './hud/SelectionPanel';
 import { Toasts } from './hud/Toasts';
 import { Toolbar, type BuildToolId } from './hud/Toolbar';
@@ -50,6 +54,14 @@ export interface HudCallbacks {
   onRemoveOrder: (vehicleId: number, index: number) => void;
   onMoveOrder: (vehicleId: number, index: number, delta: -1 | 1) => void;
   onCloseVehicle: () => void;
+  /** Panneau ville/industrie/gare : recentrage et navigation entre lieux. */
+  onPlaceFocus: (x: number, y: number) => void;
+  onPlaceSelect: (target: PlaceTarget) => void;
+  onClosePlace: () => void;
+  /** Coupe ou rétablit le son (bouton minimal de la barre supérieure). */
+  onToggleAudio?: () => void;
+  /** Ouvre/ferme le mode photo (bouton appareil). */
+  onPhotoMode?: () => void;
 }
 
 export interface HudNewsInput {
@@ -67,9 +79,14 @@ export class Hud {
 
   private callbacks: HudCallbacks;
   private topBar: TopBar;
+  private audioButton: HTMLButtonElement;
+  private photoButton: HTMLButtonElement;
+  private audioMuted = false;
+  private stopAudioLanguage: () => void;
   private selectionPanel: SelectionPanel;
   private depotPanel: DepotPanel;
   private vehiclePanel: VehiclePanel;
+  private placePanel: PlacePanel;
   private minimap: Minimap;
   private newsFeed: NewsFeed;
   private toolbar: Toolbar;
@@ -78,9 +95,11 @@ export class Hud {
   private help: HelpPanel;
   private toasts: Toasts;
   private networkStatus: HTMLDivElement;
+  private networkAlert: NetworkAlert;
   private errorOverlay: HTMLDivElement;
   private errorTitle: HTMLHeadingElement;
   private errorMessage: HTMLParagraphElement;
+  private retryButton: HTMLButtonElement;
 
   constructor(mount: HTMLElement, callbacks: HudCallbacks) {
     this.callbacks = callbacks;
@@ -95,6 +114,39 @@ export class Hud {
       onToggleHelp: () => this.toggleHelp(),
       onOpenSettings: () => this.callbacks.onOpenSettings(),
     });
+
+    // Bouton mute minimal : ajouté à la barre d'outils existante sans modifier
+    // `TopBar`, pour limiter les conflits avec les autres vagues UI.
+    this.audioButton = el('button', {
+      className: 'hud-button hud-audio-button',
+      text: '🔊',
+      attrs: {
+        type: 'button',
+        title: t('hud.audio.mute'),
+        'aria-label': t('hud.audio.mute'),
+        'aria-pressed': 'false',
+      },
+    });
+    this.audioButton.addEventListener('click', () => this.callbacks.onToggleAudio?.());
+    this.audioButton.hidden = this.callbacks.onToggleAudio === undefined;
+    this.stopAudioLanguage = onLanguageChange(() => this.refreshAudioLabel());
+    const tools = this.topBar.element.querySelector('.hud-tools');
+    (tools ?? this.topBar.element).append(this.audioButton);
+
+    // Mode photo : même emplacement discret que le bouton son.
+    this.photoButton = el('button', {
+      className: 'hud-button hud-photo-button',
+      text: '📷',
+      attrs: {
+        type: 'button',
+        title: t('photo.open'),
+        'aria-label': t('photo.open'),
+        'aria-pressed': 'false',
+      },
+    });
+    this.photoButton.addEventListener('click', () => this.callbacks.onPhotoMode?.());
+    this.photoButton.hidden = this.callbacks.onPhotoMode === undefined;
+    (tools ?? this.topBar.element).append(this.photoButton);
 
     this.selectionPanel = new SelectionPanel({
       onClear: () => this.callbacks.onClearSelection(),
@@ -116,6 +168,12 @@ export class Hud {
       onAddOrder: (vehicleId) => this.callbacks.onAddOrder(vehicleId),
       onRemoveOrder: (vehicleId, index) => this.callbacks.onRemoveOrder(vehicleId, index),
       onMoveOrder: (vehicleId, index, delta) => this.callbacks.onMoveOrder(vehicleId, index, delta),
+    });
+
+    this.placePanel = new PlacePanel({
+      onClose: () => this.callbacks.onClosePlace(),
+      onFocus: (x, y) => this.callbacks.onPlaceFocus(x, y),
+      onSelect: (target) => this.callbacks.onPlaceSelect(target),
     });
 
     this.minimap = new Minimap({
@@ -149,29 +207,40 @@ export class Hud {
       attrs: { role: 'status', 'aria-live': 'polite' },
     });
     this.networkStatus.hidden = true;
+    this.networkAlert = new NetworkAlert();
 
     this.errorOverlay = el('div', {
       className: 'hud-overlay hud-error',
-      attrs: { role: 'alertdialog', 'aria-live': 'assertive' },
+      attrs: {
+        role: 'alertdialog',
+        'aria-modal': 'true',
+        'aria-live': 'assertive',
+        'aria-labelledby': 'hud-error-title',
+      },
     });
     const card = el('div', { className: 'hud-overlay-card' });
-    this.errorTitle = el('h2', { text: 'Erreur' });
+    this.errorTitle = el('h2', {
+      text: t('hud.error'),
+      attrs: { id: 'hud-error-title' },
+    });
     this.errorMessage = el('p', { text: '' });
     const retry = el('button', {
       className: 'btn btn-primary hud-retry',
-      text: 'Recharger la page',
+      text: t('hud.reload'),
       attrs: { type: 'button' },
     });
     retry.addEventListener('click', () => window.location.reload());
     card.append(this.errorTitle, this.errorMessage, retry);
     this.errorOverlay.append(card);
     this.errorOverlay.hidden = true;
+    this.retryButton = retry;
 
     this.root.append(
       this.topBar.element,
       this.selectionPanel.element,
       this.depotPanel.element,
       this.vehiclePanel.element,
+      this.placePanel.element,
       this.minimap.element,
       this.newsFeed.element,
       this.toolbar.element,
@@ -180,23 +249,59 @@ export class Hud {
       this.help.element,
       this.toasts.element,
       this.networkStatus,
+      this.networkAlert.element,
       this.errorOverlay,
     );
     mount.append(this.root);
+    document.addEventListener('keydown', this.handleEscape);
 
     this.refreshNews();
   }
+
+  /**
+   * Échap ferme les panneaux même quand le focus est sur un de leurs boutons :
+   * la session ignore les raccourcis ciblant un contrôle interactif.
+   */
+  private handleEscape = (event: KeyboardEvent): void => {
+    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    if (document.querySelector('.screen.is-visible')) return;
+    if (this.closePanels()) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    // La session ignore Échap quand le focus est sur un contrôle interactif.
+    // On rend le focus au canvas puis on rejoue l'événement dans son contexte,
+    // pour que le menu de pause reste accessible après un passage dans le HUD.
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !active.closest('.hud')) return;
+    const canvas = document.querySelector<HTMLElement>('#scene');
+    if (!canvas) return;
+    event.preventDefault();
+    event.stopPropagation();
+    canvas.focus();
+    canvas.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        code: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  };
 
   update(state: HudState): void {
     this.topBar.update(state);
     this.updateNetworkStatus(state);
     // Le panneau véhicule est prioritaire sur le dépôt, lui-même prioritaire
-    // sur le panneau de sélection générique.
+    // sur le panneau lieu, lui-même prioritaire sur la sélection générique.
     const vehicle = state.vehicle ?? null;
     const depot = vehicle ? null : (state.depot ?? null);
+    const place = vehicle || depot ? null : (state.place ?? null);
     this.depotPanel.update(depot);
     this.vehiclePanel.update(vehicle);
-    const panelsOpen = vehicle !== null || depot !== null;
+    this.placePanel.update(place);
+    const panelsOpen = vehicle !== null || depot !== null || place !== null;
     this.selectionPanel.update(
       panelsOpen ? null : state.selection,
       panelsOpen ? false : state.following,
@@ -240,9 +345,35 @@ export class Hud {
     this.toasts.push(kind, text);
   }
 
+  /** Bandeau explicite de pause coopérative réseau (#39). */
+  setNetworkAlert(view: NetworkAlertView | null): void {
+    this.networkAlert.update(view);
+  }
+
   /** Reflète l'outil de construction armé dans la barre du bas. */
   setBuildTool(tool: BuildToolId | null): void {
     this.toolbar.setActive(tool);
+  }
+
+  /** Reflète l'état du mode photo sur le bouton appareil. */
+  setPhotoMode(active: boolean): void {
+    this.photoButton.setAttribute('aria-pressed', active ? 'true' : 'false');
+    this.photoButton.classList.toggle('is-active', active);
+  }
+
+  /** Met à jour le bouton mute (état réel du moteur audio). */
+  setAudioMuted(muted: boolean): void {
+    this.audioMuted = muted;
+    this.audioButton.textContent = muted ? '🔇' : '🔊';
+    this.refreshAudioLabel();
+    this.audioButton.setAttribute('aria-pressed', muted ? 'true' : 'false');
+    this.audioButton.classList.toggle('is-active', muted);
+  }
+
+  private refreshAudioLabel(): void {
+    const label = t(this.audioMuted ? 'hud.audio.unmute' : 'hud.audio.mute');
+    this.audioButton.title = label;
+    this.audioButton.setAttribute('aria-label', label);
   }
 
   /** Affiche le coût estimé et le motif d'invalidité au-dessus de la barre. */
@@ -261,12 +392,19 @@ export class Hud {
       return;
     }
     this.newsFeed.show();
+    this.topBar.setNewsOpen(true);
     this.markAllRead();
     this.renderNewsList();
   }
 
   closeNews(): void {
+    const active = document.activeElement;
+    const restore =
+      active instanceof HTMLElement &&
+      (this.newsFeed.element.contains(active) || !active.isConnected);
     this.newsFeed.hide();
+    this.topBar.setNewsOpen(false);
+    if (restore) this.topBar.focusNewsButton();
   }
 
   markAllRead(): void {
@@ -308,6 +446,7 @@ export class Hud {
     this.errorTitle.textContent = title;
     this.errorMessage.textContent = message;
     this.errorOverlay.hidden = false;
+    this.retryButton.focus();
   }
 
   private refreshNewsBadge(): void {
@@ -324,8 +463,17 @@ export class Hud {
   }
 
   dispose(): void {
+    document.removeEventListener('keydown', this.handleEscape);
+    this.stopAudioLanguage();
+    this.topBar.dispose();
+    this.toolbar.dispose();
+    this.help.dispose();
+    this.selectionPanel.dispose();
+    this.newsFeed.dispose();
     this.toasts.dispose();
+    this.networkAlert.dispose();
     this.buildHint.dispose();
+    this.buildOptions.dispose();
     this.buildOptions.element.remove();
     this.minimap.dispose();
     this.news.clear();

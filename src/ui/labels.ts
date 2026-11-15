@@ -1,109 +1,114 @@
 /**
- * Libellés français des valeurs du protocole.
+ * Libellés localisés des valeurs du protocole.
  *
  * Les clés restent les identifiants anglais du protocole ; seuls les textes
- * affichés sont traduits. `labelOf` retombe proprement sur la clé inconnue.
+ * affichés passent par le catalogue i18n. Une valeur inconnue retombe
+ * proprement sur sa clé brute.
  */
 
-export const VEHICLE_LABELS: Record<string, string> = {
-  train: 'Train',
-  road: 'Véhicule routier',
-  ship: 'Bateau',
-  aircraft: 'Avion',
+import { t, type TranslationKey } from './i18n';
+
+export const VEHICLE_LABEL_KEYS: Record<string, TranslationKey> = {
+  train: 'label.vehicle.train',
+  road: 'label.vehicle.road',
+  ship: 'label.vehicle.ship',
+  aircraft: 'label.vehicle.aircraft',
 };
 
-export const STATION_LABELS: Record<string, string> = {
-  train: 'Gare',
-  road: 'Arrêt',
-  ship: 'Dock',
-  airport: 'Aéroport',
-  buoy: 'Bouée',
+export const STATION_LABEL_KEYS: Record<string, TranslationKey> = {
+  train: 'label.station.train',
+  road: 'label.station.road',
+  ship: 'label.station.ship',
+  airport: 'label.station.airport',
+  buoy: 'label.station.buoy',
 };
 
-export const CARGO_LABELS: Record<string, string> = {
-  passengers: 'Voyageurs',
-  mail: 'Courrier',
-  coal: 'Charbon',
-  wood: 'Bois',
-  grain: 'Céréales',
-  goods: 'Marchandises',
-  oil: 'Pétrole',
-  livestock: 'Bétail',
-  valuables: 'Objets de valeur',
-  iron_ore: 'Minerai de fer',
-  steel: 'Acier',
-  water: 'Eau',
-  fruit: 'Fruits',
-  maize: 'Maïs',
-  food: 'Nourriture',
+export const CARGO_LABEL_KEYS: Record<string, TranslationKey> = {
+  passengers: 'label.cargo.passengers',
+  mail: 'label.cargo.mail',
+  coal: 'label.cargo.coal',
+  wood: 'label.cargo.wood',
+  grain: 'label.cargo.grain',
+  goods: 'label.cargo.goods',
+  oil: 'label.cargo.oil',
+  livestock: 'label.cargo.livestock',
+  valuables: 'label.cargo.valuables',
+  iron_ore: 'label.cargo.iron_ore',
+  steel: 'label.cargo.steel',
+  water: 'label.cargo.water',
+  fruit: 'label.cargo.fruit',
+  maize: 'label.cargo.maize',
+  food: 'label.cargo.food',
 };
 
-export const VEHICLE_STATUS_LABELS: Record<number, string> = {
-  0: 'à l’arrêt',
-  1: 'en route',
-  2: 'en gare',
-  3: 'en dépôt',
-  4: 'en attente',
+export const VEHICLE_STATUS_KEYS: Record<number, TranslationKey> = {
+  0: 'label.status.stopped',
+  1: 'label.status.route',
+  2: 'label.status.station',
+  3: 'label.status.depot',
+  4: 'label.status.waiting',
 };
 
-export const TILE_KIND_LABELS: Record<string, string> = {
-  void: 'Vide',
-  clear: 'Terrain dégagé',
-  grass: 'Herbe',
-  rough: 'Broussailles',
-  water: 'Eau',
-  coast: 'Côte',
-  rail: 'Voie ferrée',
-  road: 'Route',
-  house: 'Bâtiment',
-  trees: 'Arbres',
-  station: 'Gare',
-  industry: 'Industrie',
-  bridge: 'Pont',
-  tunnel: 'Tunnel',
-  object: 'Objet',
-  airport: 'Aéroport',
-  dock: 'Dock',
-  canal: 'Canal',
-  river: 'Rivière',
+export const TILE_KIND_KEYS: Record<string, TranslationKey> = {
+  void: 'label.tile.void',
+  clear: 'label.tile.clear',
+  grass: 'label.tile.grass',
+  rough: 'label.tile.rough',
+  water: 'label.tile.water',
+  coast: 'label.tile.coast',
+  rail: 'label.tile.rail',
+  road: 'label.tile.road',
+  house: 'label.tile.house',
+  trees: 'label.tile.trees',
+  station: 'label.tile.station',
+  industry: 'label.tile.industry',
+  bridge: 'label.tile.bridge',
+  tunnel: 'label.tile.tunnel',
+  object: 'label.tile.object',
+  airport: 'label.tile.airport',
+  dock: 'label.tile.dock',
+  canal: 'label.tile.canal',
+  river: 'label.tile.river',
 };
 
-export const INDUSTRY_KIND_LABELS: Record<string, string> = {
-  coal_mine: 'Mine de charbon',
-  power_station: 'Centrale électrique',
-  sawmill: 'Scierie',
-  farm: 'Ferme',
-  factory: 'Usine',
-  oil_well: 'Puits de pétrole',
-  refinery: 'Raffinerie',
-  steel_mill: 'Aciérie',
-  forest: 'Forêt',
+export const INDUSTRY_KIND_KEYS: Record<string, TranslationKey> = {
+  coal_mine: 'label.industry.coal_mine',
+  power_station: 'label.industry.power_station',
+  sawmill: 'label.industry.sawmill',
+  farm: 'label.industry.farm',
+  factory: 'label.industry.factory',
+  oil_well: 'label.industry.oil_well',
+  refinery: 'label.industry.refinery',
+  steel_mill: 'label.industry.steel_mill',
+  forest: 'label.industry.forest',
 };
 
-export function labelOf(labels: Record<string, string>, key: string): string {
-  return labels[key] ?? key;
+export function keyOf(labels: Record<string, TranslationKey>, key: string): string {
+  const translation = labels[key];
+  return translation ? t(translation) : key;
 }
 
 export function cargoLabel(type: string): string {
-  return labelOf(CARGO_LABELS, type);
+  return keyOf(CARGO_LABEL_KEYS, type);
 }
 
 export function vehicleLabel(kind: string): string {
-  return labelOf(VEHICLE_LABELS, kind);
+  return keyOf(VEHICLE_LABEL_KEYS, kind);
 }
 
 export function stationLabel(kind: string): string {
-  return labelOf(STATION_LABELS, kind);
+  return keyOf(STATION_LABEL_KEYS, kind);
 }
 
 export function industryKindLabel(kind: string): string {
-  return labelOf(INDUSTRY_KIND_LABELS, kind);
+  return keyOf(INDUSTRY_KIND_KEYS, kind);
 }
 
 export function tileKindLabel(kind: string): string {
-  return labelOf(TILE_KIND_LABELS, kind);
+  return keyOf(TILE_KIND_KEYS, kind);
 }
 
 export function vehicleStatusLabel(status: number): string {
-  return VEHICLE_STATUS_LABELS[status] ?? 'état inconnu';
+  const key = VEHICLE_STATUS_KEYS[status];
+  return key ? t(key) : t('label.status.unknown');
 }

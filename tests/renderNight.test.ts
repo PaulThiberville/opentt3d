@@ -45,8 +45,9 @@ describe('rendu nocturne', () => {
       const value = glow.getX(i) + glow.getY(i) + glow.getZ(i);
       if (value > 0) lit += 1;
     }
-    // Une tuile = 6 sommets ; route, rail et eau ont chacun une émission.
-    expect(lit).toBe(18);
+    // Sommets partagés : une tuile éclairée marque ses quatre coins. Route,
+    // rail et eau se touchent en diagonale, d'où 4 + 3 + 3 sommets lumineux.
+    expect(lit).toBe(10);
     layer.dispose();
   });
 

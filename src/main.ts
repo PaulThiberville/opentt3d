@@ -12,16 +12,21 @@
  */
 
 import './style.css';
+import { AudioEngine, volumesFromSettings } from './audio/AudioEngine';
+import { loadAudioPreferences, saveAudioPreferences } from './audio/preferences';
+import { installAudioUi } from './audio/ui';
 import {
   EngineLoadError,
   describeUnknownError,
   parseEngineMode,
   type EngineMode,
 } from './engine/loadEngine';
+import { sharedEngineAvailability } from './ui/engineAvailability';
 import { createDirectory, newRoomId, type Directory } from './net/directory';
 import { createLobby, type Lobby } from './net/lobby';
 import type { StartInfo } from './net/lobby-types';
 import { createTransport, type Transport, type TransportKind } from './net/transport';
+import { startPwa } from './pwa';
 import { Renderer } from './render/Renderer';
 import { detectQuality } from './render/quality';
 import {
@@ -62,6 +67,7 @@ import {
 import {
   SETTINGS_STORAGE_KEY,
   loadSettings,
+  p2pRelayUrls,
   saveSettings,
   updateSettings,
   type GameSettings,
@@ -79,6 +85,7 @@ import { GameOverScreen } from './ui/screens/GameOverScreen';
 import { LobbyScreen } from './ui/screens/LobbyScreen';
 import { JoinScreen } from './ui/screens/JoinScreen';
 import { LoadingScreen } from './ui/screens/LoadingScreen';
+import { AttractScene } from './render/AttractScene';
 import { MainMenuScreen } from './ui/screens/MainMenuScreen';
 import { MultiplayerScreen, type CreateRoomRequest } from './ui/screens/MultiplayerScreen';
 import { NewGameScreen } from './ui/screens/NewGameScreen';
@@ -100,7 +107,18 @@ if (!canvas || !mount) {
 const sceneCanvas: HTMLCanvasElement = canvas;
 const uiMount: HTMLElement = mount;
 
+/**
+ * PWA : service worker + invitation de mise à jour. Désactivé en développement
+ * (HMR) et avec `?pwa=off`. L'invitation n'apparaît que hors partie, via
+ * `notifyAppIdle()`.
+ */
+const pwa = startPwa();
+
 const screens = new ScreenManager(uiMount);
+screens.onScreenChange = (key) => {
+  // Sous une modale, la démo passe à 15 fps : le flou coûte déjà cher.
+  attractScene?.setBackdrop(key !== null && key !== 'menu');
+};
 let settings = loadSettings(window.localStorage);
 if (window.localStorage.getItem(SETTINGS_STORAGE_KEY) === null) {
   settings = {
@@ -110,8 +128,24 @@ if (window.localStorage.getItem(SETTINGS_STORAGE_KEY) === null) {
 }
 let session: GameSession | null = null;
 let settingsOrigin: SettingsOrigin = 'menu';
+let attractScene: AttractScene | null = null;
 let saveStorePromise: Promise<SaveStoreHandle> | null = null;
 let autosavePending = false;
+
+/**
+ * Moteur audio unique pour la page : il survit aux sessions (clics de menu) et
+ * se déverrouille au premier geste. Les volumes viennent de `settings` ; le
+ * mute est persisté à part (`opentt3d.audio.v1`).
+ */
+const audioPreferences = loadAudioPreferences(window.localStorage);
+const audio = new AudioEngine({
+  muted: audioPreferences.muted,
+  volumes: volumesFromSettings(settings),
+});
+audio.subscribe((state) => {
+  saveAudioPreferences(window.localStorage, { muted: state.muted });
+});
+installAudioUi({ engine: audio, win: window, doc: document });
 
 /**
  * Ouvre le stockage local une seule fois par page. `openSaveStore` retombe sur
@@ -123,28 +157,40 @@ function ensureSaveStore(): Promise<SaveStoreHandle> {
 }
 
 const webglAvailable = Renderer.isWebGLAvailable();
+const prefersReducedMotion =
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /**
- * Moteur sélectionné par `?engine=mock|wasm`. Le mock reste le défaut : le
- * moteur réel n'est activé que sur demande explicite. En réseau, ce choix est
- * le réglage initial du salon ; il est ensuite figé dans `StartInfo` pour que
- * tous les pairs utilisent le même moteur (#93).
+ * Moteur sélectionné par `?engine=mock|wasm` (#78). L'URL reste prioritaire
+ * sur le réglage persistant pour les tests, la CI et les liens partagés. Sans
+ * paramètre, le choix vient de `settings.engine` (défaut : mock).
+ *
+ * En réseau, ce choix est le réglage initial du salon ; il est ensuite figé
+ * dans `StartInfo` pour que tous les pairs utilisent le même moteur (#93).
  */
-function readEngineMode(): EngineMode {
+function readEngineModeOverride(): EngineMode | null {
   const raw = new URLSearchParams(window.location.search).get('engine');
-  if (raw === null || raw.trim() === '') return 'mock';
+  if (raw === null || raw.trim() === '') return null;
   const parsed = parseEngineMode(raw);
   if (parsed) return parsed;
   console.warn(
-    `[OpenTT3D] Moteur inconnu « ${raw} » : moteur mock utilisé. Valeurs acceptées : mock, wasm.`,
+    `[OpenTT3D] Moteur inconnu « ${raw} » : réglage persistant utilisé. Valeurs acceptées : mock, wasm.`,
   );
-  return 'mock';
+  return null;
 }
 
-const engineMode: EngineMode = readEngineMode();
+const engineOverride = readEngineModeOverride();
+const engineAvailability = sharedEngineAvailability();
+let engineMode: EngineMode = engineOverride ?? settings.engine;
 const networkBoot = readNetworkParams(window.location.search);
 const networkKind = networkBoot.kind;
 const transportKind: TransportKind = transportKindFor(networkKind);
+
+/** `?relays=` prend le pas sur le réglage persistant (#39). */
+function configuredRelays(): string[] {
+  return networkBoot.relays.length > 0 ? networkBoot.relays : p2pRelayUrls(settings.p2pRelay);
+}
 
 if (networkBoot.warning) {
   console.warn(`[OpenTT3D] ${networkBoot.warning}`);
@@ -208,8 +254,14 @@ function rememberPlayerName(name: string): void {
 function ensureNetworkDirectory(): Directory | null {
   if (networkDirectory) return networkDirectory;
   try {
+    const relays = configuredRelays();
     networkDirectory =
-      networkKind === 'local' ? createLocalDirectory() : createDirectory({ kind: 'nostr' });
+      networkKind === 'local'
+        ? createLocalDirectory()
+        : createDirectory({
+            kind: 'nostr',
+            ...(relays.length > 0 ? { relays } : {}),
+          });
   } catch (error) {
     console.warn('[OpenTT3D] Annuaire multijoueur indisponible', error);
     networkDirectory = null;
@@ -251,7 +303,23 @@ function stopLateProbe(): void {
 function persistSettings(next: GameSettings): void {
   settings = next;
   saveSettings(window.localStorage, next);
+  audio.setVolumes(volumesFromSettings(next));
+  engineMode = engineOverride ?? next.engine;
 }
+
+/**
+ * Détection des artefacts au démarrage (#78) : elle ne bloque jamais le menu.
+ * Si un 404 confirme l'absence du WASM, un réglage `wasm` est ramené au mock
+ * pour que « Nouvelle partie » ne propose pas un moteur cassé ; une panne
+ * réseau n'écrase rien et laisse simplement le choix actif.
+ */
+engineAvailability.subscribe((artifacts) => {
+  if (engineOverride || artifacts.reason !== 'missing' || settings.engine !== 'wasm') return;
+  persistSettings(updateSettings(settings, { engine: 'mock' }));
+});
+void engineAvailability.refresh().catch((error: unknown) => {
+  console.warn('[OpenTT3D] Vérification des artefacts moteur impossible', error);
+});
 
 function disposeSession(): void {
   stopLateProbe();
@@ -265,8 +333,29 @@ function disposeSession(): void {
   closeNetworkDirectory();
 }
 
+/** Démo vivante derrière le menu : une partie mock autonome, sans HUD ni audio. */
+function ensureAttract(): void {
+  if (!webglAvailable || attractScene || prefersReducedMotion) return;
+  const seedParam = Number(new URLSearchParams(window.location.search).get('attractSeed'));
+  const scene = new AttractScene({
+    quality: settings.quality === 'low' ? 'low' : 'medium',
+    ...(Number.isFinite(seedParam) && seedParam > 0 ? { seed: seedParam } : {}),
+  });
+  attractScene = scene;
+  void scene.start().then(() => {
+    if (attractScene === scene && !scene.isRunning) attractScene = null;
+  });
+}
+
+function stopAttract(): void {
+  attractScene?.dispose();
+  attractScene = null;
+}
+
 function showMainMenu(): void {
+  pwa.notifyAppIdle();
   disposeSession();
+  ensureAttract();
   screens.show(
     'menu',
     new MainMenuScreen({
@@ -282,6 +371,7 @@ function showMainMenu(): void {
         networkKind === 'local'
           ? 'Mode local · deux onglets BroadcastChannel'
           : 'Salon P2P · Trystero / relais Nostr',
+      liveSimulation: webglAvailable && !prefersReducedMotion,
     }),
   );
 }
@@ -292,11 +382,23 @@ function showNewGame(): void {
     new NewGameScreen({
       initial: pendingOptions,
       engineMode,
-      onStart: (options) => {
+      storedEngineMode: settings.engine,
+      engineUrlMode: engineOverride,
+      engineAvailability,
+      onEngineChange: (mode) => {
+        if (engineOverride) return;
+        persistSettings(updateSettings(settings, { engine: mode }));
+      },
+      onStart: (options, engine) => {
         pendingOptions = options;
         replayOptions = options;
-        persistSettings(updateSettings(settings, { quality: options.quality }));
-        void startGame(options);
+        persistSettings(
+          updateSettings(settings, {
+            quality: options.quality,
+            ...(engineOverride ? {} : { engine }),
+          }),
+        );
+        void startGame(options, engine);
       },
       onBack: () => showMainMenu(),
     }),
@@ -341,7 +443,12 @@ function createRoom(request: CreateRoomRequest): void {
   const roomId = newRoomId();
   let handle: DetachableTransport | null = null;
   try {
-    const transport = createTransport({ kind: transportKind, roomId });
+    const relays = configuredRelays();
+    const transport = createTransport({
+      kind: transportKind,
+      roomId,
+      ...(relays.length > 0 ? { relays } : {}),
+    });
     handle = detachableTransport(transport);
     const directory = ensureNetworkDirectory();
     const lobby = createLobby({
@@ -374,7 +481,12 @@ function createRoom(request: CreateRoomRequest): void {
 function joinRoom(target: JoinTarget, name: string): void {
   let handle: DetachableTransport | null = null;
   try {
-    const transport = createTransport({ kind: transportKind, roomId: target.roomId });
+    const relays = configuredRelays();
+    const transport = createTransport({
+      kind: transportKind,
+      roomId: target.roomId,
+      ...(relays.length > 0 ? { relays } : {}),
+    });
     handle = detachableTransport(transport);
     const lobby = createLobby({
       transport: handle.transport,
@@ -574,6 +686,8 @@ function showSettings(origin: SettingsOrigin): void {
     'settings',
     new SettingsScreen({
       settings,
+      engineUrlMode: engineOverride,
+      engineAvailability,
       onChange: (next) => {
         persistSettings(next);
         pendingOptions = { ...pendingOptions, quality: next.quality };
@@ -592,15 +706,23 @@ function showAbout(): void {
   screens.show('about', new AboutScreen({ onBack: () => showMainMenu() }));
 }
 
-async function startGame(options: NewGameOptions): Promise<void> {
+async function startGame(options: NewGameOptions, engine: EngineMode = engineMode): Promise<void> {
+  stopAttract();
   disposeSession();
   if (!webglAvailable) {
     showMainMenu();
     return;
   }
+  pwa.notifyAppBusy();
   replayOptions = options;
   pendingOptions = options;
-  persistSettings(updateSettings(settings, { quality: options.quality }));
+  engineMode = engine;
+  persistSettings(
+    updateSettings(settings, {
+      quality: options.quality,
+      ...(engineOverride ? {} : { engine }),
+    }),
+  );
 
   const token: LoadToken = { cancelled: false };
   const loading: LoadingScreen = new LoadingScreen({
@@ -618,6 +740,7 @@ async function startGame(options: NewGameOptions): Promise<void> {
     config: options,
     settings,
     engine: engineMode,
+    audio,
     callbacks: soloCallbacks(loading),
   });
   session = next;
@@ -677,6 +800,7 @@ function loadedGameOptions(record: SaveRecord): NewGameOptions {
 }
 
 async function startLoadedGame(record: SaveRecord): Promise<void> {
+  stopAttract();
   // L'ancienne session (le cas échéant) est libérée avant toute allocation :
   // pas de contexte WebGL ni de listener orphelin pendant le chargement.
   disposeSession();
@@ -684,6 +808,7 @@ async function startLoadedGame(record: SaveRecord): Promise<void> {
     showMainMenu();
     return;
   }
+  pwa.notifyAppBusy();
   const options = loadedGameOptions(record);
   replayOptions = options;
   pendingOptions = options;
@@ -706,6 +831,7 @@ async function startLoadedGame(record: SaveRecord): Promise<void> {
     config: options,
     settings,
     engine: record.engine,
+    audio,
     loadedGame: {
       bytes: record.bytes,
       options,
@@ -781,7 +907,9 @@ function networkCallbacks(
 }
 
 async function startNetworkGame(info: StartInfo): Promise<void> {
+  stopAttract();
   disposeSession();
+  pwa.notifyAppBusy();
   // Le transport vient du salon : il ne doit pas être fermé par le nettoyage
   // du menu. L'hôte répond aux retardataires via `LateJoinHost`, créé avant le
   // chargement pour qu'une demande pendant la génération ne reste pas muette.
@@ -807,6 +935,7 @@ async function startNetworkGame(info: StartInfo): Promise<void> {
     settings,
     engine: info.settings.engine,
     network: info,
+    audio,
     callbacks: networkCallbacks((progress, message) => loading.setProgress(progress, message)),
   });
   session = next;
@@ -850,8 +979,10 @@ async function startNetworkGame(info: StartInfo): Promise<void> {
 
 /** Démarre le rendu et le HUD autour de la session déjà chargée par le join. */
 async function startJoinedGame(prepared: LateJoinPrepared, screen: JoinScreen): Promise<void> {
+  stopAttract();
   const start = prepared.start;
   disposeSession();
+  pwa.notifyAppBusy();
   const mapped = mapStartInfoToGameOptions(start, pendingOptions.quality);
   pendingOptions = { ...pendingOptions, quality: mapped.options.quality };
   const token: LoadToken = { cancelled: false };
@@ -863,6 +994,7 @@ async function startJoinedGame(prepared: LateJoinPrepared, screen: JoinScreen): 
     engine: start.settings.engine,
     network: start,
     preparedJoin: prepared,
+    audio,
     callbacks: networkCallbacks((progress, message) => screen.setPreparation(progress, message)),
   });
   session = next;
@@ -919,7 +1051,12 @@ function showSaveScreen(origin: 'menu' | 'pause'): void {
       ...(overview
         ? { currentLabel: `${overview.company} · ${overview.date} · ${overview.money}` }
         : {}),
-      onSaved: (slot) => current?.notifySave(`Partie sauvegardée : « ${slot.name} »`),
+      onSaved: (slot) => {
+        current?.notifySave(`Partie sauvegardée : « ${slot.name} »`);
+        // Une sauvegarde vient d'être écrite : c'est le bon moment pour
+        // proposer la mise à jour sans perdre de progression.
+        pwa.notifyAppIdle();
+      },
     }),
   );
 }
@@ -975,7 +1112,7 @@ function showGameOver(summary: GameOverSummary): void {
               screens.hide();
               current.dispose();
               if (session === current) session = null;
-              void startGame(replayOptions);
+              void startGame(replayOptions, current.engineMode);
             },
           }),
     }),
@@ -1018,6 +1155,9 @@ function exposeDebug(current: GameSession): void {
     get netStatus() {
       return current.networkSession?.stats() ?? null;
     },
+    get audio() {
+      return current.audioEngine ?? audio;
+    },
     get buildTool() {
       return current.getBuildTool();
     },
@@ -1032,6 +1172,9 @@ function exposeDebug(current: GameSession): void {
     listSaves: async () => (await ensureSaveStore()).store.list(),
     captureSave: () => current.captureSave(),
     restored: current.restoredStateInfo,
+    photo: current.getPhotoMode(),
+    togglePhotoMode: (preset?: 'map' | 'street' | 'train') => current.togglePhotoMode(preset),
+    isIntroRunning: () => current.isCinematicIntroRunning(),
   };
   (window as unknown as Record<string, unknown>).__opentt3d = api;
 }

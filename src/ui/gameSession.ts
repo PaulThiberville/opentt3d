@@ -11,7 +11,14 @@
  * développement quand les artefacts sont absents.
  */
 
-import type { EngineCommand, EngineDriver, WorldSnapshot } from '../engine/protocol';
+import type { AudioEngine } from '../audio/AudioEngine';
+import { SessionAudio } from '../audio/sessionAudio';
+import type {
+  CompanySnapshot,
+  EngineCommand,
+  EngineDriver,
+  WorldSnapshot,
+} from '../engine/protocol';
 import { TILE_FLAG } from '../engine/protocol';
 import { MockEngine } from '../engine/MockEngine';
 import { WasmEngine } from '../engine/WasmEngine';
@@ -41,15 +48,31 @@ import {
   type VehicleOrder,
 } from '../game/vehicleRules';
 import type { StartInfo } from '../net/lobby-types';
-import { NET_TICK_MS, createNetSession, type NetSession, type NetUpdate } from '../net/session';
+import {
+  NET_TICK_MS,
+  createNetSession,
+  type NetNotice,
+  type NetSession,
+  type NetUpdate,
+} from '../net/session';
 import { Renderer } from '../render/Renderer';
 import { WorldView, type WorldTarget } from '../render/WorldView';
+import { CinematicIntro } from '../render/cinematicIntro';
+import {
+  PhotoMode,
+  downloadDataUrl,
+  type PhotoAnchor,
+  type PhotoCapture,
+  type PhotoPresetId,
+} from '../render/PhotoMode';
 import { nextQuality, type QualityLevel } from '../render/quality';
 import { Hud } from './Hud';
 import { BuildController } from './buildController';
 import { describeBuildPlan } from './buildHint';
+import { prefersReducedMotion } from './dom';
 import type { NewGameOptions } from './gameOptions';
 import { formatGameDate, formatMoney } from './format';
+import { t } from './i18n';
 import type { BuildToolId } from './hud/Toolbar';
 import {
   AutosaveScheduler,
@@ -60,6 +83,8 @@ import {
 } from './saveFormat';
 import {
   describeNetworkStatus,
+  describePeerLossAlert,
+  localCompanyForStart,
   mapStartInfoToGameOptions,
   networkControlsLocked,
   peerNamesFromStart,
@@ -72,9 +97,15 @@ import {
   type LockstepGameDriver,
 } from './networkRunner';
 import { describeSelection } from './selection';
+import {
+  describePlacePanel,
+  industryAtTile,
+  isPlaceSelection,
+  placeTargetExists,
+} from './placeView';
 import { describeDepotPanel, describeVehiclePanel } from './vehicleView';
 import type { GameSettings } from './settings';
-import type { GameOverSummary, NetworkStatusView, SessionOverview } from './types';
+import type { GameOverSummary, NetworkStatusView, PlaceTarget, SessionOverview } from './types';
 
 export interface LoadToken {
   cancelled: boolean;
@@ -84,6 +115,24 @@ export class LoadCancelledError extends Error {
   constructor() {
     super('Chargement annulé.');
     this.name = 'LoadCancelledError';
+  }
+}
+
+/** Traduit un diagnostic réseau (#39) ; repli sur le message du protocole. */
+function translateNotice(notice: NetNotice): string {
+  switch (notice.code) {
+    case 'host-migration':
+      return t('net.notice.host-migration');
+    case 'host-unreachable':
+      return t('net.notice.host-unreachable');
+    case 'host-yield':
+      return t('net.notice.host-yield');
+    case 'peer-resumed':
+      return t('net.notice.peer-resumed');
+    case 'transport-error':
+      return t('net.notice.transport-error', { detail: notice.detail ?? notice.message });
+    default:
+      return notice.message;
   }
 }
 
@@ -159,6 +208,11 @@ export interface GameSessionOptions {
   loadedGame?: LoadedGameInput;
   /** Autosave : intervalles réels/ticks, ou `false` pour désactiver. */
   autosave?: AutosaveConfig | false;
+  /**
+   * Moteur audio partagé avec l'application (déverrouillé au premier geste).
+   * Sans lui, la session crée et libère son propre moteur.
+   */
+  audio?: AudioEngine;
 }
 
 const HUD_REFRESH_SECONDS = 0.2;
@@ -171,6 +225,13 @@ const BUILD_TOOL_INTROS: Record<BuildTool, string> = {
   station: 'Gares : réglez la taille et l’orientation, puis cliquez pour poser',
   depot: 'Dépôts : cliquez à côté d’une voie, R oriente l’entrée',
   signal: 'Signaux : cliquez ou glissez le long d’une voie ferrée',
+};
+
+/** Touches 1/2/3 du mode photo, alignées sur `PHOTO_PRESET_IDS`. */
+const PHOTO_KEYS: Record<string, PhotoPresetId> = {
+  '1': 'map',
+  '2': 'street',
+  '3': 'train',
 };
 
 function nextFrame(): Promise<void> {
@@ -193,6 +254,8 @@ export class GameSession {
   private settings: GameSettings;
   private callbacks: GameSessionCallbacks;
   private engineModuleUrl: string;
+  private sharedAudio: AudioEngine | null;
+  private audio: SessionAudio | null = null;
 
   private engine: EngineDriver | null = null;
   private game: Game | null = null;
@@ -215,6 +278,8 @@ export class GameSession {
   private peerNames: Record<string, string> = {};
   private networkWarnings: string[] = [];
   private networkLostNotified = false;
+  private networkAlertKey = '';
+  private remoteLostPeers = new Set<string>();
   private lastNetworkNoticeAt = -Infinity;
   private lastNetworkSaveAt = 0;
   private networkSavePending = false;
@@ -235,6 +300,10 @@ export class GameSession {
   private autosave: AutosaveScheduler | null = null;
   private saveChip: HTMLDivElement | null = null;
   private saveChipTimer = 0;
+  private photoMode: PhotoMode | null = null;
+  private intro: CinematicIntro | null = null;
+  private introHint: HTMLDivElement | null = null;
+  private reduceMotion = false;
 
   constructor(options: GameSessionOptions) {
     this.canvas = options.canvas;
@@ -253,6 +322,8 @@ export class GameSession {
     }
     this.settings = options.settings;
     this.callbacks = options.callbacks;
+    this.sharedAudio = options.audio ?? null;
+    this.reduceMotion = prefersReducedMotion();
     this.quality = this.config.quality;
     this.engineMode = this.network
       ? this.network.settings.engine
@@ -374,6 +445,9 @@ export class GameSession {
           difficulty: config.difficulty,
           startYear: config.startYear,
           climate: config.climate,
+          ...(config.companies && config.companies.length > 0
+            ? { companies: config.companies }
+            : {}),
         });
         this.collectEngineWarnings();
         this.ensureActive(token);
@@ -383,6 +457,9 @@ export class GameSession {
     if (this.network) {
       if (prepared) this.adoptPreparedJoin(prepared, engine);
       else this.createNetworkSession(engine);
+      // Chaque pair applique l'entreprise de son joueur (#99), y compris après
+      // le chargement d'une sauvegarde produite par l'hôte.
+      this.applyLocalCompany(engine);
     }
     this.ensureActive(token);
 
@@ -405,10 +482,16 @@ export class GameSession {
     this.buildController = this.createBuildController();
     this.world = this.createWorld(this.renderer);
     this.hud = this.createHud();
+    this.audio = new SessionAudio({
+      ...(this.sharedAudio ? { engine: this.sharedAudio } : {}),
+      quality: this.quality,
+      settings: this.settings,
+    });
     this.attachEvents(game);
     this.attachListeners();
     this.createEngineBadge();
     this.createSaveChip();
+    this.photoMode = this.createPhotoMode();
 
     // `game.start()` capture le premier snapshot et émet les news initiales,
     // désormais écoutées par le HUD.
@@ -440,6 +523,7 @@ export class GameSession {
     this.ensureActive(token);
     this.startNetworkSession();
     this.renderer.start((delta) => this.frame(delta));
+    this.startCinematicIntro();
     this.updateCameraFrame();
     this.refreshHud();
     this.report(1, 'Monde prêt');
@@ -537,6 +621,10 @@ export class GameSession {
     const hostPlayer = start.players.find((player) => player.isHost);
     const hostId = hostPlayer ? start.peers[hostPlayer.player] : undefined;
     const playerName = start.players.find((player) => player.player === start.localPlayer)?.name;
+    const companies: Record<number, number> = {};
+    for (const player of start.players) {
+      if (player.company !== undefined) companies[player.player] = player.company;
+    }
     this.netSession = createNetSession({
       runner,
       localPlayer: start.localPlayer,
@@ -546,6 +634,8 @@ export class GameSession {
       peers: start.peers,
       engine: engineBuildId(this.engineMode),
       maxPlayers: start.settings.maxPlayers,
+      ...(Object.keys(companies).length > 0 ? { companies } : {}),
+      ...(start.companySeats === undefined ? {} : { companySeats: start.companySeats }),
       // Une sauvegarde WASM peut être volumineuse : garder la fenêtre ouverte
       // plus longtemps que le défaut de 15 s, sans bloquer la partie au-delà.
       joinTimeoutMs: 60_000,
@@ -559,14 +649,35 @@ export class GameSession {
     const session = this.netSession;
     if (!session) return;
     session.onDesync(() => {
-      this.hud?.notify('warning', 'Divergence détectée : resynchronisation avec l’hôte…');
+      this.hud?.notify('warning', t('net.notice.desync'));
       // Le runner vient de recharger un tick plus avancé : rafraîchit la vue
       // sans attendre le prochain snapshot périodique.
       this.game?.refresh();
     });
     session.onChat(({ player, text }) => {
-      const name = this.network?.players.find((item) => item.player === player)?.name ?? 'Joueur';
+      const name =
+        this.network?.players.find((item) => item.player === player)?.name ?? t('net.chatFallback');
       this.hud?.notify('info', `${name} : ${text}`);
+    });
+    session.onPeerState(({ peerId, player, state, reason }) => {
+      const name =
+        this.peerNames[peerId] ??
+        this.network?.players.find((item) => item.player === player)?.name ??
+        t('net.pair', { id: peerId.slice(0, 6) });
+      if (state === 'disconnected') {
+        this.remoteLostPeers.add(peerId);
+        this.hud?.notify('warning', t('net.status.peerLost', { who: name }));
+      } else {
+        this.remoteLostPeers.delete(peerId);
+        if (state === 'left' && reason === 'expelled') {
+          this.hud?.notify('info', t('net.notice.peer-resumed'));
+        }
+      }
+      // Force the banner to re-evaluate on the next frame.
+      this.networkAlertKey = '';
+    });
+    session.onNotice((notice) => {
+      this.hud?.notify(notice.level === 'error' ? 'error' : notice.level, translateNotice(notice));
     });
   }
 
@@ -645,6 +756,232 @@ export class GameSession {
     chip.setAttribute('aria-live', 'polite');
     this.uiRoot.append(chip);
     this.saveChip = chip;
+  }
+
+  /**
+   * Assemble le mode photo sur le renderer et le contrôleur existants. La
+   * capture force un rendu synchrone : le PNG est lu juste après, dans la même
+   * tâche, donc `preserveDrawingBuffer` n'est pas nécessaire.
+   */
+  private createPhotoMode(): PhotoMode {
+    const world = this.world;
+    if (!world) throw new Error('Mode photo : monde 3D indisponible.');
+    return new PhotoMode({
+      camera: world.getCameraController(),
+      bounds: this.mapBounds(),
+      captureFrame: () => {
+        const renderer = this.renderer;
+        if (!renderer) return null;
+        try {
+          renderer.renderNow();
+          return renderer.webgl.domElement.toDataURL('image/png');
+        } catch {
+          return null;
+        }
+      },
+      setUiHidden: (hidden) => this.setPhotoUiHidden(hidden),
+      pause: () => this.pauseForPhoto(),
+      anchor: () => this.photoAnchor(),
+      followAnchor: () => this.followPhotoAnchor(),
+      reducedMotion: this.reduceMotion,
+      ...(typeof performance !== 'undefined' ? { now: () => performance.now() } : {}),
+      mount: this.uiRoot,
+      labels: this.photoLabels(),
+      onCapture: () => this.capturePhoto(),
+    });
+  }
+
+  /** Libellés du mode photo, retraduits quand les réglages changent. */
+  private photoLabels(): {
+    title: string;
+    hint: string;
+    capture: string;
+    exit: string;
+    captured: string;
+    preset: Record<PhotoPresetId, string>;
+  } {
+    return {
+      title: t('photo.title'),
+      hint: t('photo.hint'),
+      capture: t('photo.capture'),
+      exit: t('photo.exit'),
+      captured: t('photo.captured'),
+      preset: {
+        map: t('photo.preset.map'),
+        street: t('photo.preset.street'),
+        train: t('photo.preset.train'),
+      },
+    };
+  }
+
+  private mapBounds(): { minX: number; maxX: number; minZ: number; maxZ: number } {
+    const map = this.world?.getMap() ?? null;
+    if (map) return { minX: 0, maxX: map.width, minZ: 0, maxZ: map.height };
+    const size = this.config.size;
+    return { minX: 0, maxX: size, minZ: 0, maxZ: size };
+  }
+
+  /** Masque HUD, pastilles et panneaux ; le canvas reste interactif. */
+  private setPhotoUiHidden(hidden: boolean): void {
+    if (typeof document !== 'undefined') {
+      document.body.classList.toggle('photo-mode', hidden);
+    }
+    if (hidden) {
+      this.hud?.closePanels();
+      this.hud?.hideHelp();
+      this.hud?.root.setAttribute('aria-hidden', 'true');
+      // Le HUD devient invisible et non focusable : le clavier revient au canvas.
+      if (
+        typeof document !== 'undefined' &&
+        document.activeElement instanceof HTMLElement &&
+        this.hud?.root.contains(document.activeElement)
+      ) {
+        this.canvas.focus();
+      }
+    } else {
+      this.hud?.root.removeAttribute('aria-hidden');
+    }
+  }
+
+  /** Pause dédiée : ne reprend pas une partie qui était déjà en pause. */
+  private pauseForPhoto(): (() => void) | null {
+    const game = this.game;
+    if (!game || this.isNetwork || game.isPaused()) return null;
+    this.pause();
+    return () => this.resume();
+  }
+
+  /** Point de cadrage du mode photo : véhicule sélectionné, cible ou ville. */
+  private photoAnchor(): PhotoAnchor | null {
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    const selection = this.game?.getSelection() ?? null;
+    if (snapshot && selection?.kind === 'vehicle') {
+      const vehicle = snapshot.vehicles.find((item) => item.id === selection.id);
+      if (vehicle) return { x: vehicle.x, z: vehicle.y };
+    }
+    const target = this.lastTarget;
+    if (target?.kind === 'tile') return { x: target.x + 0.5, z: target.y + 0.5 };
+    if (target?.kind === 'building') return { x: target.x + 0.5, z: target.y + 0.5 };
+    const town = snapshot?.towns[0];
+    if (town) return { x: town.x, z: town.y };
+    return null;
+  }
+
+  /** Suivi vivant du véhicule sélectionné pour le preset train. */
+  private followPhotoAnchor(): (() => PhotoAnchor | null) | null {
+    const selection = this.game?.getSelection() ?? null;
+    if (selection?.kind !== 'vehicle') return null;
+    return () => {
+      const vehicle = this.game
+        ?.getLatestSnapshot()
+        ?.vehicles.find((item) => item.id === selection.id);
+      return vehicle ? { x: vehicle.x, z: vehicle.y } : null;
+    };
+  }
+
+  /** Bascule le mode photo ; `preset` entre directement sur un cadrage. */
+  togglePhotoMode(preset?: PhotoPresetId): boolean {
+    const photo = this.photoMode;
+    if (!photo || this.disposed) return false;
+    if (photo.isActive()) {
+      photo.exit();
+      this.hud?.setPhotoMode(false);
+      this.refreshHud();
+      return false;
+    }
+    if (this.buildTool) this.applyBuildTool(null);
+    this.closeDepot();
+    this.photoMode?.enter(preset);
+    this.hud?.setPhotoMode(this.photoMode?.isActive() ?? false);
+    this.refreshHud();
+    return true;
+  }
+
+  private capturePhoto(): PhotoCapture | null {
+    const shot = this.photoMode?.capture() ?? null;
+    if (!shot) return null;
+    downloadDataUrl(shot.dataUrl, shot.filename);
+    return shot;
+  }
+
+  /** Démarre l'intro si elle est autorisée (réglage, mouvement, mode de jeu). */
+  private startCinematicIntro(): void {
+    const world = this.world;
+    const game = this.game;
+    if (!world || !game || this.reduceMotion) return;
+    if (!this.settings.cinematicIntro) return;
+    if (this.loadedGame || this.preparedJoin || this.isNetwork) return;
+    const map = world.getMap();
+    if (!map) return;
+    const snapshot = game.getLatestSnapshot();
+    const anchors: PhotoAnchor[] = [];
+    for (const town of snapshot?.towns.slice(0, 3) ?? []) anchors.push({ x: town.x, z: town.y });
+    for (const station of snapshot?.stations.slice(0, 2) ?? []) {
+      anchors.push({ x: station.x, z: station.y });
+    }
+    this.intro = new CinematicIntro({
+      bounds: { minX: 0, maxX: map.width, minZ: 0, maxZ: map.height },
+      ...(anchors.length > 0 ? { anchors } : {}),
+    });
+    this.showIntroHint();
+    window.addEventListener('pointerdown', this.skipIntroOnInput, true);
+    window.addEventListener('keydown', this.skipIntroOnInput, true);
+    window.addEventListener('wheel', this.skipIntroOnInput, { capture: true, passive: true });
+  }
+
+  private showIntroHint(): void {
+    const hint = document.createElement('div');
+    hint.className = 'intro-hint';
+    hint.setAttribute('role', 'status');
+    hint.textContent = t('intro.skip');
+    this.uiRoot.append(hint);
+    this.introHint = hint;
+  }
+
+  /** Clic, touche ou molette : l'intro est coupée sans déclencher l'action. */
+  private skipIntroOnInput = (event: Event): void => {
+    if (!this.intro) return;
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.closest('button, select, a[href]'))
+    ) {
+      return;
+    }
+    // Espace garde son rôle de pause : l'intro se termine, puis la simulation
+    // se met en pause comme le joueur l'a demandé.
+    if (event.type === 'keydown' && (event as KeyboardEvent).code === 'Space') {
+      this.finishIntro(this.intro);
+      return;
+    }
+    event.stopPropagation();
+    if (event.type !== 'pointerdown' && event.cancelable) event.preventDefault();
+    this.finishIntro(this.intro);
+  };
+
+  private finishIntro(intro: CinematicIntro): void {
+    if (this.intro !== intro) return;
+    intro.skip();
+    const controller = this.world?.getCameraController();
+    controller?.setScriptedPose(null);
+    controller?.applyPose(intro.finishPose(), { immediate: true });
+    this.intro = null;
+    window.removeEventListener('pointerdown', this.skipIntroOnInput, true);
+    window.removeEventListener('keydown', this.skipIntroOnInput, true);
+    window.removeEventListener('wheel', this.skipIntroOnInput, true);
+    this.introHint?.remove();
+    this.introHint = null;
+    this.updateCameraFrame();
+  }
+
+  isCinematicIntroRunning(): boolean {
+    return this.intro !== null;
+  }
+
+  getPhotoMode(): PhotoMode | null {
+    return this.photoMode;
   }
 
   /** Affiche brièvement la pastille d'autosave et le toast correspondant. */
@@ -726,6 +1063,10 @@ export class GameSession {
       canvas: this.canvas,
       quality: this.quality,
       timeOfDay: renderer,
+      dayNight: {
+        enabled: this.settings.dayNightCycle,
+        cycleSeconds: this.settings.dayNightCycleSeconds,
+      },
       onSelect: (target) => this.applySelection(target),
       onHover: () => undefined,
       onNotice: (text) => this.hud?.notify('info', text),
@@ -791,12 +1132,19 @@ export class GameSession {
       onRemoveOrder: (vehicleId, index) => this.removeOrder(vehicleId, index),
       onMoveOrder: (vehicleId, index, delta) => this.moveOrder(vehicleId, index, delta),
       onCloseVehicle: () => this.clearSelection(),
+      onPlaceFocus: (x, y) => this.focusPlace(x, y),
+      onPlaceSelect: (target) => this.selectPlaceTarget(target),
+      onClosePlace: () => this.clearSelection(),
+      onToggleAudio: () => this.toggleAudioMute(),
+      onPhotoMode: () => this.togglePhotoMode(),
     });
   }
 
   private attachEvents(game: Game): void {
+    this.audio?.attach(game);
     game.events.on('snapshot', ({ snapshot }) => {
       this.world?.applySnapshot(snapshot);
+      this.audio?.ingestSnapshot(snapshot, this.world?.getMap() ?? null);
       this.monitorGameOver(snapshot);
     });
     game.events.on('notify', ({ kind, text, tick }) => {
@@ -832,6 +1180,15 @@ export class GameSession {
         return;
       }
     }
+    if (this.photoMode?.isActive()) {
+      this.handlePhotoKey(event);
+      return;
+    }
+    if (event.code === 'KeyP') {
+      event.preventDefault();
+      this.togglePhotoMode();
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
       event.preventDefault();
       this.undoLastBuild();
@@ -863,6 +1220,11 @@ export class GameSession {
         return;
       }
       if (this.hud?.closePanels()) return;
+      // Échap ferme le panneau ville/industrie/gare avant de mettre en pause.
+      if (isPlaceSelection(this.game?.getSelection() ?? null)) {
+        this.clearSelection();
+        return;
+      }
       if (this.world?.isFollowing()) {
         this.world.stopFollowing();
         this.clearSelection();
@@ -877,8 +1239,42 @@ export class GameSession {
     }
   };
 
+  /**
+   * Raccourcis du mode photo. Les flèches/WASD restent au `CameraController`,
+   * qui écoute la même fenêtre : on ne consomme ici que les commandes du mode.
+   */
+  private handlePhotoKey(event: KeyboardEvent): void {
+    if (event.code === 'KeyP' || event.key === 'Escape') {
+      event.preventDefault();
+      this.togglePhotoMode();
+      return;
+    }
+    if (event.code === 'KeyC') {
+      event.preventDefault();
+      this.capturePhoto();
+      return;
+    }
+    const preset = this.presetForKey(event.code);
+    if (preset) {
+      event.preventDefault();
+      this.photoMode?.setPreset(preset);
+      return;
+    }
+    if (event.code === 'Space') {
+      // La pause est déjà tenue par le mode photo : ne pas la relancer.
+      event.preventDefault();
+    }
+  }
+
+  private presetForKey(code: string): PhotoPresetId | null {
+    const match = /^(?:Digit|Numpad)([1-3])$/.exec(code);
+    if (!match) return null;
+    return PHOTO_KEYS[match[1] ?? ''] ?? null;
+  }
+
   private handleContextLost = (event: Event): void => {
     event.preventDefault();
+    this.audio?.play('ui.error');
     this.hud?.showError(
       'Contexte WebGL perdu',
       'Le pilote graphique a interrompu le rendu. Rechargez la page pour reprendre la partie.',
@@ -890,6 +1286,8 @@ export class GameSession {
     const game = this.game;
     const world = this.world;
     if (!game || !world) return;
+
+    this.updateIntro(delta);
 
     const session = this.netSession;
     const lockstep = this.lockstep;
@@ -906,10 +1304,18 @@ export class GameSession {
       world.update(delta, { ...game.getInterpolation(), alpha: session.alpha(now) });
       this.refreshNetworkSave(now, session.stats().isHost);
       this.checkNetworkState();
+      this.refreshNetworkAlert(now);
     } else {
       game.advance(delta);
       world.update(delta, game.getInterpolation());
     }
+    world.setDayNightPaused(game.isPaused());
+    this.audio?.setDayNight(world.dayNightAmount);
+
+    const pose = world.getCameraController().getPose();
+    this.audio?.setListener({ x: pose.target.x, z: pose.target.z, yaw: pose.yaw });
+    this.audio?.setPaused(game.isPaused());
+    this.audio?.frame(delta);
 
     this.checkAutosave(game.getTick());
 
@@ -923,6 +1329,19 @@ export class GameSession {
       this.minimapTimer = 0;
       this.updateCameraFrame();
     }
+  }
+
+  /** Avance l'intro cinématique et raccorde la caméra à sa pose finale. */
+  private updateIntro(delta: number): void {
+    const intro = this.intro;
+    if (!intro) return;
+    const pose = intro.update(delta);
+    const controller = this.world?.getCameraController();
+    if (pose && controller) {
+      controller.setScriptedPose(pose);
+      return;
+    }
+    if (intro.finished) this.finishIntro(intro);
   }
 
   private networkNow(): number {
@@ -963,10 +1382,50 @@ export class GameSession {
     const stats = session.stats();
     if (!stats.lost) return;
     this.networkLostNotified = true;
-    this.hud?.notify('error', 'Hôte perdu : la session réseau est interrompue.');
-    this.callbacks.onNetworkLost?.(
-      'L’hôte a disparu et aucun autre joueur n’a pu prendre le relais. La partie réseau est arrêtée.',
-    );
+    this.hud?.notify('error', t('net.lost.hud'));
+    this.callbacks.onNetworkLost?.(t('net.lost.reason'));
+  }
+
+  /**
+   * Bandeau de pause coopérative (#39). L'hôte voit les actions « continuer »
+   * et « attendre » ; les invités voient la décision en cours. Aucun timer :
+   * le compte à rebours est recalculé depuis l'horloge de session.
+   */
+  private refreshNetworkAlert(now: number): void {
+    const session = this.netSession;
+    const hud = this.hud;
+    if (!session || !hud) return;
+    const stats = session.stats();
+    const pause = session.peerLossPause();
+    const update = this.lastNetUpdate;
+    const peerIds =
+      pause?.peerIds ?? (update?.reason === 'peer-lost' ? [...this.remoteLostPeers] : []);
+    if (peerIds.length === 0) {
+      if (this.networkAlertKey !== '') {
+        this.networkAlertKey = '';
+        hud.setNetworkAlert(null);
+      }
+      return;
+    }
+    const seconds = pause ? Math.max(0, Math.ceil((pause.expiresAt - now) / 1000)) : 0;
+    const view = describePeerLossAlert({
+      isHost: stats.isHost,
+      names: this.peerNames,
+      peerIds,
+      seconds,
+      onContinue: () => {
+        session.resumeAfterPeerLoss();
+        this.networkAlertKey = '';
+      },
+      onWait: () => {
+        session.waitForPeers();
+        this.networkAlertKey = '';
+      },
+    });
+    const key = `${view.title}|${view.detail}|${view.actions.length}`;
+    if (key === this.networkAlertKey) return;
+    this.networkAlertKey = key;
+    hud.setNetworkAlert(view);
   }
 
   private networkStatus(): NetworkStatusView | null {
@@ -984,6 +1443,11 @@ export class GameSession {
       names: this.peerNames,
       playersOnline: Object.keys(this.network?.peers ?? {}).length,
       lost: stats.lost,
+      ...(update?.reason === undefined ? {} : { reason: update.reason }),
+      peers: stats.peers,
+      loss: stats.loss,
+      turnDelay: stats.turnDelay,
+      term: stats.term,
     });
   }
 
@@ -1019,6 +1483,8 @@ export class GameSession {
     const world = this.world;
     const hud = this.hud;
     if (!game || !world || !hud) return;
+    this.audio?.setPaused(game.isPaused());
+    hud.setAudioMuted(this.audio?.isMuted ?? this.sharedAudio?.isMuted ?? false);
     const snapshot = game.getLatestSnapshot();
     const map = world.getMap();
     const selection = game.getSelection();
@@ -1042,6 +1508,7 @@ export class GameSession {
       }
     }
     if (vehicle) depot = null;
+    const place = vehicle || depot ? null : describePlacePanel(snapshot, selection);
     hud.update({
       snapshot,
       fps: game.getFps(),
@@ -1050,6 +1517,7 @@ export class GameSession {
       selection: describeSelection(snapshot, selection, this.lastTarget, map),
       depot,
       vehicle,
+      place,
       quality: this.quality,
       following: world.isFollowing(),
       drawCalls: world.getDrawCalls(),
@@ -1081,6 +1549,13 @@ export class GameSession {
           this.refreshHud();
           return;
         }
+        const industry = industryAtTile(snapshot, target.x, target.y);
+        if (industry) {
+          this.world?.setSelection(target);
+          this.game?.select({ kind: 'industry', id: industry.id });
+          this.refreshHud();
+          return;
+        }
       }
     }
 
@@ -1097,6 +1572,45 @@ export class GameSession {
     return { kind: 'tile', id: target.y * width + target.x };
   }
 
+  /** Recentre la caméra sur le lieu ouvert sans fermer son panneau. */
+  private focusPlace(x: number, y: number): void {
+    this.world?.stopFollowing();
+    this.world?.getCameraController().focusOn(x, y);
+    this.updateCameraFrame();
+  }
+
+  /**
+   * Ouvre le panneau d'une gare, d'une industrie ou d'un véhicule listé dans un
+   * panneau lieu. La cible est revalidée contre le snapshot : un lieu disparu
+   * n'ouvre rien.
+   */
+  private selectPlaceTarget(target: PlaceTarget): void {
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    if (!placeTargetExists(snapshot, target)) return;
+    if (target.kind === 'vehicle') {
+      this.selectVehicle(target.id);
+      return;
+    }
+    if (!snapshot) return;
+    const place =
+      target.kind === 'station'
+        ? snapshot.stations.find((station) => station.id === target.id)
+        : snapshot.industries.find((industry) => industry.id === target.id);
+    if (!place) return;
+    this.openDepot = null;
+    this.orderPickingFor = null;
+    const worldTarget: WorldTarget = {
+      kind: 'tile',
+      x: Math.floor(place.x),
+      y: Math.floor(place.y),
+    };
+    this.lastTarget = worldTarget;
+    this.world?.setSelection(worldTarget);
+    this.game?.select({ kind: target.kind, id: target.id });
+    this.focusPlace(place.x, place.y);
+    this.refreshHud();
+  }
+
   /** Sélectionne un véhicule sans passer par le picking. */
   private selectVehicle(vehicleId: number): void {
     this.openDepot = null;
@@ -1109,12 +1623,16 @@ export class GameSession {
   }
 
   clearSelection(): void {
+    const active = document.activeElement;
     this.lastTarget = null;
     this.openDepot = null;
     this.orderPickingFor = null;
     this.world?.setSelection(null);
     this.game?.select(null);
     this.refreshHud();
+    // Le panneau lieu est démonté visuellement : le clavier revient au canvas
+    // au lieu de rester sur un contrôle devenu invisible.
+    if (active instanceof HTMLElement && active.closest('.hud-place')) this.canvas.focus();
   }
 
   /** Ferme le panneau dépôt sans toucher à la sélection de tuile. */
@@ -1396,13 +1914,34 @@ export class GameSession {
   /** Entreprise qui signe la commande : locale en solo, siège du joueur en réseau. */
   private localCompanyId(): number | null {
     const snapshot = this.game?.getLatestSnapshot();
-    const player = this.network?.localPlayer;
-    if (this.isNetwork && player !== undefined) {
-      const company = snapshot?.companies.find((item) => item.id === player);
-      if (company) return company.id;
+    const mapped = this.network ? localCompanyForStart(this.network) : undefined;
+    if (mapped !== undefined && snapshot?.companies.some((item) => item.id === mapped)) {
+      return mapped;
     }
     const company = snapshot?.companies.find((item) => item.isLocal) ?? snapshot?.companies[0];
     return company?.id ?? null;
+  }
+
+  /**
+   * Applique l'entreprise du joueur local au moteur (#99). Appelé après la
+   * génération ou le chargement de la sauvegarde de l'hôte ; l'entreprise
+   * existe forcément (sièges réservés créés au démarrage).
+   */
+  private applyLocalCompany(engine: EngineDriver): void {
+    if (!this.network) return;
+    const company = localCompanyForStart(this.network);
+    if (company === undefined) return;
+    if (typeof engine.setLocalCompany !== 'function') {
+      this.recordEngineWarning(
+        'Entreprise par joueur indisponible : ce moteur ne l’expose pas (#99).',
+      );
+      return;
+    }
+    if (!engine.setLocalCompany(company)) {
+      this.recordEngineWarning(
+        `Entreprise locale ${company} indisponible : repli sur l’entreprise par défaut.`,
+      );
+    }
   }
 
   /**
@@ -1552,16 +2091,36 @@ export class GameSession {
     this.quality = level;
     this.renderer?.setQuality(level);
     this.world?.setQuality(level);
+    this.audio?.setQuality(level);
     this.refreshHud();
   }
 
   applySettings(settings: GameSettings): void {
     this.settings = settings;
     this.setQuality(settings.quality);
+    this.world?.setDayNightCycle(settings.dayNightCycle, settings.dayNightCycleSeconds);
+    this.audio?.setSettings(settings);
+    this.photoMode?.setLabels(this.photoLabels());
   }
 
   getSettings(): GameSettings {
     return { ...this.settings };
+  }
+
+  /** Moteur audio effectif (partagé, ou propre à la session). */
+  get audioEngine(): AudioEngine | null {
+    return this.audio?.audioEngine ?? this.sharedAudio;
+  }
+
+  get audioMuted(): boolean {
+    return this.audio?.isMuted ?? this.sharedAudio?.isMuted ?? false;
+  }
+
+  /** Bouton mute du HUD : l'état est reflété immédiatement. */
+  toggleAudioMute(): boolean {
+    const muted = this.audio?.toggleMuted() ?? this.sharedAudio?.toggleMuted() ?? false;
+    this.hud?.setAudioMuted(muted);
+    return muted;
   }
 
   cycleQuality(): void {
@@ -1570,10 +2129,22 @@ export class GameSession {
     this.hud?.notify('info', `Qualité de rendu : ${this.quality}.`);
   }
 
+  /** Entreprise locale du snapshot (mapping réseau prioritaire, sinon isLocal). */
+  private localCompanySnapshot(): CompanySnapshot | null {
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    if (!snapshot) return null;
+    const id = this.localCompanyId();
+    return (
+      (id === null ? undefined : snapshot.companies.find((item) => item.id === id)) ??
+      snapshot.companies.find((item) => item.isLocal) ??
+      snapshot.companies[0] ??
+      null
+    );
+  }
+
   getOverview(): SessionOverview {
     const snapshot = this.game?.getLatestSnapshot() ?? null;
-    const company =
-      snapshot?.companies.find((item) => item.isLocal) ?? snapshot?.companies[0] ?? null;
+    const company = this.localCompanySnapshot();
     return {
       company: company?.name ?? '—',
       date: formatGameDate(snapshot?.economy),
@@ -1597,8 +2168,7 @@ export class GameSession {
 
   getGameOverSummary(title = 'Fin de partie', reason = 'La partie est terminée.'): GameOverSummary {
     const snapshot = this.game?.getLatestSnapshot() ?? null;
-    const company =
-      snapshot?.companies.find((item) => item.isLocal) ?? snapshot?.companies[0] ?? null;
+    const company = this.localCompanySnapshot();
     return {
       title,
       reason,
@@ -1615,12 +2185,16 @@ export class GameSession {
   endGame(reason: string, title = 'Fin de partie'): void {
     if (this.gameOverShown || this.disposed) return;
     this.gameOverShown = true;
+    this.audio?.play('alert');
     this.callbacks.onGameOver(this.getGameOverSummary(title, reason));
   }
 
   private monitorGameOver(snapshot: WorldSnapshot): void {
     if (this.gameOverShown) return;
-    const local = snapshot.companies.find((company) => company.isLocal);
+    const localId = this.localCompanyId();
+    const local =
+      (localId === null ? undefined : snapshot.companies.find((item) => item.id === localId)) ??
+      snapshot.companies.find((company) => company.isLocal);
     if (local?.bankrupt) {
       this.endGame('Votre entreprise est en faillite.', 'Faillite');
     }
@@ -1631,7 +2205,17 @@ export class GameSession {
     this.disposed = true;
     window.removeEventListener('keydown', this.handleKeyDown);
     this.canvas.removeEventListener('webglcontextlost', this.handleContextLost);
+    window.removeEventListener('pointerdown', this.skipIntroOnInput, true);
+    window.removeEventListener('keydown', this.skipIntroOnInput, true);
+    window.removeEventListener('wheel', this.skipIntroOnInput, true);
+    this.intro = null;
+    this.introHint?.remove();
+    this.introHint = null;
+    this.photoMode?.dispose();
+    this.photoMode = null;
     this.renderer?.stop();
+    this.audio?.dispose();
+    this.audio = null;
     this.hud?.dispose();
     this.world?.dispose();
     this.renderer?.dispose();
