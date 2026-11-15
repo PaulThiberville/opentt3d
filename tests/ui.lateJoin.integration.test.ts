@@ -19,7 +19,14 @@ import {
 } from '../src/net/transport';
 import { LateJoinClient, LateJoinError, LateJoinProbe } from '../src/ui/lateJoinClient';
 import { LateJoinHost } from '../src/ui/lateJoinHost';
-import { describeHostJoin, type HostJoinView } from '../src/ui/netjoin';
+import {
+  LATE_JOIN_CHANNELS,
+  LATE_JOIN_PROTOCOL_VERSION,
+  describeHostJoin,
+  isLateJoinOffer,
+  type HostJoinView,
+  type LateJoinOffer,
+} from '../src/ui/netjoin';
 import { createEngineRunner, type EngineRunner } from '../src/ui/networkRunner';
 import { drive, waitFor } from './net/helpers';
 
@@ -293,5 +300,59 @@ describe('join tardif depuis l’UI (mock, transport mémoire)', () => {
     });
     expect(cluster.hostSession.stats().tick).toBe(150);
     expect(cluster.hostRunner.hash()).toBe(cluster.secondRunner.hash());
+  });
+
+  it('refuse un moteur incompatible puis expire une demande non autorisée', async () => {
+    const cluster = await createCluster(4);
+    drive([cluster.hostSession, cluster.secondSession], 50);
+    const host = new LateJoinHost({
+      transport: cluster.hostTransport,
+      start: cluster.hostStart,
+    });
+    host.attachSession(cluster.hostSession);
+
+    const intruder = createTransport({
+      kind: 'memory',
+      roomId: cluster.roomId,
+      memory: { bus: cluster.bus },
+    });
+    transports.push(intruder);
+    const offers: LateJoinOffer[] = [];
+    intruder.on(LATE_JOIN_CHANNELS.offer, (data) => {
+      if (isLateJoinOffer(data)) offers.push(data);
+    });
+
+    intruder.send(
+      LATE_JOIN_CHANNELS.query,
+      {
+        v: LATE_JOIN_PROTOCOL_VERSION,
+        k: 'late-query',
+        engine: 'autre-build',
+      },
+      cluster.hostTransport.selfId,
+    );
+    expect(offers.at(-1)).toMatchObject({ status: 'denied', reason: 'version' });
+
+    intruder.send(
+      LATE_JOIN_CHANNELS.query,
+      {
+        v: LATE_JOIN_PROTOCOL_VERSION,
+        k: 'late-query',
+        ready: true,
+        name: 'Bob',
+        engine: engineBuildId('mock'),
+      },
+      cluster.hostTransport.selfId,
+    );
+    expect(offers.at(-1)).toMatchObject({ status: 'pending' });
+    const pending = host.state().pending[0];
+    expect(pending?.name).toBe('Bob');
+    if (!pending) throw new Error('demande en attente absente');
+
+    host.tick(pending.requestedAt + 61_000);
+    expect(offers.at(-1)).toMatchObject({ status: 'denied', reason: 'timeout' });
+    expect(host.state().pending).toHaveLength(0);
+    expect(describeHostJoin(host.state(), pending.requestedAt + 61_000).tone).toBe('error');
+    expect(cluster.hostSession.stats().tick).toBe(50);
   });
 });

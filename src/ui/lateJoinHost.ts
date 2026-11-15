@@ -236,6 +236,11 @@ export class LateJoinHost {
           reason: 'timeout',
           message: 'La demande de join a expiré. Rouvrez-la depuis le menu.',
         });
+        this.outcome = {
+          ok: false,
+          message: 'Demande de join expirée sans autorisation.',
+          at: now,
+        };
         changed = true;
       }
     }
