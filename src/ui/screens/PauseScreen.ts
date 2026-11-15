@@ -12,6 +12,8 @@ export interface PauseScreenOptions {
   onResume: () => void;
   onSettings: () => void;
   onQuit: () => void;
+  /** En réseau, la simulation continue : le menu est local. */
+  network?: boolean;
 }
 
 function stat(label: string, value: string): HTMLDivElement {
@@ -37,11 +39,16 @@ export class PauseScreen extends BaseScreen {
     const panel = el('div', { className: 'panel pause-panel' });
     const header = el('div', { className: 'panel-header' });
     header.append(
-      el('span', { className: 'panel-eyebrow', text: 'Partie en pause' }),
-      el('h1', { className: 'panel-title', text: 'Pause' }),
+      el('span', {
+        className: 'panel-eyebrow',
+        text: options.network ? 'Menu de partie' : 'Partie en pause',
+      }),
+      el('h1', { className: 'panel-title', text: options.network ? 'Menu local' : 'Pause' }),
       el('p', {
         className: 'panel-subtitle',
-        text: 'Le temps de jeu est arrêté. Reprenez quand vous voulez.',
+        text: options.network
+          ? 'La simulation continue en réseau : ce menu ne met que votre affichage en pause. La vitesse est contrôlée par l’hôte.'
+          : 'Le temps de jeu est arrêté. Reprenez quand vous voulez.',
       }),
     );
 
@@ -57,7 +64,7 @@ export class PauseScreen extends BaseScreen {
     this.actions = el('div', { className: 'panel-actions panel-actions-column' });
     const resume = el('button', {
       className: 'btn btn-primary',
-      text: 'Reprendre la partie',
+      text: options.network ? 'Fermer le menu' : 'Reprendre la partie',
       attrs: { type: 'button', 'data-autofocus': '' },
     });
     resume.addEventListener('click', () => options.onResume());

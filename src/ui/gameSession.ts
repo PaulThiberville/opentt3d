@@ -16,15 +16,29 @@ import { MockEngine } from '../engine/MockEngine';
 import { WasmEngine } from '../engine/WasmEngine';
 import { resolveEngineModuleUrl, type EngineMode } from '../engine/loadEngine';
 import { Game, type GameSpeed, type Selection } from '../game/Game';
+import type { StartInfo } from '../net/lobby-types';
+import { NET_TICK_MS, createNetSession, type NetSession, type NetUpdate } from '../net/session';
 import { Renderer } from '../render/Renderer';
 import { WorldView, type WorldTarget } from '../render/WorldView';
 import { nextQuality, type QualityLevel } from '../render/quality';
 import { Hud } from './Hud';
 import type { NewGameOptions } from './gameOptions';
 import { formatGameDate, formatMoney } from './format';
+import {
+  describeNetworkStatus,
+  mapStartInfoToGameOptions,
+  networkControlsLocked,
+  peerNamesFromStart,
+} from './netlobby';
+import {
+  createEngineRunner,
+  createLockstepDriver,
+  type EngineRunner,
+  type LockstepGameDriver,
+} from './networkRunner';
 import { describeSelection } from './selection';
 import type { GameSettings } from './settings';
-import type { GameOverSummary, SessionOverview } from './types';
+import type { GameOverSummary, NetworkStatusView, SessionOverview } from './types';
 
 export interface LoadToken {
   cancelled: boolean;
@@ -43,6 +57,8 @@ export interface GameSessionCallbacks {
   onOpenSettings: () => void;
   onGameOver: (summary: GameOverSummary) => void;
   onQualityChange?: (quality: QualityLevel) => void;
+  /** Réseau uniquement : plus aucun hôte vivant, la session est perdue. */
+  onNetworkLost?: (reason: string) => void;
 }
 
 export interface GameSessionOptions {
@@ -55,6 +71,8 @@ export interface GameSessionOptions {
   engine?: EngineMode;
   /** Force l'URL du module WASM (défaut : `public/engine/`). */
   engineModuleUrl?: string;
+  /** Démarre une partie lockstep à partir du salon. Force le moteur mock. */
+  network?: StartInfo;
 }
 
 const HUD_REFRESH_SECONDS = 0.2;
@@ -73,6 +91,7 @@ function nextFrame(): Promise<void> {
 export class GameSession {
   readonly config: NewGameOptions;
   readonly engineMode: EngineMode;
+  readonly network: StartInfo | null;
 
   private canvas: HTMLCanvasElement;
   private uiRoot: HTMLElement;
@@ -88,6 +107,17 @@ export class GameSession {
   private engineBadge: HTMLDivElement | null = null;
   private engineWarnings: string[] = [];
 
+  private netSession: NetSession | null = null;
+  private netRunner: EngineRunner | null = null;
+  private lockstep: LockstepGameDriver | null = null;
+  private lastNetUpdate: NetUpdate | null = null;
+  private peerNames: Record<string, string> = {};
+  private networkWarnings: string[] = [];
+  private networkLostNotified = false;
+  private lastNetworkNoticeAt = -Infinity;
+  private lastNetworkSaveAt = 0;
+  private networkSavePending = false;
+
   private quality: QualityLevel;
   private lastTarget: WorldTarget | null = null;
   private hudTimer = 0;
@@ -99,12 +129,29 @@ export class GameSession {
   constructor(options: GameSessionOptions) {
     this.canvas = options.canvas;
     this.uiRoot = options.uiRoot;
-    this.config = options.config;
+    this.network = options.network ?? null;
+    this.config = this.network
+      ? mapStartInfoToGameOptions(this.network, options.config.quality).options
+      : options.config;
+    if (this.network) {
+      this.networkWarnings = mapStartInfoToGameOptions(
+        this.network,
+        options.config.quality,
+      ).warnings;
+    }
     this.settings = options.settings;
     this.callbacks = options.callbacks;
-    this.quality = options.config.quality;
-    this.engineMode = options.engine ?? 'mock';
+    this.quality = this.config.quality;
+    this.engineMode = this.network ? 'mock' : (options.engine ?? 'mock');
     this.engineModuleUrl = options.engineModuleUrl ?? resolveEngineModuleUrl();
+  }
+
+  get isNetwork(): boolean {
+    return this.network !== null;
+  }
+
+  get networkSession(): NetSession | null {
+    return this.netSession;
   }
 
   get engineInstance(): EngineDriver | null {
@@ -136,7 +183,11 @@ export class GameSession {
     const wasm = this.engineMode === 'wasm';
     this.report(
       0.03,
-      wasm ? 'Chargement du moteur OpenTTD (WebAssembly)…' : 'Initialisation du moteur mock…',
+      this.isNetwork
+        ? 'Préparation de la session réseau (moteur mock déterministe)…'
+        : wasm
+          ? 'Chargement du moteur OpenTTD (WebAssembly)…'
+          : 'Initialisation du moteur mock…',
     );
     const engine: EngineDriver = wasm ? new WasmEngine() : new MockEngine();
     this.engine = engine;
@@ -152,7 +203,11 @@ export class GameSession {
 
     this.report(
       0.42,
-      wasm ? 'Génération de la carte OpenTTD…' : 'Génération de la carte et des réseaux…',
+      wasm
+        ? 'Génération de la carte OpenTTD…'
+        : this.isNetwork
+          ? 'Génération déterministe du monde partagé…'
+          : 'Génération de la carte et des réseaux…',
     );
     await nextFrame();
     this.ensureActive(token);
@@ -168,10 +223,18 @@ export class GameSession {
     this.collectEngineWarnings();
     this.ensureActive(token);
 
+    if (this.network) this.createNetworkSession(engine);
+    this.ensureActive(token);
+
     this.report(0.52, 'Création de la boucle de jeu…');
     await nextFrame();
     this.ensureActive(token);
-    const game = new Game({ driver: engine });
+    const game = this.isNetwork
+      ? new Game({
+          driver: this.lockstep ?? engine,
+          ticksPerSecond: 1000 / NET_TICK_MS,
+        })
+      : new Game({ driver: engine });
     this.game = game;
 
     this.report(0.58, 'Initialisation du rendu 3D…');
@@ -200,6 +263,7 @@ export class GameSession {
     this.report(0.94, 'Échauffement du rendu…');
     await nextFrame();
     this.ensureActive(token);
+    this.startNetworkSession();
     this.renderer.start((delta) => this.frame(delta));
     this.updateCameraFrame();
     this.refreshHud();
@@ -218,12 +282,62 @@ export class GameSession {
   private announceEngine(): void {
     const hud = this.hud;
     if (!hud) return;
-    if (this.engineMode === 'wasm') {
+    if (this.isNetwork) {
+      hud.notify(
+        'info',
+        'Session réseau lockstep : moteur mock déterministe, aucun transfert de sauvegarde.',
+      );
+    } else if (this.engineMode === 'wasm') {
       hud.notify('info', 'Moteur WASM : simulation OpenTTD réelle.');
     } else {
       hud.notify('info', 'Moteur simulé (Mock) : partie de démonstration.');
     }
     for (const warning of this.engineWarnings) hud.notify('warning', warning);
+    for (const warning of this.networkWarnings) hud.notify('warning', warning);
+  }
+
+  /**
+   * Prépare le runner du lockstep sur le moteur déjà généré. La session
+   * elle-même n'est créée qu'une fois le rendu prêt (`startNetworkSession`) :
+   * l'hôte n'attend ainsi un `hello` que lorsque le pair peut réellement
+   * exécuter les tours, au lieu de le voir « en retard » pendant le chargement.
+   */
+  private createNetworkSession(engine: EngineDriver): void {
+    const start = this.network;
+    if (!start) return;
+    this.netRunner = createEngineRunner(engine);
+    this.lockstep = createLockstepDriver(engine);
+    this.peerNames = peerNamesFromStart(start);
+    // Amorce le cache de sauvegarde : si un resync est demandé, le host aura
+    // au moins un état chargeable au lieu d'un message vide (#38 fera mieux).
+    this.lastNetworkSaveAt = this.networkNow();
+    void this.netRunner.saveNow().catch((error: unknown) => {
+      console.warn('[net:session] sauvegarde initiale indisponible', error);
+    });
+  }
+
+  /** Ouvre le lockstep : hellos, tours et hashes commencent ici. */
+  private startNetworkSession(): void {
+    const start = this.network;
+    const runner = this.netRunner;
+    if (!start || !runner || this.netSession) return;
+    const hostPlayer = start.players.find((player) => player.isHost);
+    const hostId = hostPlayer ? start.peers[hostPlayer.player] : undefined;
+    this.netSession = createNetSession({
+      runner,
+      localPlayer: start.localPlayer,
+      transport: start.transport,
+      isHost: start.isHost,
+      ...(start.isHost ? {} : { hostId }),
+      peers: start.peers,
+    });
+    this.netSession.onDesync(() => {
+      this.hud?.notify('warning', 'Divergence détectée : resynchronisation avec l’hôte…');
+    });
+    this.netSession.onChat(({ player, text }) => {
+      const name = this.network?.players.find((item) => item.player === player)?.name ?? 'Joueur';
+      this.hud?.notify('info', `${name} : ${text}`);
+    });
   }
 
   private recordEngineWarning(message: string): void {
@@ -262,12 +376,18 @@ export class GameSession {
   private refreshEngineBadge(): void {
     const badge = this.engineBadge;
     if (!badge) return;
-    const label = this.engineMode === 'wasm' ? 'Moteur WASM' : 'Mock';
+    const label = this.isNetwork
+      ? 'Mock · réseau'
+      : this.engineMode === 'wasm'
+        ? 'Moteur WASM'
+        : 'Mock';
     badge.textContent = label;
     const details: string[] = [
-      this.engineMode === 'wasm'
-        ? `OpenTTD WASM · ${this.engineModuleUrl}`
-        : 'Moteur simulé déterministe',
+      this.isNetwork
+        ? `Lockstep réseau · seed ${this.config.seed} · ${this.network?.players.length ?? 0} participants`
+        : this.engineMode === 'wasm'
+          ? `OpenTTD WASM · ${this.engineModuleUrl}`
+          : 'Moteur simulé déterministe',
     ];
     if (this.engineWarnings.length > 0) details.push('', ...this.engineWarnings);
     badge.title = details.join('\n');
@@ -393,8 +513,22 @@ export class GameSession {
     const game = this.game;
     const world = this.world;
     if (!game || !world) return;
-    game.advance(delta);
-    world.update(delta, game.getInterpolation());
+
+    const session = this.netSession;
+    const lockstep = this.lockstep;
+    if (session && lockstep) {
+      const now = this.networkNow();
+      const update = session.update(now);
+      this.lastNetUpdate = update;
+      if (update.ticks > 0) lockstep.addExecuted(update.ticks);
+      game.advance(delta);
+      world.update(delta, { ...game.getInterpolation(), alpha: session.alpha(now) });
+      this.refreshNetworkSave(now, session.stats().isHost);
+      this.checkNetworkState();
+    } else {
+      game.advance(delta);
+      world.update(delta, game.getInterpolation());
+    }
 
     this.hudTimer += delta;
     if (this.hudTimer >= HUD_REFRESH_SECONDS) {
@@ -406,6 +540,73 @@ export class GameSession {
       this.minimapTimer = 0;
       this.updateCameraFrame();
     }
+  }
+
+  private networkNow(): number {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+      return performance.now();
+    }
+    return Date.now();
+  }
+
+  /**
+   * Rafraîchit périodiquement le cache de sauvegarde de l'hôte. Le lockstep ne
+   * transfère pas l'état en marche normale ; ce cache ne sert qu'aux resyncs
+   * d'urgence, et reste borné à une sauvegarde toutes les 10 s. #38 le
+   * remplacera par un transfert explicite.
+   */
+  private refreshNetworkSave(now: number, isHost: boolean): void {
+    if (!isHost || this.networkSavePending || !this.netRunner) return;
+    if (now - this.lastNetworkSaveAt < 10_000) return;
+    this.lastNetworkSaveAt = now;
+    this.networkSavePending = true;
+    void this.netRunner
+      .saveNow()
+      .catch((error: unknown) => {
+        console.warn('[net:session] sauvegarde de resync indisponible', error);
+      })
+      .finally(() => {
+        this.networkSavePending = false;
+      });
+  }
+
+  /** Signale une perte d'hôte sans migration possible, une seule fois. */
+  private checkNetworkState(): void {
+    const session = this.netSession;
+    if (!session || this.networkLostNotified) return;
+    const stats = session.stats();
+    if (!stats.lost) return;
+    this.networkLostNotified = true;
+    this.hud?.notify('error', 'Hôte perdu : la session réseau est interrompue.');
+    this.callbacks.onNetworkLost?.(
+      'L’hôte a disparu et aucun autre joueur n’a pu prendre le relais. La partie réseau est arrêtée.',
+    );
+  }
+
+  private networkStatus(): NetworkStatusView | null {
+    const session = this.netSession;
+    if (!session) return null;
+    const stats = session.stats();
+    const update = this.lastNetUpdate;
+    return describeNetworkStatus({
+      isHost: stats.isHost,
+      tick: stats.tick,
+      ping: stats.ping,
+      desyncs: stats.desyncs,
+      waiting: update?.waiting ?? false,
+      waitingFor: update?.waitingFor ?? [],
+      names: this.peerNames,
+      playersOnline: Object.keys(this.network?.peers ?? {}).length,
+      lost: stats.lost,
+    });
+  }
+
+  private notifyNetworkControls(): void {
+    if (this.disposed) return;
+    const now = this.networkNow();
+    if (now - this.lastNetworkNoticeAt < 2000) return;
+    this.lastNetworkNoticeAt = now;
+    this.hud?.notify('info', networkControlsLocked().text);
   }
 
   private updateCameraFrame(): void {
@@ -443,6 +644,8 @@ export class GameSession {
       quality: this.quality,
       following: world.isFollowing(),
       drawCalls: world.getDrawCalls(),
+      controlsLocked: this.isNetwork,
+      networkStatus: this.networkStatus(),
     });
   }
 
@@ -469,21 +672,40 @@ export class GameSession {
   }
 
   togglePause(): void {
+    if (this.isNetwork) {
+      this.notifyNetworkControls();
+      return;
+    }
     this.game?.togglePause();
     this.refreshHud();
   }
 
   pause(): void {
+    // En réseau, la simulation ne s'arrête jamais localement : seul le menu
+    // (Échap) suspend l'affichage. Les ticks continuent via `NetSession`.
+    if (this.isNetwork) {
+      this.refreshHud();
+      return;
+    }
     this.game?.setPaused(true);
     this.refreshHud();
   }
 
   resume(): void {
+    if (this.isNetwork) {
+      this.refreshHud();
+      return;
+    }
     this.game?.setPaused(false);
     this.refreshHud();
   }
 
   setSpeed(speed: GameSpeed): void {
+    if (this.isNetwork) {
+      this.notifyNetworkControls();
+      this.refreshHud();
+      return;
+    }
     this.game?.setSpeed(speed);
     this.refreshHud();
   }
@@ -580,6 +802,10 @@ export class GameSession {
     this.hud?.dispose();
     this.world?.dispose();
     this.renderer?.dispose();
+    this.netSession?.dispose();
+    this.netSession = null;
+    this.netRunner = null;
+    this.lockstep = null;
     if (this.game) this.game.dispose();
     else this.engine?.dispose();
     this.hud = null;

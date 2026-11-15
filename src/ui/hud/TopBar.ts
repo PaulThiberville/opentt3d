@@ -180,8 +180,15 @@ export class TopBar {
     this.setText(this.qualityButton, 'quality', QUALITY_PRESETS[state.quality].label);
     this.setText(this.pauseButton, 'pause', state.paused ? '▶' : 'II');
     this.pauseButton.classList.toggle('is-active', state.paused);
+    const locked = state.controlsLocked === true;
+    this.pauseButton.disabled = locked;
+    this.pauseButton.title = locked ? 'Pause contrôlée par l’hôte en réseau' : 'Pause (Espace)';
     for (const entry of this.speedButtons) {
       entry.button.classList.toggle('is-active', !state.paused && state.speed === entry.speed);
+      entry.button.disabled = locked;
+      entry.button.title = locked
+        ? 'Vitesse contrôlée par l’hôte en réseau'
+        : `Vitesse ${entry.speed}×`;
     }
     if (company) {
       this.companyValue.title = `${company.name} · prêt ${formatMoney(company.loan)} · valeur ${formatMoney(company.value)}`;

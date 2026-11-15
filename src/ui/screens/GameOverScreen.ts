@@ -13,7 +13,8 @@ import { BaseScreen } from './BaseScreen';
 export interface GameOverScreenOptions {
   summary: GameOverSummary;
   onMenu: () => void;
-  onReplay: () => void;
+  /** Absent en réseau : rejouer exigerait un nouveau salon ou #38. */
+  onReplay?: () => void;
 }
 
 function stat(label: string, value: string): HTMLDivElement {
@@ -63,13 +64,20 @@ export class GameOverScreen extends BaseScreen {
       attrs: { type: 'button' },
     });
     menu.addEventListener('click', () => options.onMenu());
-    const replay = el('button', {
-      className: 'btn btn-primary',
-      text: 'Rejouer avec les mêmes options',
-      attrs: { type: 'button', 'data-autofocus': '' },
-    });
-    replay.addEventListener('click', () => options.onReplay());
-    actions.append(menu, replay);
+    if (options.onReplay) {
+      const replay = el('button', {
+        className: 'btn btn-primary',
+        text: 'Rejouer avec les mêmes options',
+        attrs: { type: 'button', 'data-autofocus': '' },
+      });
+      replay.addEventListener('click', () => options.onReplay?.());
+      actions.append(menu, replay);
+    } else {
+      menu.setAttribute('data-autofocus', '');
+      menu.classList.remove('btn-ghost');
+      menu.classList.add('btn-primary');
+      actions.append(menu);
+    }
 
     panel.append(header, grid, note, actions);
     this.element.append(panel);
