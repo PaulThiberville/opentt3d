@@ -13,7 +13,12 @@
 
 import type { AudioEngine } from '../audio/AudioEngine';
 import { SessionAudio } from '../audio/sessionAudio';
-import type { EngineCommand, EngineDriver, WorldSnapshot } from '../engine/protocol';
+import type {
+  CompanySnapshot,
+  EngineCommand,
+  EngineDriver,
+  WorldSnapshot,
+} from '../engine/protocol';
 import { TILE_FLAG } from '../engine/protocol';
 import { MockEngine } from '../engine/MockEngine';
 import { WasmEngine } from '../engine/WasmEngine';
@@ -62,6 +67,7 @@ import {
 } from './saveFormat';
 import {
   describeNetworkStatus,
+  localCompanyForStart,
   mapStartInfoToGameOptions,
   networkControlsLocked,
   peerNamesFromStart,
@@ -384,6 +390,9 @@ export class GameSession {
           difficulty: config.difficulty,
           startYear: config.startYear,
           climate: config.climate,
+          ...(config.companies && config.companies.length > 0
+            ? { companies: config.companies }
+            : {}),
         });
         this.collectEngineWarnings();
         this.ensureActive(token);
@@ -393,6 +402,9 @@ export class GameSession {
     if (this.network) {
       if (prepared) this.adoptPreparedJoin(prepared, engine);
       else this.createNetworkSession(engine);
+      // Chaque pair applique l'entreprise de son joueur (#99), y compris après
+      // le chargement d'une sauvegarde produite par l'hôte.
+      this.applyLocalCompany(engine);
     }
     this.ensureActive(token);
 
@@ -552,6 +564,10 @@ export class GameSession {
     const hostPlayer = start.players.find((player) => player.isHost);
     const hostId = hostPlayer ? start.peers[hostPlayer.player] : undefined;
     const playerName = start.players.find((player) => player.player === start.localPlayer)?.name;
+    const companies: Record<number, number> = {};
+    for (const player of start.players) {
+      if (player.company !== undefined) companies[player.player] = player.company;
+    }
     this.netSession = createNetSession({
       runner,
       localPlayer: start.localPlayer,
@@ -561,6 +577,8 @@ export class GameSession {
       peers: start.peers,
       engine: engineBuildId(this.engineMode),
       maxPlayers: start.settings.maxPlayers,
+      ...(Object.keys(companies).length > 0 ? { companies } : {}),
+      ...(start.companySeats === undefined ? {} : { companySeats: start.companySeats }),
       // Une sauvegarde WASM peut être volumineuse : garder la fenêtre ouverte
       // plus longtemps que le défaut de 15 s, sans bloquer la partie au-delà.
       joinTimeoutMs: 60_000,
@@ -1428,13 +1446,34 @@ export class GameSession {
   /** Entreprise qui signe la commande : locale en solo, siège du joueur en réseau. */
   private localCompanyId(): number | null {
     const snapshot = this.game?.getLatestSnapshot();
-    const player = this.network?.localPlayer;
-    if (this.isNetwork && player !== undefined) {
-      const company = snapshot?.companies.find((item) => item.id === player);
-      if (company) return company.id;
+    const mapped = this.network ? localCompanyForStart(this.network) : undefined;
+    if (mapped !== undefined && snapshot?.companies.some((item) => item.id === mapped)) {
+      return mapped;
     }
     const company = snapshot?.companies.find((item) => item.isLocal) ?? snapshot?.companies[0];
     return company?.id ?? null;
+  }
+
+  /**
+   * Applique l'entreprise du joueur local au moteur (#99). Appelé après la
+   * génération ou le chargement de la sauvegarde de l'hôte ; l'entreprise
+   * existe forcément (sièges réservés créés au démarrage).
+   */
+  private applyLocalCompany(engine: EngineDriver): void {
+    if (!this.network) return;
+    const company = localCompanyForStart(this.network);
+    if (company === undefined) return;
+    if (typeof engine.setLocalCompany !== 'function') {
+      this.recordEngineWarning(
+        'Entreprise par joueur indisponible : ce moteur ne l’expose pas (#99).',
+      );
+      return;
+    }
+    if (!engine.setLocalCompany(company)) {
+      this.recordEngineWarning(
+        `Entreprise locale ${company} indisponible : repli sur l’entreprise par défaut.`,
+      );
+    }
   }
 
   /**
@@ -1621,10 +1660,22 @@ export class GameSession {
     this.hud?.notify('info', `Qualité de rendu : ${this.quality}.`);
   }
 
+  /** Entreprise locale du snapshot (mapping réseau prioritaire, sinon isLocal). */
+  private localCompanySnapshot(): CompanySnapshot | null {
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    if (!snapshot) return null;
+    const id = this.localCompanyId();
+    return (
+      (id === null ? undefined : snapshot.companies.find((item) => item.id === id)) ??
+      snapshot.companies.find((item) => item.isLocal) ??
+      snapshot.companies[0] ??
+      null
+    );
+  }
+
   getOverview(): SessionOverview {
     const snapshot = this.game?.getLatestSnapshot() ?? null;
-    const company =
-      snapshot?.companies.find((item) => item.isLocal) ?? snapshot?.companies[0] ?? null;
+    const company = this.localCompanySnapshot();
     return {
       company: company?.name ?? '—',
       date: formatGameDate(snapshot?.economy),
@@ -1648,8 +1699,7 @@ export class GameSession {
 
   getGameOverSummary(title = 'Fin de partie', reason = 'La partie est terminée.'): GameOverSummary {
     const snapshot = this.game?.getLatestSnapshot() ?? null;
-    const company =
-      snapshot?.companies.find((item) => item.isLocal) ?? snapshot?.companies[0] ?? null;
+    const company = this.localCompanySnapshot();
     return {
       title,
       reason,
@@ -1672,7 +1722,10 @@ export class GameSession {
 
   private monitorGameOver(snapshot: WorldSnapshot): void {
     if (this.gameOverShown) return;
-    const local = snapshot.companies.find((company) => company.isLocal);
+    const localId = this.localCompanyId();
+    const local =
+      (localId === null ? undefined : snapshot.companies.find((item) => item.id === localId)) ??
+      snapshot.companies.find((company) => company.isLocal);
     if (local?.bankrupt) {
       this.endGame('Votre entreprise est en faillite.', 'Faillite');
     }

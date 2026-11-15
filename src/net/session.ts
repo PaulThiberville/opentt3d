@@ -132,12 +132,25 @@ export interface NetSessionOptions {
   autoAdmit?: boolean;
   /** Lifetime of one join window and of its save transfer, in milliseconds. */
   joinTimeoutMs?: number;
+  /**
+   * Mapping joueur → entreprise OpenTTD (#99), figé par l'hôte dans le salon.
+   * Quand il est fourni, l'hôte refuse toute commande build/vehicle qui cible
+   * une autre entreprise que celle du joueur émetteur.
+   */
+  companies?: Record<number, number>;
+  /**
+   * Nombre d'entreprises humaines créées (#99), réserves pour retardataires
+   * incluses. Un nouveau venu reçoit la première entreprise libre.
+   */
+  companySeats?: number;
 }
 
 /** Host-side result of `admitPeer`: the seat reserved for the newcomer. */
 export interface JoinAdmission {
   peerId: string;
   player: number;
+  /** Entreprise attribuée au nouveau venu (#99), si le mapping est actif. */
+  company?: number;
 }
 
 /** Client-side progress of the late-join handshake. */
@@ -160,6 +173,8 @@ export interface JoinEvent {
   /** Host side: the peer that joined or was refused. Client side: the host. */
   peerId?: string;
   player?: number;
+  /** Entreprise attribuée par l'hôte (#99). */
+  company?: number;
   tick?: number;
   reason?: JoinRejectReason;
   message?: string;
@@ -192,6 +207,8 @@ export interface NetStats {
   desyncs: number;
   isHost: boolean;
   lost: boolean;
+  /** Commandes refusées par la validation d'entreprise de l'hôte (#99). */
+  rejected: number;
 }
 
 export interface ChatEvent {
@@ -201,6 +218,8 @@ export interface ChatEvent {
 
 export interface NetSession {
   readonly localPlayer: number;
+  /** Entreprise contrôlée par ce pair (#99), -1 sans mapping. */
+  readonly localCompany: number;
   issue(cmd: EngineCommand): void;
   update(nowMs: number): NetUpdate;
   alpha(nowMs: number): number;
@@ -266,6 +285,8 @@ interface SaveAssembly {
 interface PendingJoin {
   peerId: string;
   player: number;
+  /** Entreprise attribuée au retardataire (#99), si le mapping est actif. */
+  company?: number;
   /** Set once the save has been serialised and sent. */
   sent: boolean;
   tick: number;
@@ -283,6 +304,8 @@ interface JoinAssembly {
   epoch: number;
   tick: number;
   player: number;
+  /** Entreprise attribuée par l'hôte (#99). */
+  company?: number;
   id: string;
   hash: string;
   total: number;
@@ -395,6 +418,51 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   const { players, peerToPlayer } = normalizePeers(options.peers, transport.selfId, localPlayer);
   selfMapped = peerToPlayer.get(transport.selfId) === localPlayer;
+
+  // Mapping joueur → entreprise (#99). Il vient du `StartInfo` figé ; l'hôte
+  // refuse une commande qui cible une autre entreprise que celle du joueur.
+  const companyByPlayer = new Map<number, number>();
+  for (const [key, value] of Object.entries(options.companies ?? {})) {
+    const player = Number(key);
+    if (isPlayerId(player) && Number.isInteger(value) && value >= 0 && value < 15) {
+      companyByPlayer.set(player, value);
+    }
+  }
+  const companySeats = Math.max(0, Math.min(15, Math.trunc(options.companySeats ?? 0)));
+  let localCompany = companyByPlayer.get(localPlayer) ?? -1;
+  let rejectedCommands = 0;
+
+  /** Première entreprise humaine libre, ou null si tous les sièges sont pris. */
+  function allocateCompany(): number | null {
+    if (companySeats <= 0) return null;
+    const used = new Set(companyByPlayer.values());
+    for (let company = 0; company < companySeats; company += 1) {
+      if (!used.has(company)) return company;
+    }
+    return null;
+  }
+
+  /** Entreprise attendue pour un joueur (undefined si le mapping est absent). */
+  function expectedCompany(player: number): number | undefined {
+    return companyByPlayer.get(player);
+  }
+
+  function commandCompany(cmd: EngineCommand): number | undefined {
+    return cmd.type === 'build' || cmd.type === 'vehicle' ? cmd.company : undefined;
+  }
+
+  /**
+   * Valide l'entreprise d'une commande. Une commande qui cible l'entreprise
+   * d'un autre joueur est rejetée (compteur `rejected`) sans interrompre le
+   * lockstep. Les moteurs antérieurs sans mapping restent permissifs.
+   */
+  function validateCompany(player: number, cmd: EngineCommand): boolean {
+    const expected = expectedCompany(player);
+    const actual = commandCompany(cmd);
+    if (expected === undefined || actual === undefined || expected === actual) return true;
+    rejectedCommands += 1;
+    return false;
+  }
 
   /** Host: reserved seats / join windows waiting for a `join-request`. */
   const joinWindows = new Map<string, PendingJoin>();
@@ -885,11 +953,15 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     if (activeSeatCount() >= maxPlayers) return null;
     const player = freePlayerIndex(requested);
     if (player === null) return null;
+    const company = allocateCompany();
+    if (companySeats > 0 && company === null) return null; // aucune entreprise libre
     players.set(player, { index: player, peerId, left: false, connected: false });
     peerToPlayer.set(peerId, player);
+    if (company !== null) companyByPlayer.set(player, company);
     const pending: PendingJoin = {
       peerId,
       player,
+      ...(company === null ? {} : { company }),
       sent: false,
       tick: 0,
       hash: '',
@@ -917,6 +989,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
         id: pending.id,
         hash: pending.hash,
         ...(engineId ? { engine: engineId } : {}),
+        ...(pending.company === undefined ? {} : { company: pending.company }),
       },
       pending.peerId,
     );
@@ -1165,7 +1238,13 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     clientHashes.delete(from);
     // The new peer must not receive turns before N: the save covers state N.
     sendTurnsTo(from, pending.tick);
-    emitJoin({ ok: true, peerId: from, player: pending.player, tick: pending.tick });
+    emitJoin({
+      ok: true,
+      peerId: from,
+      player: pending.player,
+      ...(pending.company === undefined ? {} : { company: pending.company }),
+      tick: pending.tick,
+    });
   }
 
   // ------------------------------------------------------------ client join
@@ -1221,6 +1300,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     players.set(index, { index, peerId: transport.selfId, left: false, connected: true });
     peerToPlayer.set(transport.selfId, index);
     localPlayer = index;
+    localCompany = companyByPlayer.get(index) ?? localCompany;
     selfMapped = true;
     return true;
   }
@@ -1243,6 +1323,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       epoch: message.epoch,
       tick: message.tick,
       player: message.player,
+      ...(message.company === undefined ? {} : { company: message.company }),
       id: message.id,
       hash: message.hash,
       total: message.total,
@@ -1284,6 +1365,10 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       failJoin('invalid-save', 'La place attribuée est déjà occupée.', true);
       return;
     }
+    if (assembly.company !== undefined) {
+      localCompany = assembly.company;
+      companyByPlayer.set(localPlayer, assembly.company);
+    }
 
     if (assembly.epoch > epoch) epoch = assembly.epoch;
     turns.clear();
@@ -1303,7 +1388,13 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     sendJoinReady(true, loadedTick, hash);
     // Commands issued while waiting for the save are still relevant.
     resendPending();
-    emitJoin({ ok: true, peerId: joinHostId, player: localPlayer, tick: loadedTick });
+    emitJoin({
+      ok: true,
+      peerId: joinHostId,
+      player: localPlayer,
+      ...(localCompany < 0 ? {} : { company: localCompany }),
+      tick: loadedTick,
+    });
   }
 
   function handleJoinChunk(message: JoinChunkMessage, from: string): void {
@@ -1375,13 +1466,30 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     const existing = playerOf(peerId);
     if (existing) {
       if (existing.left) return null;
-      return { peerId, player: existing.index };
+      const company = companyByPlayer.get(existing.index);
+      return {
+        peerId,
+        player: existing.index,
+        ...(company === undefined ? {} : { company }),
+      };
     }
     const pending = joinWindows.get(peerId) ?? joinTransfers.get(peerId);
-    if (pending) return { peerId, player: pending.player };
+    if (pending) {
+      return {
+        peerId,
+        player: pending.player,
+        ...(pending.company === undefined ? {} : { company: pending.company }),
+      };
+    }
     if (!hostStarted) return null;
     const opened = openJoinWindow(peerId, playerIndex);
-    return opened ? { peerId, player: opened.player } : null;
+    return opened
+      ? {
+          peerId,
+          player: opened.player,
+          ...(opened.company === undefined ? {} : { company: opened.company }),
+        }
+      : null;
   }
 
   function closeJoinWindow(peerId?: string): void {
@@ -1436,6 +1544,12 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       throw new TypeError('Commande invalide : elle doit respecter le contrat moteur.');
     }
     if (players.get(localPlayer)?.left) return;
+    if (!validateCompany(localPlayer, cmd)) {
+      console.warn(
+        `[net:session] commande refusée : entreprise ${commandCompany(cmd)} au lieu de ${expectedCompany(localPlayer)} pour le joueur ${localPlayer}.`,
+      );
+      return;
+    }
     const s = ++nextCommandSeq;
     if (amHost) {
       const queued = hostQueue.filter((item) => item.p === localPlayer).length;
@@ -1466,6 +1580,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       const last = Math.max(queuedSeq.get(player.index) ?? -1, seenSeq.get(player.index) ?? -1);
       if (entry.s <= last) continue;
       if (queued >= MAX_QUEUE_PER_PLAYER) break;
+      if (!validateCompany(player.index, entry.c)) continue;
       hostQueue.push({ p: player.index, s: entry.s, cmd: entry.c });
       queuedSeq.set(player.index, entry.s);
       queued++;
@@ -2002,6 +2117,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       desyncs,
       isHost: amHost,
       lost,
+      rejected: rejectedCommands,
     };
   }
 
@@ -2105,6 +2221,9 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   return {
     get localPlayer() {
       return localPlayer;
+    },
+    get localCompany() {
+      return localCompany;
     },
     issue,
     update,

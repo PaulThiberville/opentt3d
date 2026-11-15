@@ -35,6 +35,7 @@ import {
   MAX_LOBBY_NAME,
   MAX_LOBBY_PLAYERS,
   MAX_SLOT_NAME,
+  MAX_START_COMPANIES,
   MIN_LOBBY_PLAYERS,
   freeColour,
   isAIDifficulty,
@@ -237,7 +238,7 @@ function cloneSettings(settings: LobbySettings): LobbySettings {
   return { ...settings };
 }
 
-function toStartPlayer(slot: Slot): StartPlayer {
+function toStartPlayer(slot: Slot, company: number | undefined): StartPlayer {
   return {
     player: slot.player,
     id: slot.id,
@@ -246,7 +247,43 @@ function toStartPlayer(slot: Slot): StartPlayer {
     companyName: slot.companyName,
     ai: slot.ai,
     isHost: slot.isHost,
+    ...(company === undefined ? {} : { company }),
   };
+}
+
+/**
+ * Construit le mapping joueur → entreprise OpenTTD (#99).
+ *
+ * Les humains reçoivent les premiers ids (0..H-1). Les IA suivent APRÈS les
+ * sièges humains réservés (`companySeats`), car le pont crée d'abord toutes
+ * les entreprises humaines puis les IA : les ids restent ainsi identiques sur
+ * tous les pairs pour une même configuration de salon.
+ */
+export function assignLobbyCompanies(
+  slots: readonly Slot[],
+  maxPlayers: number,
+  aiCount: number,
+): { seats: number; players: StartPlayer[] } {
+  const sorted = [...slots].sort((a, b) => a.player - b.player);
+  const humans = sorted.filter((slot) => slot.ai === null);
+  // Un siège humain peut rester libre pour un retardataire : le pont crée son
+  // entreprise dès le départ, avec un profil de réserve déterministe.
+  const seats = Math.min(
+    MAX_START_COMPANIES - Math.min(aiCount, MAX_START_COMPANIES - 1),
+    Math.max(humans.length, maxPlayers - aiCount),
+  );
+  const companyByPlayer = new Map<number, number>();
+  humans.forEach((slot, index) => companyByPlayer.set(slot.player, index));
+  let aiIndex = 0;
+  const players = sorted.map((slot) => {
+    if (slot.ai !== null) {
+      const company = seats + aiIndex;
+      aiIndex += 1;
+      return toStartPlayer(slot, company);
+    }
+    return toStartPlayer(slot, companyByPlayer.get(slot.player));
+  });
+  return { seats, players };
 }
 
 export function createLobby(options: CreateLobbyOptions): Lobby {
@@ -611,11 +648,14 @@ export function createLobby(options: CreateLobbyOptions): Lobby {
       engineBuild: data.engineBuild,
       players: data.players.map((player) => ({ ...player })),
       peers: { ...data.peers },
+      ...(data.companySeats === undefined ? {} : { companySeats: data.companySeats }),
     };
+    const localCompany = payload.players.find((player) => player.player === localPlayer)?.company;
     emitChange();
     emitStart({
       ...payload,
       localPlayer,
+      ...(localCompany === undefined ? {} : { localCompany }),
       isHost: false,
       transport,
     });
@@ -981,7 +1021,9 @@ export function createLobby(options: CreateLobbyOptions): Lobby {
     }
 
     const seed = isFiniteNumber(options.seed) ? options.seed >>> 0 : randomSeed();
-    const players = [...state.slots].sort((a, b) => a.player - b.player).map(toStartPlayer);
+    const aiCount = state.slots.filter((slot) => slot.ai !== null).length;
+    const assignment = assignLobbyCompanies(state.slots, state.maxPlayers, aiCount);
+    const players = assignment.players;
     const peers: StartPeers = {};
     for (const slot of state.slots) {
       if (slot.ai === null) peers[slot.player] = slot.id;
@@ -994,14 +1036,23 @@ export function createLobby(options: CreateLobbyOptions): Lobby {
       engineBuild: engineBuildId(state.settings.engine),
       players,
       peers,
+      companySeats: assignment.seats,
     };
     send(LOBBY_CHANNELS.start, { k: 'start', ...payload });
     publishDirectory();
     broadcastState();
     emitChange();
 
-    const localPlayer = hostSlot()?.player ?? 0;
-    emitStart({ ...payload, localPlayer, isHost: true, transport });
+    const hostSeat = hostSlot();
+    const localPlayer = hostSeat?.player ?? 0;
+    const localCompany = players.find((player) => player.player === localPlayer)?.company;
+    emitStart({
+      ...payload,
+      localPlayer,
+      ...(localCompany === undefined ? {} : { localCompany }),
+      isHost: true,
+      transport,
+    });
   }
 
   function sendChat(text: string): void {

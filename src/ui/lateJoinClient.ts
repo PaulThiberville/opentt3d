@@ -254,7 +254,10 @@ export class LateJoinClient {
     if (localPlayer < 0) {
       throw new LateJoinError('Aucune place de joueur libre dans cette partie.', 'full');
     }
-    const start = createLateJoinStartInfo(payload, this.options.transport, localPlayer);
+    const companies: Record<number, number> = {};
+    for (const player of payload.players) {
+      if (player.company !== undefined) companies[player.player] = player.company;
+    }
     const runner = createEngineRunner(engine);
     this.runner = runner;
     const session = createNetSession({
@@ -265,6 +268,8 @@ export class LateJoinClient {
       hostId,
       peers: payload.peers,
       engine: payload.engineBuild,
+      ...(Object.keys(companies).length > 0 ? { companies } : {}),
+      ...(payload.companySeats === undefined ? {} : { companySeats: payload.companySeats }),
       ...(this.options.playerName ? { playerName: this.options.playerName } : {}),
       joinTimeoutMs: 60_000,
     });
@@ -318,6 +323,14 @@ export class LateJoinClient {
           });
           this.finished = true;
           offJoin();
+          // L'entreprise vient de l'hôte (`join-accept`, #99) : elle fait foi
+          // sur le mapping figé du salon, qui ne connaît pas ce retardataire.
+          const start = createLateJoinStartInfo(
+            payload,
+            this.options.transport,
+            session.localPlayer,
+            session.localCompany >= 0 ? session.localCompany : undefined,
+          );
           return { start, engine, runner, session, restored: { tick, hash } };
         }
         this.setState(mapped);

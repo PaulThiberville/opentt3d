@@ -204,6 +204,11 @@ export interface JoinAcceptMessage extends MessageBase {
   /** Host state hash at `tick`, compared after the client loads the save. */
   hash: string;
   engine?: string;
+  /**
+   * Entreprise OpenTTD attribuée à ce joueur (#99). Absente sur les parties
+   * antérieures à #99 : le client retombe alors sur le mapping du `StartInfo`.
+   */
+  company?: number;
 }
 
 /** Host → client: one chunk of the save taken at `tick` (same shape as resync). */
@@ -505,7 +510,10 @@ export function isJoinAcceptMessage(value: unknown): value is JoinAcceptMessage 
     value.id.length <= 64 &&
     typeof value.hash === 'string' &&
     value.hash.length <= 1024 &&
-    (value.engine === undefined || (typeof value.engine === 'string' && value.engine.length <= 64))
+    (value.engine === undefined ||
+      (typeof value.engine === 'string' && value.engine.length <= 64)) &&
+    (value.company === undefined ||
+      (isInt(value.company) && value.company >= 0 && value.company < 15))
   );
 }
 
