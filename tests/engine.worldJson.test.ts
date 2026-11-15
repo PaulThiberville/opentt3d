@@ -329,6 +329,106 @@ describe('mapping JSON → WorldSnapshot', () => {
     expect(world.vehicles[0]?.orderKinds).toEqual(['station', 'depot']);
   });
 
+  it('mappe l’économie, l’autorité locale et les subventions (#165/#166/#167)', () => {
+    const world = parseWorldJson(
+      engineJson({
+        economy: {
+          year: 1962,
+          month: 4,
+          day: 9,
+          dayFraction: 3,
+          speed: 1,
+          paused: false,
+          inflation: 12.5,
+          difficulty: 2,
+          interestRate: 6,
+          maxLoan: 450000,
+          loanInterval: 50000,
+        },
+        companies: [
+          {
+            id: 0,
+            name: 'Transports',
+            colour: 2,
+            money: -12000,
+            loan: 180000,
+            maxLoan: 450000,
+            monthsOfBankruptcy: 3,
+            value: 800000,
+            income: 0,
+            expenses: 5000,
+            vehicles: 1,
+            stations: 1,
+            isAI: false,
+            isLocal: true,
+            bankrupt: false,
+          },
+        ],
+        towns: [
+          {
+            id: 0,
+            name: 'Valmont',
+            x: 10,
+            y: 10,
+            population: 1200,
+            growthRate: 2,
+            buildings: 40,
+            rating: 680,
+            authority: {
+              rating: 680,
+              actions: {
+                advertise: { available: true, cost: 22500 },
+                fund_roads: { available: false, cost: 56250 },
+              },
+            },
+          },
+        ],
+        industries: [
+          {
+            id: 0,
+            name: 'Centrale',
+            kind: 'power_station',
+            x: 20,
+            y: 20,
+            production: 0,
+            transported: 0,
+            serviceRate: 72,
+            accepts: ['coal'],
+            stocks: [],
+          },
+        ],
+        subsidies: [
+          {
+            id: 0,
+            cargo: 'coal',
+            from: 'Mine',
+            to: 'Centrale',
+            fromKind: 'industry',
+            toKind: 'industry',
+            remainingMonths: 9,
+            awardedTo: 1,
+          },
+        ],
+      }),
+    );
+
+    expect(world.economy.inflation).toBe(12.5);
+    expect(world.economy.difficulty).toBe(2);
+    expect(world.economy.interestRate).toBe(6);
+    expect(world.companies[0]?.maxLoan).toBe(450000);
+    expect(world.companies[0]?.monthsOfBankruptcy).toBe(3);
+    expect(world.towns[0]?.authority?.actions.advertise.available).toBe(true);
+    expect(world.towns[0]?.authority?.actions.fund_roads.available).toBe(false);
+    expect(world.towns[0]?.authority?.actions.fund_buildings).toEqual({
+      available: false,
+      cost: 0,
+    });
+    expect(world.industries[0]?.serviceRate).toBe(72);
+    expect(world.industries[0]?.accepts).toEqual(['coal']);
+    expect(world.subsidies?.[0]?.awardedTo).toBe(1);
+    expect(world.subsidies?.[0]?.fromKind).toBe('industry');
+  });
+
   it('refuse un protocole incompatible', () => {
     const json = engineJson();
     (json.meta as Record<string, unknown>).protocol = PROTOCOL_VERSION + 1;

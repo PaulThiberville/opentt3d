@@ -27,6 +27,10 @@ import {
   type MapSnapshot,
   type NewGameOptions,
   type StationSnapshot,
+  type SubsidySnapshot,
+  type TownActionKind,
+  type TownActionSnapshot,
+  type TownAuthoritySnapshot,
   type TownSnapshot,
   type VehicleKind,
   type VehicleSnapshot,
@@ -36,6 +40,12 @@ import {
 import { Prng, StateHash, fbm, valueNoise } from '../game/prng';
 import { decodeBase64, encodeBase64 } from '../game/base64';
 import { sampleHeightWorld } from '../game/mapGrid';
+import {
+  BANKRUPTCY_MONTHS,
+  DEFAULT_LOAN_INTERVAL,
+  cargoRate,
+  isPassengerCargo,
+} from '../game/economyRules';
 import {
   BUILD_TOOL_LABELS,
   directionToIndex,
@@ -84,6 +94,12 @@ interface P2 {
   y: number;
 }
 
+/** Cible d'arrêt d'un véhicule : gare, industrie ou dépôt. */
+interface MockStop {
+  kind: 'station' | 'industry' | 'depot';
+  id: number;
+}
+
 interface MockVehicle {
   id: number;
   kind: VehicleKind;
@@ -98,8 +114,8 @@ interface MockVehicle {
   /** Index du segment courant et progression 0..1 dessus. */
   segment: number;
   segmentT: number;
-  /** stationId par index de segment, -1 si le segment n'est pas une gare. */
-  segmentStations: number[];
+  /** Arrêt par index de segment, `null` si le segment n'est pas une cible. */
+  segmentStops: (MockStop | null)[];
   speed: number;
   direction: number;
   status: number;
@@ -108,8 +124,16 @@ interface MockVehicle {
   y: number;
   z: number;
   cargoType: string;
+  /** Classe de cargaison du véhicule (immuable), pour filtrer les chargements. */
+  cargoClass: string;
   cargoAmount: number;
   cargoCapacity: number;
+  /** Industrie où la cargaison a été chargée (subventions et traçabilité). */
+  cargoSource: number | null;
+  /** Distance parcourue depuis le dernier chargement, en tuiles. */
+  tripDistance: number;
+  /** Tick du dernier chargement, pour le bonus de rapidité. */
+  loadedTick: number;
   orderTargets: number[];
   /** Tournée typée (gare, industrie, dépôt) ; `orderTargets` reste la vue publique. */
   orders: VehicleOrder[];
@@ -124,15 +148,19 @@ interface MockCompany {
   colour: number;
   money: number;
   loan: number;
+  maxLoan: number;
   value: number;
   income: number;
   expenses: number;
   isAI: boolean;
   isLocal: boolean;
   bankrupt: boolean;
+  /** Mois consécutifs de trésorerie négative (0 = sain). */
+  monthsOfBankruptcy: number;
   deliveredToday: number;
   vehicleCount: number;
   stationCount: number;
+  interestPaid: number;
 }
 
 interface MockTown {
@@ -144,6 +172,8 @@ interface MockTown {
   growthRate: number;
   buildings: number;
   rating: number;
+  /** Dernier mois (année*12 + mois) où chaque action a été utilisée. */
+  actionMonths: Record<TownActionKind, number>;
 }
 
 interface MockIndustry {
@@ -154,7 +184,22 @@ interface MockIndustry {
   y: number;
   production: number;
   transported: number;
+  /** Cargaison produite (chaîne vide pour un consommateur pur). */
   cargo: string;
+  /** Cargaisons acceptées en entrée. */
+  accepts: string[];
+  /** Stock disponible à l'enlèvement. */
+  stock: number;
+}
+
+/** Offre ou subvention active du mock (#166/#167). */
+interface MockSubsidy {
+  id: number;
+  cargo: string;
+  fromIndustry: number;
+  toIndustry: number;
+  remainingMonths: number;
+  awardedTo: number | null;
 }
 
 interface MockStation {
@@ -202,6 +247,15 @@ interface MockWorld {
   speed: number;
   rngState: number;
 
+  /** Inflation cumulée en pourcentage (#165), recalculée chaque année. */
+  inflation: number;
+  /** Difficulté 0..3 (#165). */
+  difficulty: number;
+  /** Taux d'intérêt annuel des prêts en pourcentage (#165). */
+  interestRate: number;
+  /** Pas de prêt/remboursement (#165). */
+  loanInterval: number;
+
   kind: Uint8Array;
   heightMap: Uint8Array;
   owner: Uint8Array;
@@ -215,6 +269,7 @@ interface MockWorld {
   stations: MockStation[];
   depots: MockDepot[];
   vehicles: MockVehicle[];
+  subsidies: MockSubsidy[];
 
   news: MockNews[];
   newsCursor: number;
@@ -240,30 +295,97 @@ interface SerializedWorld {
   rngState: number;
   sequence: number;
   mapVersion: number;
+  /** Champs économiques ajoutés par #165 ; absents des anciennes sauvegardes. */
+  inflation?: number;
+  difficulty?: number;
+  interestRate?: number;
+  loanInterval?: number;
   kind: string;
   heightMap: string;
   owner: string;
   slope: string;
   flags: string;
   trackBits: string;
-  companies: MockCompany[];
-  towns: MockTown[];
-  industries: MockIndustry[];
+  companies: (Omit<MockCompany, 'maxLoan' | 'monthsOfBankruptcy' | 'interestPaid'> & {
+    maxLoan?: number;
+    monthsOfBankruptcy?: number;
+    interestPaid?: number;
+  })[];
+  towns: (Omit<MockTown, 'actionMonths'> & {
+    actionMonths?: Partial<Record<TownActionKind, number>>;
+  })[];
+  industries: (Omit<MockIndustry, 'stock' | 'accepts'> & {
+    stock?: number;
+    accepts?: string[];
+  })[];
   stations: MockStation[];
   /** Absent des sauvegardes mock antérieures à #90 (migration héritée). */
   depots?: MockDepot[];
-  vehicles: Omit<MockVehicle, 'pathLengths'>[];
+  vehicles: (Omit<MockVehicle, 'pathLengths' | 'segmentStops'> & {
+    segmentStops?: (MockStop | null)[];
+    /** Ancien format (#29) : arrêts de gare uniquement. */
+    segmentStations?: number[];
+  })[];
+  subsidies?: MockSubsidy[];
   news: MockNews[];
 }
 
 const TOWN_NAMES = ['Valmont', 'Riveclaire', 'Saint-Aubin', 'Bellecombe', 'Miraval', 'Peyrolles'];
-const INDUSTRY_DEFINITIONS: { kind: string; name: string; cargo: string }[] = [
-  { kind: 'coal_mine', name: 'Mine de Valmont', cargo: 'coal' },
-  { kind: 'power_station', name: 'Centrale de Riveclaire', cargo: 'coal' },
-  { kind: 'sawmill', name: 'Scierie du Lac', cargo: 'wood' },
-  { kind: 'farm', name: 'Ferme des Coteaux', cargo: 'grain' },
-  { kind: 'factory', name: 'Usine Saint-Aubin', cargo: 'goods' },
+interface IndustryDefinition {
+  kind: string;
+  name: string;
+  /** Cargaison produite, chaîne vide pour un consommateur pur. */
+  cargo: string;
+  /** Cargaisons acceptées (chaînes de production, #167). */
+  accepts: string[];
+}
+
+const INDUSTRY_DEFINITIONS: IndustryDefinition[] = [
+  { kind: 'coal_mine', name: 'Mine de Valmont', cargo: 'coal', accepts: [] },
+  { kind: 'power_station', name: 'Centrale de Riveclaire', cargo: '', accepts: ['coal'] },
+  { kind: 'sawmill', name: 'Scierie du Lac', cargo: 'wood', accepts: [] },
+  { kind: 'farm', name: 'Ferme des Coteaux', cargo: 'grain', accepts: [] },
+  {
+    kind: 'factory',
+    name: 'Usine Saint-Aubin',
+    cargo: 'goods',
+    accepts: ['grain', 'wood'],
+  },
 ];
+
+/**
+ * Préréglages de difficulté du mock (#165). Ils reprennent l'esprit des
+ * préréglages du pont : plafond de prêt, intérêt et inflation croissants.
+ */
+interface MockDifficultyPreset {
+  maxLoan: number;
+  interestRate: number;
+  inflation: number;
+  startLoan: number;
+  revenueFactor: number;
+}
+
+const MOCK_DIFFICULTIES: readonly MockDifficultyPreset[] = [
+  { maxLoan: 800_000, interestRate: 2.5, inflation: 1.5, startLoan: 400_000, revenueFactor: 1.1 },
+  { maxLoan: 600_000, interestRate: 4, inflation: 2.5, startLoan: 400_000, revenueFactor: 1 },
+  { maxLoan: 450_000, interestRate: 6, inflation: 3.5, startLoan: 300_000, revenueFactor: 0.92 },
+  { maxLoan: 350_000, interestRate: 8, inflation: 5, startLoan: 250_000, revenueFactor: 0.85 },
+];
+
+/** Coûts de base des actions municipales, avant inflation (#166). */
+const TOWN_ACTION_BASE_COST: Record<TownActionKind, number> = {
+  advertise: 20_000,
+  fund_roads: 50_000,
+  fund_buildings: 80_000,
+};
+
+/** Durée d'une offre de subvention, en mois (comme OpenTTD). */
+const SUBSIDY_OFFER_MONTHS = 12;
+
+function difficultyPreset(level: number | undefined): MockDifficultyPreset {
+  const index = Math.min(3, Math.max(0, Math.round(level ?? 1)));
+  return MOCK_DIFFICULTIES[index] ?? MOCK_DIFFICULTIES[1]!;
+}
 
 const RANDOM_NEWS = [
   'Le conseil municipal approuve un nouveau plan de zonage.',
@@ -354,22 +476,27 @@ function loopPath(tiles: P2[]): P2[] {
   return forward.concat(backward);
 }
 
-/** Marque les segments dont le nœud de départ est la tuile d'une gare. */
-function segmentsForStopsOnPath(
-  path: P2[],
-  stops: { x: number; y: number; station: number }[],
-): number[] {
-  const ids = new Array<number>(path.length).fill(-1);
+/** Point d'arrêt résolu sur le tracé d'une tournée. */
+interface StopPoint {
+  x: number;
+  y: number;
+  kind: MockStop['kind'];
+  id: number;
+}
+
+/** Marque les segments dont le nœud de départ est la tuile d'un arrêt. */
+function segmentsForStopsOnPath(path: P2[], stops: StopPoint[]): (MockStop | null)[] {
+  const result = new Array<MockStop | null>(path.length).fill(null);
   for (let i = 0; i < path.length; i += 1) {
     const point = path[i];
     if (!point) continue;
     for (const stop of stops) {
       const dx = point.x - (stop.x + 0.5);
       const dy = point.y - (stop.y + 0.5);
-      if (dx * dx + dy * dy <= 1.1) ids[i] = stop.station;
+      if (dx * dx + dy * dy <= 1.1) result[i] = { kind: stop.kind, id: stop.id };
     }
   }
-  return ids;
+  return result;
 }
 
 /**
@@ -393,14 +520,14 @@ function buildRoutePath(start: P2, targets: readonly P2[]): P2[] {
 
 interface ResolvedOrders {
   targets: P2[];
-  stops: { x: number; y: number; station: number }[];
+  stops: StopPoint[];
   error: string | null;
 }
 
-/** Résout les cibles d'une tournée en points du monde et arrêts de gare. */
+/** Résout les cibles d'une tournée en points du monde et arrêts. */
 function resolveOrders(world: MockWorld, orders: readonly VehicleOrder[]): ResolvedOrders {
   const targets: P2[] = [];
-  const stops: { x: number; y: number; station: number }[] = [];
+  const stops: StopPoint[] = [];
   for (const order of orders) {
     if (order.kind === 'station') {
       const station = world.stations.find((item) => item.id === order.target);
@@ -409,7 +536,8 @@ function resolveOrders(world: MockWorld, orders: readonly VehicleOrder[]): Resol
       stops.push({
         x: Math.floor(station.x),
         y: Math.floor(station.y),
-        station: station.id,
+        kind: 'station',
+        id: station.id,
       });
       continue;
     }
@@ -419,6 +547,12 @@ function resolveOrders(world: MockWorld, orders: readonly VehicleOrder[]): Resol
         return { targets: [], stops: [], error: `Industrie #${order.target} introuvable.` };
       }
       targets.push({ x: industry.x, y: industry.y });
+      stops.push({
+        x: Math.floor(industry.x),
+        y: Math.floor(industry.y),
+        kind: 'industry',
+        id: industry.id,
+      });
       continue;
     }
     const depot = world.depots.find((item) => item.id === order.target);
@@ -426,6 +560,12 @@ function resolveOrders(world: MockWorld, orders: readonly VehicleOrder[]): Resol
       return { targets: [], stops: [], error: `Dépôt ${order.target} introuvable ou démoli.` };
     }
     targets.push({ x: depot.x + depot.width / 2, y: depot.y + depot.height / 2 });
+    stops.push({
+      x: depot.x,
+      y: depot.y,
+      kind: 'depot',
+      id: depot.id,
+    });
   }
   return { targets, stops, error: null };
 }
@@ -446,7 +586,7 @@ function rebuildRoute(world: MockWorld, vehicle: MockVehicle): boolean {
   const path = buildRoutePath({ x: vehicle.x, y: vehicle.y }, resolved.targets);
   vehicle.path = path;
   vehicle.pathLengths = computePathLengths(path);
-  vehicle.segmentStations = segmentsForStopsOnPath(path, resolved.stops);
+  vehicle.segmentStops = segmentsForStopsOnPath(path, resolved.stops);
   vehicle.segment = 0;
   vehicle.segmentT = 0;
   vehicle.waitTicks = 0;
@@ -464,6 +604,8 @@ class WorldBuilder {
   readonly height: number;
   readonly startYear: number;
   readonly rng: Prng;
+  readonly difficulty: number;
+  readonly economy: MockDifficultyPreset;
 
   readonly kind: Uint8Array;
   readonly heightMap: Uint8Array;
@@ -477,12 +619,15 @@ class WorldBuilder {
   readonly stations: MockStation[] = [];
   readonly depots: MockDepot[] = [];
   readonly vehicles: MockVehicle[] = [];
+  readonly subsidies: MockSubsidy[] = [];
 
   constructor(options: NewGameOptions, seed: number) {
     this.seed = seed;
     this.width = clampInt(options.width ?? 192, 64, 512);
     this.height = clampInt(options.height ?? 192, 64, 512);
     this.startYear = clampInt(options.startYear ?? 1950, 1, 9999);
+    this.difficulty = Math.min(3, Math.max(0, Math.round(options.difficulty ?? 1)));
+    this.economy = difficultyPreset(this.difficulty);
     this.rng = new Prng(seed ^ 0x51ed270b);
     const size = this.width * this.height;
     this.kind = new Uint8Array(size);
@@ -503,16 +648,19 @@ class WorldBuilder {
           president: index === 0 ? 'Vous' : `Joueur ${index + 1}`,
           colour: clampInt(profile.colour, 0, 15),
           money: 2_400_000,
-          loan: 400_000,
-          value: 3_100_000,
+          loan: this.economy.startLoan,
+          maxLoan: this.economy.maxLoan,
+          value: 2_400_000 + this.economy.startLoan,
           income: 0,
           expenses: 0,
           isAI: false,
           isLocal: index === 0,
           bankrupt: false,
+          monthsOfBankruptcy: 0,
           deliveredToday: 0,
           vehicleCount: 0,
           stationCount: 0,
+          interestPaid: 0,
         });
       }
 
@@ -527,16 +675,19 @@ class WorldBuilder {
           president: aiPresidents[i] ?? `IA · Joueur ${i + 1}`,
           colour: (profiles.length + i) % 16,
           money: 1_850_000,
-          loan: 250_000,
+          loan: Math.round(this.economy.startLoan * 0.65),
+          maxLoan: Math.round(this.economy.maxLoan * 0.8),
           value: 2_300_000,
           income: 0,
           expenses: 0,
           isAI: true,
           isLocal: false,
           bankrupt: false,
+          monthsOfBankruptcy: 0,
           deliveredToday: 0,
           vehicleCount: 0,
           stationCount: 0,
+          interestPaid: 0,
         });
       }
     } else {
@@ -547,16 +698,19 @@ class WorldBuilder {
           president: 'A. Martin',
           colour: COMPANY_COLOURS[0],
           money: 2_400_000,
-          loan: 400_000,
-          value: 3_100_000,
+          loan: this.economy.startLoan,
+          maxLoan: this.economy.maxLoan,
+          value: 2_400_000 + this.economy.startLoan,
           income: 0,
           expenses: 0,
           isAI: false,
           isLocal: true,
           bankrupt: false,
+          monthsOfBankruptcy: 0,
           deliveredToday: 0,
           vehicleCount: 0,
           stationCount: 0,
+          interestPaid: 0,
         },
         {
           id: 1,
@@ -564,16 +718,19 @@ class WorldBuilder {
           president: 'IA · C. Dubois',
           colour: COMPANY_COLOURS[1],
           money: 1_850_000,
-          loan: 250_000,
+          loan: Math.round(this.economy.startLoan * 0.65),
+          maxLoan: Math.round(this.economy.maxLoan * 0.8),
           value: 2_300_000,
           income: 0,
           expenses: 0,
           isAI: true,
           isLocal: false,
           bankrupt: false,
+          monthsOfBankruptcy: 0,
           deliveredToday: 0,
           vehicleCount: 0,
           stationCount: 0,
+          interestPaid: 0,
         },
       );
     }
@@ -853,6 +1010,7 @@ class WorldBuilder {
         growthRate: 1 + this.rng.int(0, 3),
         buildings,
         rating: this.rng.int(35, 80),
+        actionMonths: { advertise: -1, fund_roads: -1, fund_buildings: -1 },
       });
     }
   }
@@ -874,15 +1032,45 @@ class WorldBuilder {
         y: Math.round(anchor.y),
       };
       this.paintArea(spot, 3, 3, K.industry, COMPANY_NONE);
+      const production = definition.cargo === '' ? 0 : this.rng.int(120, 640);
       this.industries.push({
         id: i,
         name: definition.name,
         kind: definition.kind,
         x: spot.x + 0.5,
         y: spot.y + 0.5,
-        production: this.rng.int(120, 640),
-        transported: this.rng.int(40, 300),
+        production,
+        transported: definition.cargo === '' ? 0 : this.rng.int(40, 300),
         cargo: definition.cargo,
+        accepts: [...definition.accepts],
+        stock: production === 0 ? 0 : Math.round(production * this.rng.float(0.25, 0.6)),
+      });
+    }
+    this.generateSubsidies();
+  }
+
+  /**
+   * Offres initiales de subvention : une source qui produit une cargaison et
+   * un consommateur qui l'accepte. L'attribution reste automatique, comme
+   * dans OpenTTD : le premier transporteur qui relie les deux extrémités.
+   */
+  private generateSubsidies(): void {
+    const pairs: { from: number; to: number; cargo: string }[] = [];
+    for (const source of this.industries) {
+      if (source.cargo === '') continue;
+      const destination = this.industries.find(
+        (industry) => industry.id !== source.id && industry.accepts.includes(source.cargo),
+      );
+      if (destination) pairs.push({ from: source.id, to: destination.id, cargo: source.cargo });
+    }
+    for (const pair of pairs.slice(0, 3)) {
+      this.subsidies.push({
+        id: this.subsidies.length,
+        cargo: pair.cargo,
+        fromIndustry: pair.from,
+        toIndustry: pair.to,
+        remainingMonths: SUBSIDY_OFFER_MONTHS,
+        awardedTo: null,
       });
     }
   }
@@ -969,8 +1157,8 @@ class WorldBuilder {
     count: number,
     speedRange: [number, number],
     cargo: { type: string; capacity: number },
-    orderTargets: number[],
-    segmentStations: number[],
+    orders: VehicleOrder[],
+    segmentStops: (MockStop | null)[],
   ): void {
     const lengths = computePathLengths(path);
     const total = lengths.reduce((acc, value) => acc + value, 0);
@@ -986,7 +1174,7 @@ class WorldBuilder {
         pathLengths: lengths,
         segment: 0,
         segmentT: 0,
-        segmentStations,
+        segmentStops,
         speed,
         direction: 0,
         status: 1,
@@ -995,10 +1183,14 @@ class WorldBuilder {
         y: 0,
         z: 0,
         cargoType: cargo.type,
+        cargoClass: cargo.type,
         cargoAmount: Math.round(cargo.capacity * this.rng.float(0.2, 0.8)),
         cargoCapacity: cargo.capacity,
-        orderTargets,
-        orders: orderTargets.map((target) => ({ target, kind: 'station' as const })),
+        cargoSource: null,
+        tripDistance: 0,
+        loadedTick: 0,
+        orderTargets: orders.map((order) => order.target),
+        orders: orders.map((order) => ({ ...order })),
         profitLastYear: Math.round(this.rng.float(8_000, 90_000)),
         ageDays: this.rng.int(40, 1_400),
       };
@@ -1008,11 +1200,8 @@ class WorldBuilder {
     }
   }
 
-  /** Marque les segments dont le nœud de départ est la tuile d'une gare. */
-  private segmentsForStops(
-    path: P2[],
-    stops: { x: number; y: number; station: number }[],
-  ): number[] {
+  /** Marque les segments dont le nœud de départ est un arrêt. */
+  private segmentsForStops(path: P2[], stops: StopPoint[]): (MockStop | null)[] {
     return segmentsForStopsOnPath(path, stops);
   }
 
@@ -1111,27 +1300,31 @@ class WorldBuilder {
       this.paintRoute(tiles, K.rail, 0);
       const path = loopPath(tiles);
       const stops = this.segmentsForStops(path, [
-        { x: Math.floor(trainA.x), y: Math.floor(trainA.y), station: trainA.id },
-        { x: Math.floor(trainB.x), y: Math.floor(trainB.y), station: trainB.id },
+        { x: Math.floor(trainA.x), y: Math.floor(trainA.y), kind: 'station', id: trainA.id },
+        { x: Math.floor(trainB.x), y: Math.floor(trainB.y), kind: 'station', id: trainB.id },
       ]);
+      const orders = [
+        { target: trainA.id, kind: 'station' as const },
+        { target: trainB.id, kind: 'station' as const },
+      ];
       this.addVehiclesOnLoop(
         path,
         0,
         'train',
-        5,
+        4,
         [22, 34],
         { type: 'passengers', capacity: 180 },
-        [trainA.id, trainB.id],
+        orders,
         stops,
       );
       this.addVehiclesOnLoop(
         path,
         second,
         'train',
-        5,
+        4,
         [20, 32],
         { type: 'passengers', capacity: 180 },
-        [trainA.id, trainB.id],
+        orders,
         stops,
       );
     }
@@ -1142,61 +1335,73 @@ class WorldBuilder {
       this.paintRoute(tiles, K.road, 0);
       const path = loopPath(tiles);
       const stops = this.segmentsForStops(path, [
-        { x: Math.floor(roadA.x), y: Math.floor(roadA.y), station: roadA.id },
-        { x: Math.floor(roadB.x), y: Math.floor(roadB.y), station: roadB.id },
+        { x: Math.floor(roadA.x), y: Math.floor(roadA.y), kind: 'station', id: roadA.id },
+        { x: Math.floor(roadB.x), y: Math.floor(roadB.y), kind: 'station', id: roadB.id },
       ]);
+      const orders = [
+        { target: roadA.id, kind: 'station' as const },
+        { target: roadB.id, kind: 'station' as const },
+      ];
       this.addVehiclesOnLoop(
         path,
         0,
         'road',
-        5,
+        4,
         [12, 20],
         { type: 'passengers', capacity: 42 },
-        [roadA.id, roadB.id],
+        orders,
         stops,
       );
       this.addVehiclesOnLoop(
         path,
         second,
         'road',
-        5,
+        4,
         [11, 19],
         { type: 'passengers', capacity: 40 },
-        [roadA.id, roadB.id],
+        orders,
         stops,
       );
     }
 
-    // Ligne de fret : arrêt routier → industrie.
-    const freightIndustry = this.industries[0];
-    if (roadA && freightIndustry) {
-      const tiles = traceTiles(
-        { x: roadA.x, y: roadA.y },
-        { x: freightIndustry.x, y: freightIndustry.y },
-      );
+    // Chaîne de fret : mine → centrale, puis ferme → usine (#167).
+    const freightChains: [number, number, string][] = [
+      [0, 1, 'coal'],
+      [3, 4, 'grain'],
+    ];
+    for (const [fromId, toId, cargo] of freightChains) {
+      const from = this.industries[fromId];
+      const to = this.industries[toId];
+      if (!from || !to) continue;
+      const tiles = traceTiles({ x: from.x, y: from.y }, { x: to.x, y: to.y });
       this.paintRoute(tiles, K.road, 0);
       const path = loopPath(tiles);
       const stops = this.segmentsForStops(path, [
-        { x: Math.floor(roadA.x), y: Math.floor(roadA.y), station: roadA.id },
+        { x: Math.floor(from.x), y: Math.floor(from.y), kind: 'industry', id: from.id },
+        { x: Math.floor(to.x), y: Math.floor(to.y), kind: 'industry', id: to.id },
       ]);
+      const orders = [
+        { target: from.id, kind: 'industry' as const },
+        { target: to.id, kind: 'industry' as const },
+      ];
       this.addVehiclesOnLoop(
         path,
         0,
         'road',
-        4,
+        3,
         [10, 16],
-        { type: 'coal', capacity: 30 },
-        [roadA.id],
+        { type: cargo, capacity: 30 },
+        orders,
         stops,
       );
       this.addVehiclesOnLoop(
         path,
         second,
         'road',
-        4,
+        2,
         [10, 15],
-        { type: 'goods', capacity: 26 },
-        [roadA.id],
+        { type: cargo, capacity: 26 },
+        orders,
         stops,
       );
     }
@@ -1228,8 +1433,10 @@ class WorldBuilder {
       6,
       [10, 18],
       { type: 'goods', capacity: 60 },
-      dock ? [dock.id] : [],
-      new Array<number>(shipPath.length).fill(dock ? dock.id : -1),
+      dock ? [{ target: dock.id, kind: 'station' }] : [],
+      new Array<MockStop | null>(shipPath.length).fill(
+        dock ? { kind: 'station', id: dock.id } : null,
+      ),
     );
 
     // Avions : boucle au-dessus de la ville A.
@@ -1243,7 +1450,9 @@ class WorldBuilder {
         { x: clampInt(ax - 16, 1, this.width - 2), y: clampInt(ay - 10, 1, this.height - 2) },
       ];
       const airPath = loopPath(airTiles);
-      const airStops = this.segmentsForStops(airPath, [{ x: ax, y: ay, station: airport.id }]);
+      const airStops = this.segmentsForStops(airPath, [
+        { x: ax, y: ay, kind: 'station', id: airport.id },
+      ]);
       this.addVehiclesOnLoop(
         airPath,
         0,
@@ -1251,7 +1460,7 @@ class WorldBuilder {
         6,
         [40, 60],
         { type: 'passengers', capacity: 90 },
-        [airport.id],
+        [{ target: airport.id, kind: 'station' }],
         airStops,
       );
     }
@@ -1268,9 +1477,12 @@ class WorldBuilder {
         segmentT: template.segmentT,
         path: template.path,
         pathLengths: template.pathLengths,
-        segmentStations: template.segmentStations,
+        segmentStops: template.segmentStops,
         orderTargets: [...template.orderTargets],
         orders: template.orders.map((order) => ({ ...order })),
+        cargoSource: null,
+        tripDistance: 0,
+        loadedTick: 0,
         speed: this.rng.float(10, 18),
         cargoAmount: this.rng.int(0, 20),
         ageDays: this.rng.int(5, 600),
@@ -1297,6 +1509,10 @@ class WorldBuilder {
       paused: false,
       speed: 1,
       rngState: this.rng.getState(),
+      inflation: 0,
+      difficulty: this.difficulty,
+      interestRate: this.economy.interestRate,
+      loanInterval: DEFAULT_LOAN_INTERVAL,
       kind: this.kind,
       heightMap: this.heightMap,
       owner: this.owner,
@@ -1309,6 +1525,7 @@ class WorldBuilder {
       stations: this.stations,
       depots: this.depots,
       vehicles: this.vehicles,
+      subsidies: this.subsidies,
       news: [
         {
           tick: 0,
@@ -1615,7 +1832,7 @@ function completeBuild(
   cost: number,
   message: string,
 ): void {
-  company.money -= cost;
+  company.money -= Math.round(cost * priceFactor(world));
   world.mapDirty = true;
   world.mapVersion += 1;
   addNews(world, 'info', message);
@@ -1830,7 +2047,7 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     world.flags[tile.index] = 0;
   }
 
-  company.money -= plan.cost;
+  company.money -= Math.round(plan.cost * priceFactor(world));
   world.mapDirty = true;
   world.mapVersion += 1;
 
@@ -1878,11 +2095,11 @@ function syncVehicleCounts(world: MockWorld): void {
   }
 }
 
-/** Valeur de reprise d'un véhicule : moitié du prix catalogue. */
-function vehicleRefund(vehicle: MockVehicle): number {
+/** Valeur de reprise d'un véhicule : moitié du prix catalogue indexé. */
+function vehicleRefund(world: MockWorld, vehicle: MockVehicle): number {
   const model = vehicleModel(vehicle.model);
-  if (model) return Math.round(model.cost * 0.5);
-  return Math.round(Math.max(4_000, vehicle.cargoCapacity * 150));
+  if (model) return Math.round(model.cost * 0.5 * priceFactor(world));
+  return Math.round(Math.max(4_000, vehicle.cargoCapacity * 150) * priceFactor(world));
 }
 
 function findVehicle(world: MockWorld, id: number | undefined): MockVehicle | null {
@@ -1937,11 +2154,12 @@ function buyVehicle(
     addNews(world, 'error', 'Achat refusé : ce dépôt appartient à une autre entreprise.');
     return;
   }
-  if (company.money < model.cost) {
+  const cost = Math.round(model.cost * priceFactor(world));
+  if (company.money < cost) {
     addNews(
       world,
       'error',
-      `Trésorerie insuffisante : ${Math.round(model.cost)} £ requis pour ${model.name}.`,
+      `Trésorerie insuffisante : ${Math.round(cost)} £ requis pour ${model.name}.`,
     );
     return;
   }
@@ -1957,7 +2175,7 @@ function buyVehicle(
     pathLengths: [0],
     segment: 0,
     segmentT: 0,
-    segmentStations: [-1],
+    segmentStops: [null],
     speed: model.speed,
     direction: 0,
     status: 3,
@@ -1966,21 +2184,25 @@ function buyVehicle(
     y: centre.y,
     z: 0,
     cargoType: model.cargo,
+    cargoClass: model.cargo,
     cargoAmount: 0,
     cargoCapacity: model.capacity,
+    cargoSource: null,
+    tripDistance: 0,
+    loadedTick: 0,
     orderTargets: [],
     orders: [],
     profitLastYear: 0,
     ageDays: 0,
   };
   world.vehicles.push(vehicle);
-  company.money -= model.cost;
+  company.money -= cost;
   syncVehicleCounts(world);
   updateVehiclesTransforms(world);
   addNews(
     world,
     'info',
-    `${model.name} acheté (#${vehicle.id}) pour ${Math.round(model.cost)} £ dans le dépôt ${depot.id} (${depot.x}, ${depot.y}).`,
+    `${model.name} acheté (#${vehicle.id}) pour ${Math.round(cost)} £ dans le dépôt ${depot.id} (${depot.x}, ${depot.y}).`,
   );
 }
 
@@ -1998,7 +2220,7 @@ function sellVehicle(
     addNews(world, 'error', 'Vente refusée : ce véhicule appartient à une autre entreprise.');
     return;
   }
-  const refund = vehicleRefund(vehicle);
+  const refund = vehicleRefund(world, vehicle);
   world.vehicles = world.vehicles.filter((item) => item.id !== vehicle.id);
   company.money += refund;
   syncVehicleCounts(world);
@@ -2137,6 +2359,148 @@ function applyVehicle(
 }
 
 // ---------------------------------------------------------------------------
+// Finance et autorité locale (#165/#166)
+// ---------------------------------------------------------------------------
+
+/** Index de mois absolu, pour les actions limitées à une par mois. */
+function monthIndex(world: MockWorld): number {
+  return world.year * MONTHS_PER_YEAR + world.month;
+}
+
+function townActionCostOf(world: MockWorld, action: TownActionKind): number {
+  return Math.round(TOWN_ACTION_BASE_COST[action] * priceFactor(world));
+}
+
+function townActionAvailable(world: MockWorld, town: MockTown, action: TownActionKind): boolean {
+  return town.actionMonths[action] !== monthIndex(world);
+}
+
+function applyFinance(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'finance' }>,
+): void {
+  const company = world.companies[command.company];
+  if (!company) {
+    addNews(world, 'error', `Finance : entreprise #${command.company} inconnue.`);
+    return;
+  }
+  if (company.bankrupt) {
+    addNews(world, 'error', 'Finance : votre entreprise est en faillite.');
+    return;
+  }
+  const interval = world.loanInterval > 0 ? world.loanInterval : DEFAULT_LOAN_INTERVAL;
+  const requested =
+    typeof command.amount === 'number' && Number.isFinite(command.amount) && command.amount > 0
+      ? Math.round(command.amount)
+      : interval;
+
+  if (command.action === 'increase_loan') {
+    const room = Math.max(0, company.maxLoan - company.loan);
+    if (room <= 0) {
+      addNews(world, 'error', 'Emprunt refusé : plafond de prêt atteint.');
+      return;
+    }
+    const stepped = Math.floor(Math.min(requested, room) / interval) * interval;
+    const amount = stepped > 0 ? stepped : Math.min(requested, room);
+    company.loan += amount;
+    company.money += amount;
+    addNews(
+      world,
+      'info',
+      `Prêt augmenté de ${Math.round(amount)} £ (dette ${Math.round(company.loan)} £ / ${Math.round(company.maxLoan)} £).`,
+    );
+    addEvent(world, {
+      type: 'loan_changed',
+      company: company.id,
+      loan: company.loan,
+      tick: world.tick,
+    });
+    return;
+  }
+
+  if (company.loan <= 0) {
+    addNews(world, 'error', 'Remboursement refusé : aucun prêt en cours.');
+    return;
+  }
+  if (company.money <= 0) {
+    addNews(world, 'error', 'Remboursement refusé : trésorerie insuffisante.');
+    return;
+  }
+  const repayable = Math.min(requested, company.loan, company.money);
+  const stepped = Math.floor(repayable / interval) * interval;
+  const amount = stepped > 0 ? stepped : Math.min(repayable, company.loan);
+  company.loan -= amount;
+  company.money -= amount;
+  addNews(
+    world,
+    'info',
+    `Prêt remboursé de ${Math.round(amount)} £ (dette restante ${Math.round(company.loan)} £).`,
+  );
+  addEvent(world, {
+    type: 'loan_changed',
+    company: company.id,
+    loan: company.loan,
+    tick: world.tick,
+  });
+}
+
+function applyTownAction(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'town_action' }>,
+): void {
+  const company = world.companies[command.company];
+  if (!company) {
+    addNews(world, 'error', `Autorité locale : entreprise #${command.company} inconnue.`);
+    return;
+  }
+  if (company.bankrupt) {
+    addNews(world, 'error', 'Autorité locale : votre entreprise est en faillite.');
+    return;
+  }
+  const town = world.towns.find((item) => item.id === command.town);
+  if (!town) {
+    addNews(world, 'error', `Autorité locale : ville #${command.town} inconnue.`);
+    return;
+  }
+  if (!townActionAvailable(world, town, command.action)) {
+    addNews(world, 'error', `${town.name} : cette action a déjà été financée ce mois-ci.`);
+    return;
+  }
+  const cost = townActionCostOf(world, command.action);
+  if (company.money < cost) {
+    addNews(world, 'error', `Autorité locale : ${Math.round(cost)} £ requis pour cette action.`);
+    return;
+  }
+  company.money -= cost;
+  town.actionMonths[command.action] = monthIndex(world);
+  let message = '';
+  switch (command.action) {
+    case 'advertise':
+      town.rating = Math.min(100, town.rating + 10);
+      message = `Campagne de publicité financée à ${town.name} : note ${Math.round(town.rating)} / 100.`;
+      break;
+    case 'fund_roads':
+      town.rating = Math.min(100, town.rating + 6);
+      town.growthRate = Math.min(8, town.growthRate + 1);
+      message = `Routes financées à ${town.name} : croissance et note en hausse.`;
+      break;
+    case 'fund_buildings':
+      town.rating = Math.min(100, town.rating + 8);
+      town.population += 60;
+      town.buildings += 1;
+      message = `Bâtiments financés à ${town.name} : la ville s’agrandit.`;
+      break;
+  }
+  addNews(world, 'info', message);
+  addEvent(world, {
+    type: 'town_action',
+    town: town.id,
+    action: command.action,
+    tick: world.tick,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Simulation
 // ---------------------------------------------------------------------------
 
@@ -2158,51 +2522,166 @@ function addNews(world: MockWorld, kind: MockNews['kind'], text: string): void {
   }
 }
 
-function vehicleArrive(world: MockWorld, vehicle: MockVehicle, stationId: number): void {
-  const station = world.stations[stationId];
-  if (!station) return;
-  const company = world.companies[vehicle.company];
-  if (vehicle.cargoAmount > 0) {
-    const existing = station.waiting.find((entry) => entry.cargo === vehicle.cargoType);
-    if (existing) existing.amount += vehicle.cargoAmount;
-    else station.waiting.push({ cargo: vehicle.cargoType, amount: vehicle.cargoAmount });
-    const revenue = Math.round(vehicle.cargoAmount * 46);
-    if (company) {
-      company.deliveredToday += revenue;
-      company.money += revenue;
+/** Facteur de prix appliqué aux coûts et aux recettes (#165). */
+function priceFactor(world: MockWorld): number {
+  return 1 + Math.max(0, world.inflation) / 100;
+}
+
+/** Le véhicule peut-il charger cette cargaison ? */
+function canCarry(vehicle: MockVehicle, cargo: string): boolean {
+  if (isPassengerCargo(vehicle.cargoClass)) return isPassengerCargo(cargo);
+  return !isPassengerCargo(cargo);
+}
+
+/** Subvention correspondant à une livraison source → destination. */
+function matchingSubsidy(
+  world: MockWorld,
+  cargo: string,
+  fromIndustry: number | null,
+  toIndustry: number,
+): MockSubsidy | null {
+  if (fromIndustry === null) return null;
+  return (
+    world.subsidies.find(
+      (subsidy) =>
+        subsidy.cargo === cargo &&
+        subsidy.fromIndustry === fromIndustry &&
+        subsidy.toIndustry === toIndustry,
+    ) ?? null
+  );
+}
+
+function awardSubsidy(world: MockWorld, subsidy: MockSubsidy, companyId: number): void {
+  if (subsidy.awardedTo !== null) return;
+  subsidy.awardedTo = companyId;
+  const company = world.companies[companyId];
+  addNews(
+    world,
+    'company',
+    `${company?.name ?? `Entreprise #${companyId}`} remporte la subvention ${subsidy.cargo}.`,
+  );
+  addEvent(world, {
+    type: 'subsidy_awarded',
+    subsidy: subsidy.id,
+    company: companyId,
+    tick: world.tick,
+  });
+}
+
+/**
+ * Revenu d'une livraison : tarif de cargaison, distance parcourue, rapidité,
+ * inflation et bonus de subvention. Le calcul est entièrement déterministe.
+ */
+function deliveryRevenue(
+  world: MockWorld,
+  vehicle: MockVehicle,
+  amount: number,
+  toIndustry: number | null,
+): number {
+  if (amount <= 0) return 0;
+  const distance = Math.max(1, vehicle.tripDistance);
+  const elapsedDays = Math.max(0, (world.tick - vehicle.loadedTick) / TICKS_PER_DAY);
+  const distanceFactor = 0.6 + Math.min(2.4, distance / 45);
+  const speedFactor = 0.85 + Math.min(0.4, vehicle.speed / 150);
+  const timeFactor = 1.2 - Math.min(0.4, elapsedDays / 120);
+  let revenue = amount * cargoRate(vehicle.cargoType) * distanceFactor * speedFactor * timeFactor;
+  if (toIndustry !== null) {
+    const subsidy = matchingSubsidy(world, vehicle.cargoType, vehicle.cargoSource, toIndustry);
+    if (subsidy) {
+      awardSubsidy(world, subsidy, vehicle.company);
+      if (subsidy.awardedTo === vehicle.company) revenue *= 1.8;
     }
-    vehicle.profitLastYear += revenue;
-    vehicle.cargoAmount = 0;
+  }
+  return Math.max(1, Math.round(revenue * priceFactor(world)));
+}
+
+function creditCompany(world: MockWorld, vehicle: MockVehicle, revenue: number): void {
+  if (revenue <= 0) return;
+  const company = world.companies[vehicle.company];
+  if (company) {
+    company.deliveredToday += revenue;
+    company.money += revenue;
+  }
+  vehicle.profitLastYear += revenue;
+}
+
+function vehicleArrive(world: MockWorld, vehicle: MockVehicle, stop: MockStop): void {
+  if (stop.kind === 'station') {
+    const station = world.stations.find((item) => item.id === stop.id);
+    if (station && vehicle.cargoAmount > 0) {
+      const existing = station.waiting.find((entry) => entry.cargo === vehicle.cargoType);
+      if (existing) existing.amount += vehicle.cargoAmount;
+      else station.waiting.push({ cargo: vehicle.cargoType, amount: vehicle.cargoAmount });
+      creditCompany(world, vehicle, deliveryRevenue(world, vehicle, vehicle.cargoAmount, null));
+      vehicle.cargoAmount = 0;
+      vehicle.cargoSource = null;
+      vehicle.tripDistance = 0;
+    }
+  } else if (stop.kind === 'industry') {
+    const industry = world.industries.find((item) => item.id === stop.id);
+    if (industry && vehicle.cargoAmount > 0 && industry.accepts.includes(vehicle.cargoType)) {
+      const delivered = vehicle.cargoAmount;
+      industry.transported += delivered;
+      creditCompany(world, vehicle, deliveryRevenue(world, vehicle, delivered, industry.id));
+      vehicle.cargoAmount = 0;
+      vehicle.cargoSource = null;
+      vehicle.tripDistance = 0;
+    }
   }
   vehicle.waitTicks = 14 + ((vehicle.id * 7) % 22);
   vehicle.status = 2;
   addEvent(world, {
     type: 'vehicle_arrived',
     vehicle: vehicle.id,
-    station: stationId,
+    station: stop.id,
     tick: world.tick,
   });
 }
 
-function vehicleDepart(world: MockWorld, vehicle: MockVehicle, stationId: number): void {
-  const station = world.stations[stationId];
-  if (station) {
-    const entry = station.waiting.find((item) => item.amount > 0) ?? station.waiting[0];
-    if (entry) {
-      const load = Math.min(vehicle.cargoCapacity - vehicle.cargoAmount, entry.amount);
+function vehicleDepart(world: MockWorld, vehicle: MockVehicle, stop: MockStop): void {
+  if (stop.kind === 'station') {
+    const station = world.stations.find((item) => item.id === stop.id);
+    if (station && vehicle.cargoAmount < vehicle.cargoCapacity) {
+      const entry =
+        station.waiting.find((item) => item.amount > 0 && canCarry(vehicle, item.cargo)) ?? null;
+      if (entry) {
+        const load = Math.min(vehicle.cargoCapacity - vehicle.cargoAmount, entry.amount);
+        if (load > 0) {
+          vehicle.cargoAmount += load;
+          entry.amount -= load;
+          vehicle.cargoType = entry.cargo;
+          vehicle.cargoSource = null;
+          vehicle.tripDistance = 0;
+          vehicle.loadedTick = world.tick;
+        }
+      }
+      station.waiting = station.waiting.filter((item) => item.amount > 0);
+    }
+  } else if (stop.kind === 'industry') {
+    const industry = world.industries.find((item) => item.id === stop.id);
+    if (
+      industry &&
+      industry.cargo !== '' &&
+      industry.stock > 0 &&
+      vehicle.cargoAmount === 0 &&
+      canCarry(vehicle, industry.cargo)
+    ) {
+      const load = Math.min(vehicle.cargoCapacity, Math.floor(industry.stock));
       if (load > 0) {
-        vehicle.cargoAmount += load;
-        entry.amount -= load;
-        vehicle.cargoType = entry.cargo;
+        industry.stock -= load;
+        vehicle.cargoAmount = load;
+        vehicle.cargoType = industry.cargo;
+        vehicle.cargoSource = industry.id;
+        vehicle.tripDistance = 0;
+        vehicle.loadedTick = world.tick;
       }
     }
   }
-  if (vehicle.cargoAmount === 0) vehicle.cargoAmount = Math.round(vehicle.cargoCapacity * 0.35);
   vehicle.status = 1;
   addEvent(world, {
     type: 'vehicle_departed',
     vehicle: vehicle.id,
-    station: stationId,
+    station: stop.id,
     tick: world.tick,
   });
 }
@@ -2214,8 +2693,8 @@ function moveVehicle(world: MockWorld, vehicle: MockVehicle): void {
   if (vehicle.waitTicks > 0) {
     vehicle.waitTicks -= 1;
     if (vehicle.waitTicks === 0) {
-      const stationId = vehicle.segmentStations[vehicle.segment] ?? -1;
-      if (stationId >= 0) vehicleDepart(world, vehicle, stationId);
+      const stop = vehicle.segmentStops[vehicle.segment] ?? null;
+      if (stop) vehicleDepart(world, vehicle, stop);
       else vehicle.status = 1;
     }
     return;
@@ -2234,20 +2713,23 @@ function moveVehicle(world: MockWorld, vehicle: MockVehicle): void {
     const left = (1 - vehicle.segmentT) * length;
     if (remaining < left) {
       vehicle.segmentT += remaining / length;
+      vehicle.tripDistance += remaining;
       remaining = 0;
       continue;
     }
     remaining -= left;
+    vehicle.tripDistance += left;
     vehicle.segment = (vehicle.segment + 1) % vehicle.path.length;
     vehicle.segmentT = 0;
-    const stationId = vehicle.segmentStations[vehicle.segment] ?? -1;
-    if (stationId >= 0) {
-      vehicleArrive(world, vehicle, stationId);
+    const stop = vehicle.segmentStops[vehicle.segment] ?? null;
+    if (stop) {
+      vehicleArrive(world, vehicle, stop);
       remaining = 0;
     }
   }
 }
 
+/** Charges d'exploitation quotidiennes et résultat du jour. */
 function updateCompanyEconomy(world: MockWorld): void {
   for (const company of world.companies) {
     company.vehicleCount = world.vehicles.filter(
@@ -2257,15 +2739,105 @@ function updateCompanyEconomy(world: MockWorld): void {
       (station) => station.company === company.id,
     ).length;
     company.income = company.deliveredToday;
-    company.expenses = 240 * company.vehicleCount + 180 * company.stationCount + 1_200;
+    company.expenses = Math.round(
+      (220 * company.vehicleCount + 160 * company.stationCount + 900) * priceFactor(world),
+    );
     company.money += company.income - company.expenses;
-    if (company.money < -500_000 && !company.bankrupt) {
-      company.bankrupt = true;
-      addNews(world, 'error', `${company.name} est en faillite.`);
-      addEvent(world, { type: 'company_bankrupt', company: company.id, tick: world.tick });
-    }
     company.deliveredToday = 0;
-    company.value = company.money + company.vehicleCount * 48_000 - company.loan;
+    company.value = Math.round(
+      company.money - company.loan + company.vehicleCount * 72_000 + company.stationCount * 110_000,
+    );
+  }
+}
+
+/** Intérêts mensuels, faillite et évolution de l'inflation (#165). */
+function monthlyEconomy(world: MockWorld, rng: Prng): void {
+  const monthIndex = world.year * MONTHS_PER_YEAR + world.month;
+  for (const company of world.companies) {
+    const interest = Math.round((company.loan * world.interestRate) / 100 / MONTHS_PER_YEAR);
+    if (interest > 0) {
+      company.money -= interest;
+      company.interestPaid += interest;
+      company.expenses += interest;
+    }
+    company.maxLoan = Math.round(difficultyPreset(world.difficulty).maxLoan * priceFactor(world));
+    if (company.bankrupt) continue;
+    if (company.money < 0) {
+      company.monthsOfBankruptcy += 1;
+      if (company.monthsOfBankruptcy === 3) {
+        addNews(
+          world,
+          'warning',
+          `${company.name} : trésorerie négative depuis 3 mois. Remboursez un prêt ou réduisez les coûts.`,
+        );
+      }
+      if (company.monthsOfBankruptcy >= BANKRUPTCY_MONTHS) {
+        company.bankrupt = true;
+        addNews(world, 'error', `${company.name} est en faillite.`);
+        addEvent(world, { type: 'company_bankrupt', company: company.id, tick: world.tick });
+      }
+    } else if (company.monthsOfBankruptcy > 0) {
+      company.monthsOfBankruptcy = Math.max(0, company.monthsOfBankruptcy - 1);
+    }
+  }
+
+  // Inflation annuelle : légèrement variable autour du préréglage.
+  if (world.month === 0) {
+    const base = difficultyPreset(world.difficulty).inflation;
+    const rate = Math.max(0, base + rng.float(-0.6, 0.9));
+    world.inflation = Math.round((world.inflation + rate) * 10) / 10;
+    addNews(
+      world,
+      'info',
+      `Inflation annuelle : +${rate.toFixed(1)} % (cumul ${world.inflation.toFixed(1)} %).`,
+    );
+  }
+
+  // Subventions : compte à rebours puis renouvellement déterministe.
+  for (const subsidy of world.subsidies) subsidy.remainingMonths -= 1;
+  const expired = world.subsidies.filter((subsidy) => subsidy.remainingMonths <= 0);
+  for (const subsidy of expired) {
+    addEvent(world, { type: 'subsidy_expired', subsidy: subsidy.id, tick: world.tick });
+  }
+  world.subsidies = world.subsidies.filter((subsidy) => subsidy.remainingMonths > 0);
+  if (world.subsidies.length < 2 && monthIndex % 3 === 0) {
+    const candidates: { from: MockIndustry; to: MockIndustry }[] = [];
+    for (const from of world.industries) {
+      if (from.cargo === '') continue;
+      for (const to of world.industries) {
+        if (to.id === from.id || !to.accepts.includes(from.cargo)) continue;
+        if (
+          world.subsidies.some(
+            (subsidy) =>
+              subsidy.cargo === from.cargo &&
+              subsidy.fromIndustry === from.id &&
+              subsidy.toIndustry === to.id,
+          )
+        ) {
+          continue;
+        }
+        candidates.push({ from, to });
+      }
+    }
+    if (candidates.length > 0) {
+      const pick = candidates[rng.int(0, candidates.length - 1)];
+      if (pick) {
+        const nextId = world.subsidies.reduce((max, item) => Math.max(max, item.id + 1), 0);
+        world.subsidies.push({
+          id: nextId,
+          cargo: pick.from.cargo,
+          fromIndustry: pick.from.id,
+          toIndustry: pick.to.id,
+          remainingMonths: SUBSIDY_OFFER_MONTHS,
+          awardedTo: null,
+        });
+        addNews(
+          world,
+          'info',
+          `Nouvelle subvention : ${pick.from.cargo} de ${pick.from.name} vers ${pick.to.name}.`,
+        );
+      }
+    }
   }
 }
 
@@ -2288,8 +2860,10 @@ function addTownBuilding(world: MockWorld, rng: Prng, town: MockTown): boolean {
 
 function growTowns(world: MockWorld, rng: Prng, dayIndex: number): void {
   for (const town of world.towns) {
-    town.population += Math.max(0, Math.round(town.growthRate * rng.float(0.2, 1.8)));
-    town.rating = Math.max(0, Math.min(100, town.rating + (rng.chance(0.5) ? 1 : -1)));
+    const growth = Math.max(0, Math.round(town.growthRate * rng.float(0.2, 1.8)));
+    town.population += growth;
+    // La note dérive lentement ; les actions municipales la font remonter.
+    town.rating = Math.max(0, Math.min(100, town.rating + rng.int(-1, 1)));
     if (dayIndex % 12 === 0 && addTownBuilding(world, rng, town)) {
       town.buildings += 1;
       addEvent(world, {
@@ -2302,14 +2876,74 @@ function growTowns(world: MockWorld, rng: Prng, dayIndex: number): void {
   }
 }
 
+/** Passagers et courrier générés quotidiennement autour des villes. */
+function growStationCargo(world: MockWorld, rng: Prng): void {
+  for (const station of world.stations) {
+    if (station.kind === 'buoy' || station.kind === 'ship') continue;
+    let nearest: MockTown | null = null;
+    let best = Infinity;
+    for (const town of world.towns) {
+      const dx = town.x - station.x;
+      const dy = town.y - station.y;
+      const distance = dx * dx + dy * dy;
+      if (distance < best) {
+        best = distance;
+        nearest = town;
+      }
+    }
+    if (!nearest || best > 24 * 24) continue;
+    const passengers = Math.max(1, Math.round((nearest.population / 500) * rng.float(0.5, 1.5)));
+    const mail = rng.chance(0.5) ? Math.max(1, Math.round(passengers / 4)) : 0;
+    addWaiting(station, 'passengers', passengers);
+    if (mail > 0) addWaiting(station, 'mail', mail);
+    // Petit fret local : les camions de démonstration trouvent toujours une
+    // cargaison à proximité d'une ville, même sans industrie à proximité.
+    if (rng.chance(0.45)) {
+      addWaiting(station, 'goods', Math.max(1, Math.round(nearest.population / 1_200)));
+    }
+  }
+}
+
+function addWaiting(station: MockStation, cargo: string, amount: number): void {
+  if (amount <= 0) return;
+  const entry = station.waiting.find((item) => item.cargo === cargo);
+  if (entry) entry.amount = Math.min(2_000, entry.amount + amount);
+  else station.waiting.push({ cargo, amount: Math.min(2_000, amount) });
+}
+
+/** Production industrielle : stock quotidien et évolution mensuelle. */
 function updateIndustries(world: MockWorld, rng: Prng): void {
   for (const industry of world.industries) {
-    industry.production = Math.max(24, Math.min(960, industry.production + rng.int(-6, 7)));
-    industry.transported = Math.max(
-      0,
-      Math.min(industry.production, industry.transported + rng.int(-8, 10)),
-    );
-    if (rng.chance(0.03)) {
+    if (industry.cargo !== '') {
+      const daily = (industry.production / DAYS_PER_MONTH) * rng.float(0.6, 1.4);
+      const cap = Math.max(60, industry.production * 2);
+      industry.stock = Math.min(cap, industry.stock + daily);
+    }
+  }
+}
+
+function monthlyIndustries(world: MockWorld, rng: Prng): void {
+  for (const industry of world.industries) {
+    if (industry.cargo === '') {
+      industry.transported = Math.max(0, Math.round(industry.transported * 0.5));
+      continue;
+    }
+    const ratio = industry.production > 0 ? industry.transported / industry.production : 0;
+    if (ratio > 0.75) {
+      industry.production = Math.min(
+        960,
+        Math.round(industry.production * (1.02 + rng.float(0, 0.03))),
+      );
+    } else if (ratio < 0.2) {
+      industry.production = Math.max(
+        24,
+        Math.round(industry.production * (0.96 + rng.float(0, 0.02))),
+      );
+    } else {
+      industry.production = Math.max(24, Math.min(960, industry.production + rng.int(-4, 5)));
+    }
+    industry.transported = Math.max(0, Math.round(industry.transported * 0.5));
+    if (rng.chance(0.08)) {
       addEvent(world, {
         type: 'industry_production',
         industry: industry.id,
@@ -2325,9 +2959,17 @@ function dailyTick(world: MockWorld): void {
   const dayIndex = (world.year * MONTHS_PER_YEAR + world.month) * DAYS_PER_MONTH + world.day;
   updateCompanyEconomy(world);
   growTowns(world, rng, dayIndex);
+  growStationCargo(world, rng);
   updateIndustries(world, rng);
   for (const vehicle of world.vehicles) vehicle.ageDays += 1;
   if (rng.chance(0.16)) addNews(world, 'info', rng.pick(RANDOM_NEWS));
+  world.rngState = rng.getState();
+}
+
+function monthlyTick(world: MockWorld): void {
+  const rng = Prng.fromState(world.rngState);
+  monthlyEconomy(world, rng);
+  monthlyIndustries(world, rng);
   world.rngState = rng.getState();
 }
 
@@ -2338,15 +2980,18 @@ function advanceTick(world: MockWorld): void {
 
   if (world.tick % TICKS_PER_DAY === 0) {
     world.day += 1;
+    let newMonth = false;
     if (world.day > DAYS_PER_MONTH) {
       world.day = 1;
       world.month += 1;
+      newMonth = true;
       if (world.month >= MONTHS_PER_YEAR) {
         world.month = 0;
         world.year += 1;
       }
     }
     dailyTick(world);
+    if (newMonth) monthlyTick(world);
   }
 }
 
@@ -2368,6 +3013,10 @@ function serializeWorld(world: MockWorld): SerializedWorld {
     rngState: world.rngState,
     sequence: world.sequence,
     mapVersion: world.mapVersion,
+    inflation: world.inflation,
+    difficulty: world.difficulty,
+    interestRate: world.interestRate,
+    loanInterval: world.loanInterval,
     kind: encodeBase64(world.kind),
     heightMap: encodeBase64(world.heightMap),
     owner: encodeBase64(world.owner),
@@ -2388,7 +3037,7 @@ function serializeWorld(world: MockWorld): SerializedWorld {
       path: vehicle.path,
       segment: vehicle.segment,
       segmentT: vehicle.segmentT,
-      segmentStations: vehicle.segmentStations,
+      segmentStops: vehicle.segmentStops,
       speed: vehicle.speed,
       direction: vehicle.direction,
       status: vehicle.status,
@@ -2397,13 +3046,18 @@ function serializeWorld(world: MockWorld): SerializedWorld {
       y: vehicle.y,
       z: vehicle.z,
       cargoType: vehicle.cargoType,
+      cargoClass: vehicle.cargoClass,
       cargoAmount: vehicle.cargoAmount,
       cargoCapacity: vehicle.cargoCapacity,
+      cargoSource: vehicle.cargoSource,
+      tripDistance: vehicle.tripDistance,
+      loadedTick: vehicle.loadedTick,
       orderTargets: vehicle.orderTargets,
       orders: vehicle.orders,
       profitLastYear: vehicle.profitLastYear,
       ageDays: vehicle.ageDays,
     })),
+    subsidies: world.subsidies,
     news: world.news,
   };
 }
@@ -2506,6 +3160,11 @@ export class MockEngine implements EngineDriver {
       dayFraction: world.tick % TICKS_PER_DAY,
       speed: world.speed,
       paused: world.paused,
+      inflation: world.inflation,
+      difficulty: world.difficulty,
+      interestRate: world.interestRate,
+      maxLoan: Math.max(0, ...world.companies.map((company) => company.maxLoan)),
+      loanInterval: world.loanInterval,
     };
 
     const companies: CompanySnapshot[] = world.companies.map((company) => ({
@@ -2523,18 +3182,39 @@ export class MockEngine implements EngineDriver {
       isAI: company.isAI,
       isLocal: company.isLocal,
       bankrupt: company.bankrupt,
+      maxLoan: company.maxLoan,
+      monthsOfBankruptcy: company.monthsOfBankruptcy,
     }));
 
-    const towns: TownSnapshot[] = world.towns.map((town) => ({
-      id: town.id,
-      name: town.name,
-      x: town.x,
-      y: town.y,
-      population: town.population,
-      growthRate: town.growthRate,
-      buildings: town.buildings,
-      rating: town.rating,
-    }));
+    const currentMonth = monthIndex(world);
+    const towns: TownSnapshot[] = world.towns.map((town) => {
+      const actions: Record<TownActionKind, TownActionSnapshot> = {
+        advertise: {
+          available: town.actionMonths.advertise !== currentMonth,
+          cost: townActionCostOf(world, 'advertise'),
+        },
+        fund_roads: {
+          available: town.actionMonths.fund_roads !== currentMonth,
+          cost: townActionCostOf(world, 'fund_roads'),
+        },
+        fund_buildings: {
+          available: town.actionMonths.fund_buildings !== currentMonth,
+          cost: townActionCostOf(world, 'fund_buildings'),
+        },
+      };
+      const authority: TownAuthoritySnapshot = { rating: town.rating, actions };
+      return {
+        id: town.id,
+        name: town.name,
+        x: town.x,
+        y: town.y,
+        population: town.population,
+        growthRate: town.growthRate,
+        buildings: town.buildings,
+        rating: town.rating,
+        authority,
+      };
+    });
 
     const industries: IndustrySnapshot[] = world.industries.map((industry) => ({
       id: industry.id,
@@ -2544,8 +3224,31 @@ export class MockEngine implements EngineDriver {
       y: industry.y,
       production: industry.production,
       transported: industry.transported,
-      stocks: [{ cargo: industry.cargo, amount: Math.round(industry.production * 0.35) }],
+      stocks:
+        industry.cargo === ''
+          ? []
+          : [{ cargo: industry.cargo, amount: Math.round(industry.stock) }],
+      accepts: [...industry.accepts],
+      serviceRate:
+        industry.production > 0
+          ? Math.max(0, Math.min(100, (industry.transported / industry.production) * 100))
+          : 0,
     }));
+
+    const subsidies: SubsidySnapshot[] = world.subsidies.map((subsidy) => {
+      const from = world.industries.find((item) => item.id === subsidy.fromIndustry);
+      const to = world.industries.find((item) => item.id === subsidy.toIndustry);
+      return {
+        id: subsidy.id,
+        cargo: subsidy.cargo,
+        from: from?.name ?? `Industrie #${subsidy.fromIndustry}`,
+        to: to?.name ?? `Industrie #${subsidy.toIndustry}`,
+        fromKind: 'industry',
+        toKind: 'industry',
+        remainingMonths: Math.max(0, subsidy.remainingMonths),
+        awardedTo: subsidy.awardedTo,
+      };
+    });
 
     const stations: StationSnapshot[] = world.stations.map((station) => ({
       id: station.id,
@@ -2608,6 +3311,7 @@ export class MockEngine implements EngineDriver {
       stations,
       depots,
       vehicles,
+      subsidies,
       news,
       events,
     };
@@ -2633,6 +3337,12 @@ export class MockEngine implements EngineDriver {
       case 'vehicle':
         applyVehicle(world, command);
         break;
+      case 'finance':
+        applyFinance(world, command);
+        break;
+      case 'town_action':
+        applyTownAction(world, command);
+        break;
       default:
         break;
     }
@@ -2649,19 +3359,40 @@ export class MockEngine implements EngineDriver {
     hash.mixInt(world.tick % TICKS_PER_DAY);
     hash.mixInt(world.paused ? 1 : 0);
     hash.mixInt(world.speed);
+    hash.mixFloat(world.inflation);
+    hash.mixInt(world.difficulty);
+    hash.mixInt(world.interestRate);
     for (const company of world.companies) {
       hash.mixInt(company.id);
       hash.mixFloat(company.money, 1);
       hash.mixInt(company.deliveredToday);
+      hash.mixFloat(company.loan, 1);
+      hash.mixFloat(company.maxLoan, 1);
+      hash.mixInt(company.monthsOfBankruptcy);
+      hash.mixInt(company.bankrupt ? 1 : 0);
     }
     for (const town of world.towns) {
       hash.mixInt(town.id);
       hash.mixInt(town.population);
       hash.mixInt(town.buildings);
+      hash.mixInt(town.rating);
+      hash.mixInt(town.actionMonths.advertise);
+      hash.mixInt(town.actionMonths.fund_roads);
+      hash.mixInt(town.actionMonths.fund_buildings);
     }
     for (const industry of world.industries) {
       hash.mixInt(industry.id);
       hash.mixInt(industry.production);
+      hash.mixInt(industry.transported);
+      hash.mixInt(Math.round(industry.stock));
+    }
+    for (const subsidy of world.subsidies) {
+      hash.mixInt(subsidy.id);
+      hash.mixString(subsidy.cargo);
+      hash.mixInt(subsidy.fromIndustry);
+      hash.mixInt(subsidy.toIndustry);
+      hash.mixInt(subsidy.remainingMonths);
+      hash.mixInt(subsidy.awardedTo ?? 255);
     }
     for (const station of world.stations) {
       hash.mixInt(station.id);
@@ -2684,6 +3415,8 @@ export class MockEngine implements EngineDriver {
       hash.mixInt(vehicle.direction);
       hash.mixInt(vehicle.status);
       hash.mixInt(vehicle.cargoAmount);
+      hash.mixString(vehicle.cargoType);
+      hash.mixInt(vehicle.cargoSource ?? 255);
       hash.mixInt(vehicle.orders.length);
       for (const order of vehicle.orders) {
         hash.mixInt(order.target);
@@ -2723,6 +3456,7 @@ export class MockEngine implements EngineDriver {
     }
     const saved = parsed.world;
     const expected = saved.width * saved.height;
+    const preset = difficultyPreset(saved.difficulty ?? 1);
     const world: MockWorld = {
       seed: saved.seed,
       width: saved.width,
@@ -2734,18 +3468,42 @@ export class MockEngine implements EngineDriver {
       paused: saved.paused,
       speed: saved.speed,
       rngState: saved.rngState,
+      inflation: saved.inflation ?? 0,
+      difficulty: saved.difficulty ?? 1,
+      interestRate: saved.interestRate ?? preset.interestRate,
+      loanInterval: saved.loanInterval ?? DEFAULT_LOAN_INTERVAL,
       kind: decodeArray(saved.kind, expected),
       heightMap: decodeArray(saved.heightMap, expected),
       owner: decodeArray(saved.owner, expected),
       slope: decodeArray(saved.slope, expected),
       flags: decodeArray(saved.flags, expected),
       trackBits: decodeArray(saved.trackBits, expected),
-      companies: saved.companies,
-      towns: saved.towns,
-      industries: saved.industries,
+      companies: saved.companies.map((company) => ({
+        ...company,
+        maxLoan: company.maxLoan ?? preset.maxLoan,
+        monthsOfBankruptcy: company.monthsOfBankruptcy ?? 0,
+        interestPaid: company.interestPaid ?? 0,
+      })),
+      towns: saved.towns.map((town) => ({
+        ...town,
+        actionMonths: {
+          advertise: town.actionMonths?.advertise ?? -1,
+          fund_roads: town.actionMonths?.fund_roads ?? -1,
+          fund_buildings: town.actionMonths?.fund_buildings ?? -1,
+        },
+      })),
+      industries: saved.industries.map((industry) => {
+        const definition = INDUSTRY_DEFINITIONS.find((item) => item.kind === industry.kind);
+        return {
+          ...industry,
+          accepts: industry.accepts ?? definition?.accepts ?? [],
+          stock: industry.stock ?? Math.round((industry.production ?? 0) * 0.35),
+        };
+      }),
       stations: saved.stations,
       depots: saved.depots ?? [],
       vehicles: [],
+      subsidies: saved.subsidies ?? [],
       news: saved.news,
       newsCursor: saved.news.length,
       events: [],
@@ -2759,6 +3517,15 @@ export class MockEngine implements EngineDriver {
       ...vehicle,
       model: vehicle.model ?? '',
       homeDepot: vehicle.homeDepot ?? null,
+      segmentStops:
+        vehicle.segmentStops ??
+        (vehicle.segmentStations ?? []).map((id) =>
+          id >= 0 ? ({ kind: 'station', id } as MockStop) : null,
+        ),
+      cargoClass: vehicle.cargoClass ?? vehicle.cargoType,
+      cargoSource: vehicle.cargoSource ?? null,
+      tripDistance: vehicle.tripDistance ?? 0,
+      loadedTick: vehicle.loadedTick ?? 0,
       orders:
         vehicle.orders && vehicle.orders.length > 0
           ? vehicle.orders.map((order) => ({ ...order }))
@@ -2774,7 +3541,6 @@ export class MockEngine implements EngineDriver {
     this.loading = false;
     this.progress = 1;
     this.lastError = null;
-    updateVehiclesTransforms(world);
   }
 
   status(): EngineStatus {

@@ -389,6 +389,8 @@ export class WasmEngine implements EngineDriver {
         return;
       case 'build':
       case 'vehicle':
+      case 'finance':
+      case 'town_action':
         this.executeBridgeCommand(command);
         return;
       default:
@@ -396,7 +398,7 @@ export class WasmEngine implements EngineDriver {
     }
   }
 
-  /** Exécute une commande build/vehicle via `ottd_command` (#11). */
+  /** Exécute une commande build/vehicle/finance/town_action via `ottd_command` (#11). */
   private executeBridgeCommand(command: EngineCommand): void {
     const module = this.requireModule();
     const run = module._ottd_command;

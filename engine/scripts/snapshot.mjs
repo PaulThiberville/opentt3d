@@ -345,6 +345,30 @@ function validateJson(state, label, size) {
   );
   assert(economy.speed >= 0, `${label} : vitesse ${economy.speed}`);
   assert(typeof economy.paused === 'boolean', `${label} : pause non booléenne`);
+  assert(
+    typeof economy.inflation === 'number' && economy.inflation >= 0,
+    `${label} : inflation ${economy.inflation}`,
+  );
+  assert(
+    typeof economy.interestRate === 'number' && economy.interestRate >= 0,
+    `${label} : intérêt ${economy.interestRate}`,
+  );
+  assert(
+    typeof economy.loanInterval === 'number' && economy.loanInterval > 0,
+    `${label} : pas de prêt ${economy.loanInterval}`,
+  );
+  assert(Array.isArray(state.subsidies), `${label} : subventions absentes`);
+  for (const subsidy of state.subsidies) {
+    assert(typeof subsidy.cargo === 'string', `${label} : cargaison de subvention`);
+    assert(
+      typeof subsidy.remainingMonths === 'number' && subsidy.remainingMonths >= 0,
+      `${label} : durée de subvention ${subsidy.remainingMonths}`,
+    );
+    assert(
+      subsidy.awardedTo === null || (Number.isInteger(subsidy.awardedTo) && subsidy.awardedTo >= 0),
+      `${label} : bénéficiaire de subvention ${subsidy.awardedTo}`,
+    );
+  }
 
   assert(
     state.map && state.map.width === width,
@@ -379,6 +403,18 @@ function validateJson(state, label, size) {
     assert(typeof company.isAI === 'boolean', `${label} : isAI`);
     assert(typeof company.isLocal === 'boolean', `${label} : isLocal`);
     assert(
+      typeof company.loan === 'number' && company.loan >= 0,
+      `${label} : prêt entreprise ${company.loan}`,
+    );
+    assert(
+      typeof company.maxLoan === 'number' && company.maxLoan >= company.loan,
+      `${label} : plafond de prêt ${company.maxLoan} < dette ${company.loan}`,
+    );
+    assert(
+      Number.isInteger(company.monthsOfBankruptcy) && company.monthsOfBankruptcy >= 0,
+      `${label} : mois de faillite ${company.monthsOfBankruptcy}`,
+    );
+    assert(
       state.companies.filter((c) => c.isLocal).length <= 1,
       `${label} : plusieurs entreprises locales`,
     );
@@ -398,6 +434,16 @@ function validateJson(state, label, size) {
     checkPoint(town.x, town.y, `ville ${town.id}`);
     assert(town.population >= 0, `${label} : population ville`);
     assert(town.buildings >= 0, `${label} : bâtiments ville`);
+    assert(town.authority && town.authority.actions, `${label} : autorité locale absente`);
+    for (const action of ['advertise', 'fund_roads', 'fund_buildings']) {
+      const entry = town.authority.actions[action];
+      assert(entry, `${label} : action ${action} absente`);
+      assert(typeof entry.available === 'boolean', `${label} : ${action} available`);
+      assert(
+        typeof entry.cost === 'number' && entry.cost >= 0,
+        `${label} : ${action} coût ${entry.cost}`,
+      );
+    }
   }
 
   for (const industry of state.industries) {

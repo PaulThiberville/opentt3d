@@ -17,7 +17,12 @@
  * | `company.*` absent | 0, `''`, couleur 0, `isLocal = false` |
  * | `town.growthRate` | 0 |
  * | `town.rating` | 0 (échelle 0..1000) |
+ * | `town.authority` absent | aucune action locale exposée |
  * | `industry.kind` | `'unknown'` |
+ * | `industry.serviceRate` | `transported / production × 100` |
+ * | `company.maxLoan`/`monthsOfBankruptcy` | absents = repli UI |
+ * | `economy.inflation`/`interestRate`… | absents = repli UI |
+ * | `subsidies` absent | `[]` |
  * | `station.kind` inconnu | `'train'` |
  * | `depot.kind` inconnu | dépôt ignoré (aucune cible d'achat/ordre) |
  * | `depot.id` | 0 minimum, entier |
@@ -46,6 +51,10 @@ import {
   type OrderTargetKind,
   type SnapshotMeta,
   type StationSnapshot,
+  type SubsidySnapshot,
+  type TownActionKind,
+  type TownActionSnapshot,
+  type TownAuthoritySnapshot,
   type TownSnapshot,
   type VehicleKind,
   type VehicleSnapshot,
@@ -192,11 +201,41 @@ export function parseCompany(value: unknown): CompanySnapshot {
     isAI: bool(raw.isAI),
     isLocal: bool(raw.isLocal),
     bankrupt: bool(raw.bankrupt),
+    ...(typeof raw.maxLoan === 'number' ? { maxLoan: Math.max(0, num(raw.maxLoan, 0)) } : {}),
+    ...(typeof raw.monthsOfBankruptcy === 'number'
+      ? { monthsOfBankruptcy: Math.max(0, int(raw.monthsOfBankruptcy, 0)) }
+      : {}),
+  };
+}
+
+const TOWN_ACTIONS: readonly TownActionKind[] = ['advertise', 'fund_roads', 'fund_buildings'];
+
+function parseTownAction(value: unknown): TownActionSnapshot {
+  const raw = record(value);
+  return {
+    available: bool(raw.available, true),
+    cost: Math.max(0, num(raw.cost, 0)),
+  };
+}
+
+/** Autorité locale : chaque action absente retombe sur « indisponible ». */
+export function parseTownAuthority(value: unknown, rating: number): TownAuthoritySnapshot {
+  const raw = record(value);
+  const actionsRaw = record(raw.actions);
+  const actions = {} as Record<TownActionKind, TownActionSnapshot>;
+  for (const action of TOWN_ACTIONS) {
+    const entry = actionsRaw[action];
+    actions[action] = entry === undefined ? { available: false, cost: 0 } : parseTownAction(entry);
+  }
+  return {
+    rating: clampInt(raw.rating, 0, 1000, rating),
+    actions,
   };
 }
 
 export function parseTown(value: unknown): TownSnapshot {
   const raw = record(value);
+  const rating = clampInt(raw.rating, 0, 1000, 0);
   return {
     id: Math.max(0, int(raw.id, 0)),
     name: str(raw.name, 'Ville'),
@@ -205,21 +244,38 @@ export function parseTown(value: unknown): TownSnapshot {
     population: Math.max(0, int(raw.population, 0)),
     growthRate: int(raw.growthRate, 0),
     buildings: Math.max(0, int(raw.buildings, 0)),
-    rating: clampInt(raw.rating, 0, 1000, 0),
+    rating,
+    ...(isRecord(raw.authority) ? { authority: parseTownAuthority(raw.authority, rating) } : {}),
   };
+}
+
+function stringList(value: unknown): string[] {
+  const entries: string[] = [];
+  for (const item of list(value)) {
+    if (typeof item === 'string' && item.trim() !== '') entries.push(item);
+  }
+  return entries;
 }
 
 export function parseIndustry(value: unknown): IndustrySnapshot {
   const raw = record(value);
+  const production = Math.max(0, int(raw.production, 0));
+  const transported = Math.max(0, int(raw.transported, 0));
   return {
     id: Math.max(0, int(raw.id, 0)),
     name: str(raw.name, 'Industrie'),
     kind: str(raw.kind, 'unknown'),
     x: num(raw.x, 0),
     y: num(raw.y, 0),
-    production: Math.max(0, int(raw.production, 0)),
-    transported: Math.max(0, int(raw.transported, 0)),
+    production,
+    transported,
     stocks: cargoList(raw.stocks),
+    ...(Array.isArray(raw.accepts) ? { accepts: stringList(raw.accepts) } : {}),
+    ...(typeof raw.serviceRate === 'number'
+      ? { serviceRate: Math.max(0, Math.min(100, num(raw.serviceRate, 0))) }
+      : production > 0
+        ? { serviceRate: Math.max(0, Math.min(100, (transported / production) * 100)) }
+        : {}),
   };
 }
 
@@ -355,6 +411,39 @@ function parseEvents(value: unknown): WorldEvent[] {
           tick,
         });
         break;
+      case 'loan_changed':
+        events.push({
+          type: 'loan_changed',
+          company: companyId(entry.company),
+          loan: Math.max(0, num(entry.loan, 0)),
+          tick,
+        });
+        break;
+      case 'subsidy_awarded':
+        events.push({
+          type: 'subsidy_awarded',
+          subsidy: Math.max(0, int(entry.subsidy, 0)),
+          company: companyId(entry.company),
+          tick,
+        });
+        break;
+      case 'subsidy_expired':
+        events.push({
+          type: 'subsidy_expired',
+          subsidy: Math.max(0, int(entry.subsidy, 0)),
+          tick,
+        });
+        break;
+      case 'town_action':
+        events.push({
+          type: 'town_action',
+          town: Math.max(0, int(entry.town, 0)),
+          action: TOWN_ACTIONS.includes(entry.action as TownActionKind)
+            ? (entry.action as TownActionKind)
+            : 'advertise',
+          tick,
+        });
+        break;
       default:
         break;
     }
@@ -387,7 +476,7 @@ function parseMeta(value: unknown): SnapshotMeta {
 function parseEconomy(value: unknown): EconomySnapshot {
   if (!isRecord(value)) return { ...DEFAULT_ECONOMY };
   const raw = value;
-  return {
+  const economy: EconomySnapshot = {
     year: int(raw.year, DEFAULT_ECONOMY.year),
     month: clampInt(raw.month, 0, 11, DEFAULT_ECONOMY.month),
     day: clampInt(raw.day, 1, 31, DEFAULT_ECONOMY.day),
@@ -395,6 +484,57 @@ function parseEconomy(value: unknown): EconomySnapshot {
     speed: num(raw.speed, DEFAULT_ECONOMY.speed),
     paused: bool(raw.paused, DEFAULT_ECONOMY.paused),
   };
+  /* Les champs #165 restent absents des snapshots antérieurs : ne pas les
+   * inventer ici, l'UI applique ses propres replis. */
+  if (typeof raw.inflation === 'number' && Number.isFinite(raw.inflation)) {
+    economy.inflation = Math.max(0, raw.inflation);
+  }
+  if (typeof raw.difficulty === 'number' && Number.isFinite(raw.difficulty)) {
+    economy.difficulty = clampInt(raw.difficulty, 0, 3, 1);
+  }
+  if (typeof raw.interestRate === 'number' && Number.isFinite(raw.interestRate)) {
+    economy.interestRate = Math.max(0, raw.interestRate);
+  }
+  if (typeof raw.maxLoan === 'number' && Number.isFinite(raw.maxLoan)) {
+    economy.maxLoan = Math.max(0, raw.maxLoan);
+  }
+  if (typeof raw.loanInterval === 'number' && Number.isFinite(raw.loanInterval)) {
+    economy.loanInterval = Math.max(1, raw.loanInterval);
+  }
+  return economy;
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Subventions                                                              */
+/* ------------------------------------------------------------------------- */
+
+function sourceKind(value: unknown): 'town' | 'industry' {
+  return value === 'town' ? 'town' : 'industry';
+}
+
+function parseSubsidy(value: unknown): SubsidySnapshot | null {
+  const raw = record(value);
+  if (!isRecord(value)) return null;
+  const awarded = int(raw.awardedTo, -1);
+  return {
+    id: Math.max(0, int(raw.id, 0)),
+    cargo: str(raw.cargo, 'inconnu'),
+    from: str(raw.from, '—'),
+    to: str(raw.to, '—'),
+    fromKind: sourceKind(raw.fromKind),
+    toKind: sourceKind(raw.toKind),
+    remainingMonths: Math.max(0, int(raw.remainingMonths, 0)),
+    awardedTo: awarded >= 0 && awarded <= 254 ? awarded : null,
+  };
+}
+
+function parseSubsidies(value: unknown): SubsidySnapshot[] {
+  const subsidies: SubsidySnapshot[] = [];
+  for (const entry of list(value)) {
+    const subsidy = parseSubsidy(entry);
+    if (subsidy) subsidies.push(subsidy);
+  }
+  return subsidies;
 }
 
 /**
@@ -441,6 +581,7 @@ export function parseWorldJson(input: unknown): WorldSnapshot {
     stations: list(root.stations).map(parseStation),
     depots,
     vehicles,
+    subsidies: parseSubsidies(root.subsidies),
     news: parseNews(root.news, meta.tick),
     events: parseEvents(root.events),
   };
