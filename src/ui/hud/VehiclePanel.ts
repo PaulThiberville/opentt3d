@@ -6,6 +6,7 @@
  */
 
 import { button, el } from '../dom';
+import { t, type TranslationKey } from '../i18n';
 import type { VehiclePanelView } from '../types';
 
 export interface VehiclePanelOptions {
@@ -18,10 +19,10 @@ export interface VehiclePanelOptions {
   onMoveOrder: (vehicleId: number, index: number, delta: -1 | 1) => void;
 }
 
-const ORDER_KIND_LABELS: Record<VehiclePanelView['orders'][number]['kind'], string> = {
-  station: 'Gare',
-  industry: 'Industrie',
-  depot: 'Dépôt',
+const ORDER_KIND_KEYS: Record<VehiclePanelView['orders'][number]['kind'], TranslationKey> = {
+  station: 'build.station.generic',
+  industry: 'label.tile.industry',
+  depot: 'depot.kind',
 };
 
 export class VehiclePanel {
@@ -42,7 +43,7 @@ export class VehiclePanel {
     this.options = options;
     this.element = el('aside', {
       className: 'hud-vehicle',
-      attrs: { 'aria-live': 'polite', 'aria-label': 'Véhicule sélectionné' },
+      attrs: { 'aria-live': 'polite', 'aria-label': t('vehicle.label') },
     });
     this.dot = el('span', { className: 'hud-selection-dot' });
     const text = el('div', { className: 'hud-selection-text' });
@@ -53,14 +54,14 @@ export class VehiclePanel {
     const close = el('button', {
       className: 'hud-selection-close',
       text: '×',
-      attrs: { type: 'button', title: 'Fermer la sélection', 'aria-label': 'Fermer la sélection' },
+      attrs: { type: 'button', title: t('selection.close'), 'aria-label': t('selection.close') },
     });
     close.addEventListener('click', () => this.options.onClear());
     const header = el('div', { className: 'hud-vehicle-header' });
     header.append(this.dot, text, close);
 
     this.actions = el('div', { className: 'hud-vehicle-actions' });
-    this.orderTitle = el('h3', { className: 'hud-panel-section', text: 'Tournée' });
+    this.orderTitle = el('h3', { className: 'hud-panel-section', text: t('vehicle.orderTitle') });
     this.orderList = el('ol', { className: 'hud-orders' });
     this.hint = el('p', { className: 'hud-panel-hint' });
     this.element.append(header, this.actions, this.orderTitle, this.orderList, this.hint);
@@ -109,35 +110,33 @@ export class VehiclePanel {
     const id = view.selection.id;
     this.actions.replaceChildren();
     this.actions.append(
-      button('Démarrer', {
+      button(t('depot.start'), {
         variant: 'primary',
         className: 'hud-vehicle-action',
         disabled: !view.canStart,
         attrs: {
           type: 'button',
-          title: view.canStart
-            ? 'Démarrer la tournée'
-            : 'Ajoutez au moins un ordre avant de démarrer',
+          title: view.canStart ? t('depot.startTitle') : t('vehicle.startBlocked'),
         },
         onClick: () => this.options.onStart(id),
       }),
-      button('Arrêter', {
+      button(t('vehicle.stop'), {
         className: 'hud-vehicle-action',
         disabled: !view.canStop,
-        attrs: { type: 'button', title: 'Arrêter le véhicule sur place' },
+        attrs: { type: 'button', title: t('vehicle.stopTitle') },
         onClick: () => this.options.onStop(id),
       }),
-      button('Vendre', {
+      button(t('depot.sell'), {
         variant: 'danger',
         className: 'hud-vehicle-action',
         onClick: () => this.options.onSell(id),
       }),
-      button(view.orderPicking ? 'Annuler l’ajout' : 'Ajouter une gare', {
+      button(view.orderPicking ? t('vehicle.cancelOrder') : t('vehicle.addOrder'), {
         className: `hud-vehicle-action${view.orderPicking ? ' is-active' : ''}`,
         attrs: {
           type: 'button',
           'aria-pressed': view.orderPicking ? 'true' : 'false',
-          title: 'Cliquer ensuite sur une gare ou un dépôt de la carte',
+          title: t('vehicle.orderPickTitle'),
         },
         onClick: () => this.options.onAddOrder(id),
       }),
@@ -149,7 +148,7 @@ export class VehiclePanel {
     this.orderList.replaceChildren();
     if (view.orders.length === 0) {
       this.orderList.append(
-        el('li', { className: 'hud-order-empty', text: 'Aucun ordre pour l’instant.' }),
+        el('li', { className: 'hud-order-empty', text: t('vehicle.noOrders') }),
       );
       return;
     }
@@ -160,8 +159,8 @@ export class VehiclePanel {
         disabled: order.index === 0,
         attrs: {
           type: 'button',
-          title: 'Monter l’ordre',
-          'aria-label': `Monter l’ordre ${order.index + 1}`,
+          title: t('vehicle.orderUpTitle'),
+          'aria-label': t('vehicle.orderUpAria', { index: order.index + 1 }),
         },
         onClick: () => this.options.onMoveOrder(id, order.index, -1),
       });
@@ -170,8 +169,8 @@ export class VehiclePanel {
         disabled: order.index === view.orders.length - 1,
         attrs: {
           type: 'button',
-          title: 'Descendre l’ordre',
-          'aria-label': `Descendre l’ordre ${order.index + 1}`,
+          title: t('vehicle.orderDownTitle'),
+          'aria-label': t('vehicle.orderDownAria', { index: order.index + 1 }),
         },
         onClick: () => this.options.onMoveOrder(id, order.index, 1),
       });
@@ -179,15 +178,15 @@ export class VehiclePanel {
         className: 'hud-order-button hud-order-remove',
         attrs: {
           type: 'button',
-          title: 'Retirer cet ordre',
-          'aria-label': `Retirer l’ordre ${order.index + 1}`,
+          title: t('vehicle.orderRemoveTitle'),
+          'aria-label': t('vehicle.orderRemoveAria', { index: order.index + 1 }),
         },
         onClick: () => this.options.onRemoveOrder(id, order.index),
       });
       row.append(
         el('span', { className: 'hud-order-index', text: String(order.index + 1) }),
         el('span', { className: 'hud-order-label', text: order.label }),
-        el('span', { className: 'hud-order-kind', text: ORDER_KIND_LABELS[order.kind] }),
+        el('span', { className: 'hud-order-kind', text: t(ORDER_KIND_KEYS[order.kind]) }),
         up,
         down,
         remove,
