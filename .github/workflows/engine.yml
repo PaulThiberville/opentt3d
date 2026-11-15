@@ -1,0 +1,55 @@
+name: Engine WASM (manuel)
+
+# Build du moteur OpenTTD headless en WebAssembly.
+# Manuel uniquement : un build à froid coûte ~30-40 min de quota Actions.
+# Pas de cache persistant (> 1 h interdit) ; l'artefact est conservé 1 jour.
+# Pour un usage régulier, préférer `npm run engine:build` en local.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-wasm
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build + smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Installer emsdk 3.1.57 (natif, sans cache persistant)
+        run: |
+          git clone --depth 1 --branch 3.1.57 \
+            https://github.com/emscripten-core/emsdk.git engine/.cache/emsdk
+          engine/.cache/emsdk/emsdk install 3.1.57
+          engine/.cache/emsdk/emsdk activate 3.1.57
+
+      - name: Installer les dépendances npm
+        run: npm ci
+
+      - name: Télécharger OpenTTD 15.3 + OpenGFX 8.0
+        run: npm run engine:fetch
+
+      - name: Compiler le moteur WASM
+        run: npm run engine:build -- --native
+
+      - name: Smoke test et déterminisme
+        run: npm run engine:test
+
+      - name: Publier les artefacts (1 jour)
+        uses: actions/upload-artifact@v4
+        with:
+          name: opentt3d-engine-wasm
+          path: public/engine/
+          retention-days: 1
+          if-no-files-found: error
