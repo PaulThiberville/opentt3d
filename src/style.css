@@ -1470,6 +1470,122 @@ select.input {
   opacity: 1;
 }
 
+.hud-build-options {
+  position: absolute;
+  left: 50%;
+  bottom: 116px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  max-width: min(760px, 94vw);
+  padding: 6px 10px;
+  transform: translateX(-50%);
+  border: 1px solid var(--hud-border-strong);
+  border-radius: 8px;
+  background: var(--hud-bg-strong);
+  box-shadow: var(--hud-shadow);
+  color: var(--hud-text);
+  font-size: 11px;
+  pointer-events: auto;
+}
+
+.hud-build-options-title {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--hud-muted);
+}
+
+.hud-build-options-label {
+  color: var(--hud-muted);
+}
+
+.hud-build-options-note {
+  color: var(--hud-muted);
+}
+
+.hud-build-segments {
+  display: inline-flex;
+  border: 1px solid var(--hud-border-strong);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.hud-build-option-segment {
+  padding: 3px 9px;
+  border: 0;
+  background: transparent;
+  color: var(--hud-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.hud-build-option-segment.is-active {
+  background: var(--hud-accent-soft);
+  color: var(--hud-text);
+}
+
+.hud-build-option-toggle,
+.hud-build-option-button,
+.hud-build-stepper-button {
+  padding: 3px 8px;
+  border: 1px solid var(--hud-border-strong);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--hud-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.hud-build-option-toggle[aria-pressed='true'] {
+  border-color: var(--hud-accent);
+  background: var(--hud-accent-soft);
+}
+
+.hud-build-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.hud-build-stepper-button {
+  min-width: 22px;
+  padding: 1px 5px;
+  font-weight: 700;
+}
+
+.hud-build-stepper-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.hud-build-stepper-value {
+  min-width: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-build-direction {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hud-build-direction-value {
+  color: var(--hud-muted);
+  white-space: nowrap;
+}
+
+.hud-build-option-toggle:hover,
+.hud-build-option-button:hover,
+.hud-build-stepper-button:not(:disabled):hover,
+.hud-build-option-segment:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--hud-text);
+}
+
 .hud-build-hint {
   position: absolute;
   left: 50%;

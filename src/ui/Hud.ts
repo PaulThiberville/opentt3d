@@ -7,6 +7,8 @@
  */
 
 import type { GameSpeed } from '../game/Game';
+import type { BuildSettings } from '../game/buildRules';
+import { createBuildSettings } from '../game/buildRules';
 import type { QualityLevel } from '../render/quality';
 import type { BuildHintView } from './buildHint';
 import { el } from './dom';
@@ -14,6 +16,7 @@ import { formatShortGameDate, type GameDateLike } from './format';
 import { NewsQueue, type NewsKind } from './news';
 import type { CameraView, HudState, SelectionSummary } from './types';
 import { BuildHint } from './hud/BuildHint';
+import { BuildOptions } from './hud/BuildOptions';
 import { HelpPanel } from './hud/HelpPanel';
 import { Minimap } from './hud/Minimap';
 import { NewsFeed } from './hud/NewsFeed';
@@ -31,6 +34,8 @@ export interface HudCallbacks {
   onClearSelection: () => void;
   onRecenterCamera: (x: number, y: number) => void;
   onBuildToolChange: (tool: BuildToolId) => void;
+  onBuildSettingsChange: (settings: BuildSettings) => void;
+  onBuildRotate: () => void;
 }
 
 export interface HudNewsInput {
@@ -53,6 +58,7 @@ export class Hud {
   private newsFeed: NewsFeed;
   private toolbar: Toolbar;
   private buildHint: BuildHint;
+  private buildOptions: BuildOptions;
   private help: HelpPanel;
   private toasts: Toasts;
   private networkStatus: HTMLDivElement;
@@ -92,10 +98,16 @@ export class Hud {
 
     this.toolbar = new Toolbar({
       onToggleTool: (tool) => this.callbacks.onBuildToolChange(tool),
-      onUnavailable: (label, reason) => this.notify('info', `${label} : ${reason}`),
     });
 
     this.buildHint = new BuildHint();
+    this.buildOptions = new BuildOptions(
+      {
+        onChange: (settings) => this.callbacks.onBuildSettingsChange(settings),
+        onRotate: () => this.callbacks.onBuildRotate(),
+      },
+      createBuildSettings(),
+    );
     this.help = new HelpPanel();
     this.toasts = new Toasts();
     this.networkStatus = el('div', {
@@ -127,6 +139,7 @@ export class Hud {
       this.minimap.element,
       this.newsFeed.element,
       this.toolbar.element,
+      this.buildOptions.element,
       this.buildHint.element,
       this.help.element,
       this.toasts.element,
@@ -189,6 +202,11 @@ export class Hud {
   /** Affiche le coût estimé et le motif d'invalidité au-dessus de la barre. */
   setBuildHint(view: BuildHintView | null): void {
     this.buildHint.update(view);
+  }
+
+  /** Affiche les réglages de gare/dépôt/signal pour l'outil armé. */
+  setBuildOptions(tool: BuildToolId | null, settings: BuildSettings): void {
+    this.buildOptions.update(tool, settings);
   }
 
   toggleNews(): void {
@@ -262,6 +280,7 @@ export class Hud {
   dispose(): void {
     this.toasts.dispose();
     this.buildHint.dispose();
+    this.buildOptions.element.remove();
     this.minimap.dispose();
     this.news.clear();
     this.root.remove();

@@ -35,7 +35,23 @@ import {
 import { Prng, StateHash, fbm, valueNoise } from '../game/prng';
 import { decodeBase64, encodeBase64 } from '../game/base64';
 import { sampleHeightWorld } from '../game/mapGrid';
-import { BUILD_TOOL_LABELS, planBuild, type BuildTool } from '../game/buildRules';
+import {
+  BUILD_TOOL_LABELS,
+  planBuild,
+  planDepot,
+  planSignal,
+  planStation,
+} from '../game/buildRules';
+import { stationFootprint } from '../game/buildRules';
+import {
+  parseBuildDirection,
+  type BuildDirection,
+  type BuildTransport,
+  type DepotSettings,
+  type SignalSettings,
+  type SignalTrack,
+  type StationSettings,
+} from '../game/buildRules';
 
 /** Ticks moteur par jour de jeu (OpenTTD : `TICKS_PER_DAY`). */
 export const TICKS_PER_DAY = 74;
@@ -1183,14 +1199,276 @@ function updateVehiclesTransforms(world: MockWorld): void {
 // ---------------------------------------------------------------------------
 
 const UNAVAILABLE_BUILD: Partial<Record<string, string>> = {
-  station: 'Gares : la construction arrive avec l’issue #28.',
-  depot: 'Dépôts : la construction arrive avec l’issue #28.',
-  signal: 'Signaux : la construction arrive avec l’issue #28.',
   bridge: 'Ponts : construction à venir.',
   tunnel: 'Tunnels : construction à venir.',
 };
 
 const BUILT_KIND: Record<'road' | 'rail', number> = { road: K.road, rail: K.rail };
+const SIGNAL_TRACKS: readonly SignalTrack[] = ['x', 'y', 'upper', 'lower', 'left', 'right'];
+
+function optionText(
+  options: Record<string, number | string | boolean> | undefined,
+  key: string,
+): string | undefined {
+  const value = options?.[key];
+  if (typeof value === 'string') return value.trim().toLowerCase();
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return undefined;
+}
+
+function optionInt(
+  options: Record<string, number | string | boolean> | undefined,
+  key: string,
+  fallback: number,
+): number {
+  const value = options?.[key];
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value);
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return Math.round(parsed);
+  }
+  return fallback;
+}
+
+function optionBool(
+  options: Record<string, number | string | boolean> | undefined,
+  key: string,
+  fallback: boolean,
+): boolean {
+  const value = options?.[key];
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') return value === '1' || value.toLowerCase() === 'true';
+  return fallback;
+}
+
+function stationSettingsFromCommand(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+): StationSettings {
+  const options = command.options;
+  const kindText = optionText(options, 'kind') ?? optionText(options, 'station') ?? 'road';
+  const kind: BuildTransport =
+    kindText === 'rail' || kindText === 'train' || kindText === 'ferroviaire' ? 'rail' : 'road';
+  const driveThrough = optionBool(
+    options,
+    'drive_through',
+    optionBool(options, 'driveThrough', false),
+  );
+
+  let direction = parseBuildDirection(options?.direction);
+  if (!direction) {
+    const axis = optionText(options, 'axis');
+    if (axis === 'y') direction = 'nw';
+    else if (axis === 'x') direction = 'ne';
+  }
+  if (!direction && command.to) {
+    if (command.from.y === command.to.y) direction = 'ne';
+    else if (command.from.x === command.to.x) direction = 'nw';
+  }
+  if (!direction && kind === 'road' && driveThrough) {
+    // Gare routière en passage sur une route existante : l'axe vient des bits.
+    const index = tileIndex(command.from.x, command.from.y, world.width);
+    const bits = world.trackBits[index] ?? 0;
+    if ((bits & (2 | 8)) !== 0) direction = 'ne';
+    else if ((bits & (1 | 4)) !== 0) direction = 'nw';
+  }
+  direction ??= 'ne';
+
+  let length = optionInt(options, 'length', optionInt(options, 'platform_length', 1));
+  if (options?.length === undefined && command.to && kind === 'rail') {
+    length = Math.abs(command.to.x - command.from.x) + Math.abs(command.to.y - command.from.y) + 1;
+  }
+
+  return {
+    kind,
+    platforms: optionInt(options, 'platforms', optionInt(options, 'tracks', 1)),
+    length,
+    direction,
+    driveThrough,
+  };
+}
+
+function depotSettingsFromCommand(
+  command: Extract<EngineCommand, { type: 'build' }>,
+): DepotSettings {
+  const options = command.options;
+  const kindText = optionText(options, 'kind') ?? optionText(options, 'vehicle') ?? 'road';
+  const kind: BuildTransport =
+    kindText === 'rail' || kindText === 'train' || kindText === 'ferroviaire' ? 'rail' : 'road';
+  const direction: BuildDirection | null = parseBuildDirection(options?.direction);
+  return { kind, direction };
+}
+
+function signalSettingsFromCommand(command: Extract<EngineCommand, { type: 'build' }>): {
+  settings: SignalSettings;
+  error: string | null;
+} {
+  const options = command.options;
+  const type = optionText(options, 'type') ?? 'block';
+  if (type !== 'block' && type !== 'bloc') {
+    return {
+      settings: { type: 'block', track: null },
+      error: 'Seuls les signaux de bloc sont supportés (« options.type » = block).',
+    };
+  }
+  const rawTrack = optionText(options, 'track');
+  if (rawTrack && !SIGNAL_TRACKS.includes(rawTrack as SignalTrack)) {
+    return {
+      settings: { type: 'block', track: null },
+      error: '« options.track » inconnu (x, y, upper, lower, left, right).',
+    };
+  }
+  return {
+    settings: { type: 'block', track: (rawTrack as SignalTrack | undefined) ?? null },
+    error: null,
+  };
+}
+
+function nearestTownName(world: MockWorld, x: number, y: number): string {
+  let best: MockTown | null = null;
+  let bestDistance = Infinity;
+  for (const town of world.towns) {
+    const dx = town.x - x;
+    const dy = town.y - y;
+    const distance = dx * dx + dy * dy;
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = town;
+    }
+  }
+  return best?.name ?? `secteur ${x},${y}`;
+}
+
+function completeBuild(
+  world: MockWorld,
+  company: MockCompany,
+  cost: number,
+  message: string,
+): void {
+  company.money -= cost;
+  world.mapDirty = true;
+  world.mapVersion += 1;
+  addNews(world, 'info', message);
+}
+
+function applyStation(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+): void {
+  const settings = stationSettingsFromCommand(world, command);
+  const plan = planStation({
+    map: mapSnapshotView(world),
+    from: command.from,
+    settings,
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid) {
+    addNews(world, 'error', `Construction impossible : ${plan.reason ?? 'gare refusée.'}`);
+    return;
+  }
+  for (const tile of plan.tiles) {
+    world.kind[tile.index] = K.station;
+    world.owner[tile.index] = command.company;
+    world.trackBits[tile.index] = tile.connections;
+    world.flags[tile.index] = 0;
+  }
+  const footprint = stationFootprint(plan.station ?? settings);
+  const resolved = plan.station ?? settings;
+  const id = world.stations.length;
+  const town = nearestTownName(world, plan.from.x, plan.from.y);
+  const baseName = settings.kind === 'rail' ? `Gare de ${town}` : `Arrêt de ${town}`;
+  let name = baseName;
+  let suffix = 2;
+  while (world.stations.some((station) => station.name === name)) {
+    name = `${baseName} (${suffix})`;
+    suffix += 1;
+  }
+  world.stations.push({
+    id,
+    company: command.company,
+    name,
+    kind: settings.kind === 'rail' ? 'train' : 'road',
+    x: plan.from.x + footprint.width / 2,
+    y: plan.from.y + footprint.height / 2,
+    width: footprint.width,
+    height: footprint.height,
+    waiting: [],
+  });
+  const message =
+    settings.kind === 'rail'
+      ? `Gare ferroviaire construite (${resolved.platforms} voie(s) × ${resolved.length} tuile(s)).`
+      : settings.driveThrough
+        ? 'Gare routière en passage construite.'
+        : 'Gare routière construite.';
+  completeBuild(world, company, plan.cost, message);
+}
+
+function applyDepot(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+): void {
+  const settings = depotSettingsFromCommand(command);
+  const plan = planDepot({
+    map: mapSnapshotView(world),
+    from: command.from,
+    settings,
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid) {
+    addNews(world, 'error', `Construction impossible : ${plan.reason ?? 'dépôt refusé.'}`);
+    return;
+  }
+  for (const tile of plan.tiles) {
+    world.kind[tile.index] = settings.kind === 'rail' ? K.rail : K.road;
+    world.owner[tile.index] = command.company;
+    world.trackBits[tile.index] = tile.connections;
+    world.flags[tile.index] = 0;
+  }
+  completeBuild(
+    world,
+    company,
+    plan.cost,
+    settings.kind === 'rail' ? 'Dépôt ferroviaire construit.' : 'Dépôt routier construit.',
+  );
+}
+
+function applySignal(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+): void {
+  const parsed = signalSettingsFromCommand(command);
+  if (parsed.error) {
+    addNews(world, 'error', parsed.error);
+    return;
+  }
+  const plan = planSignal({
+    map: mapSnapshotView(world),
+    from: command.from,
+    ...(command.to ? { to: command.to } : {}),
+    settings: parsed.settings,
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid) {
+    addNews(world, 'error', `Construction impossible : ${plan.reason ?? 'signal refusé.'}`);
+    return;
+  }
+  for (const tile of plan.tiles) {
+    world.flags[tile.index] = (world.flags[tile.index] ?? 0) | TILE_FLAG.SIGNAL;
+  }
+  completeBuild(
+    world,
+    company,
+    plan.cost,
+    `${plan.tiles.length} signal(aux) de bloc construit(s).`,
+  );
+}
 
 /**
  * Applique une commande de construction. Le mock rejoue les règles partagées
@@ -1208,6 +1486,19 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     addNews(world, 'error', 'Construction refusée : votre entreprise est en faillite.');
     return;
   }
+
+  if (command.tool === 'station') {
+    applyStation(world, command, company);
+    return;
+  }
+  if (command.tool === 'depot') {
+    applyDepot(world, command, company);
+    return;
+  }
+  if (command.tool === 'signal') {
+    applySignal(world, command, company);
+    return;
+  }
   if (command.tool !== 'road' && command.tool !== 'rail' && command.tool !== 'clear') {
     addNews(
       world,
@@ -1217,7 +1508,7 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     return;
   }
 
-  const tool: BuildTool = command.tool;
+  const tool = command.tool;
   const axis = command.options?.axis === 'y' ? 'y' : 'x';
   const plan = planBuild({
     map: mapSnapshotView(world),

@@ -12,11 +12,21 @@
  */
 
 import type { EngineCommand, EngineDriver, WorldSnapshot } from '../engine/protocol';
+import { TILE_FLAG } from '../engine/protocol';
 import { MockEngine } from '../engine/MockEngine';
 import { WasmEngine } from '../engine/WasmEngine';
 import { resolveEngineModuleUrl, type EngineMode } from '../engine/loadEngine';
 import { Game, type GameSpeed, type Selection } from '../game/Game';
-import { commandFromPlan, planBuild, type BuildPlan, type BuildTool } from '../game/buildRules';
+import {
+  cloneBuildSettings,
+  commandFromPlan,
+  createBuildSettings,
+  nextDirection,
+  planBuild,
+  type BuildPlan,
+  type BuildSettings,
+  type BuildTool,
+} from '../game/buildRules';
 import { tileKindAt } from '../game/mapGrid';
 import type { StartInfo } from '../net/lobby-types';
 import { NET_TICK_MS, createNetSession, type NetSession, type NetUpdate } from '../net/session';
@@ -83,6 +93,15 @@ export interface GameSessionOptions {
 const HUD_REFRESH_SECONDS = 0.2;
 const MINIMAP_REFRESH_SECONDS = 0.1;
 
+const BUILD_TOOL_INTROS: Record<BuildTool, string> = {
+  road: 'Routes : cliquez ou glissez pour tracer un tronçon',
+  rail: 'Rails : cliquez ou glissez pour tracer un tronçon',
+  clear: 'Démolition : cliquez ou glissez sur une voie',
+  station: 'Gares : réglez la taille et l’orientation, puis cliquez pour poser',
+  depot: 'Dépôts : cliquez à côté d’une voie, R oriente l’entrée',
+  signal: 'Signaux : cliquez ou glissez le long d’une voie ferrée',
+};
+
 function nextFrame(): Promise<void> {
   return new Promise((resolve) => {
     if (typeof requestAnimationFrame === 'function') {
@@ -111,6 +130,7 @@ export class GameSession {
   private hud: Hud | null = null;
   private buildController: BuildController | null = null;
   private buildTool: BuildToolId | null = null;
+  private buildSettings: BuildSettings = createBuildSettings();
   /** Dernier tronçon confirmé par le moteur, pour Ctrl+Z. */
   private lastBuild: BuildPlan | null = null;
   private engineBadge: HTMLDivElement | null = null;
@@ -288,7 +308,7 @@ export class GameSession {
     );
     this.hud.notify(
       'info',
-      'Routes et rails : barre du bas, cliquez ou glissez pour tracer un tronçon.',
+      'Routes, rails, gares, dépôts et signaux : barre du bas, puis cliquez sur la carte.',
     );
     if (snapshot) this.monitorGameOver(snapshot);
   }
@@ -442,7 +462,7 @@ export class GameSession {
   }
 
   private createBuildController(): BuildController {
-    return new BuildController({
+    const controller = new BuildController({
       getMap: () => this.world?.getMap() ?? null,
       getCompany: () => {
         const snapshot = this.game?.getLatestSnapshot();
@@ -462,6 +482,8 @@ export class GameSession {
       onCommit: (plan) => this.commitBuild(plan),
       onNotice: (kind, text) => this.hud?.notify(kind, text),
     });
+    controller.setSettings(this.buildSettings);
+    return controller;
   }
 
   private createHud(): Hud {
@@ -481,6 +503,8 @@ export class GameSession {
         this.updateCameraFrame();
       },
       onBuildToolChange: (tool) => this.setBuildTool(tool),
+      onBuildSettingsChange: (settings) => this.applyBuildSettings(settings),
+      onBuildRotate: () => this.rotateBuild(),
     });
   }
 
@@ -526,6 +550,12 @@ export class GameSession {
       event.preventDefault();
       this.undoLastBuild();
       return;
+    }
+    if ((event.key === 'r' || event.key === 'R') && this.buildTool) {
+      if (this.rotateBuild()) {
+        event.preventDefault();
+        return;
+      }
     }
     if (event.code === 'Space') {
       event.preventDefault();
@@ -771,6 +801,10 @@ export class GameSession {
   getBuildTool(): BuildTool | null {
     return this.buildTool;
   }
+
+  getBuildSettings(): BuildSettings {
+    return cloneBuildSettings(this.buildSettings);
+  }
   /** Arme ou désarme un outil de construction (le clic sur l'outil actif bascule). */
   setBuildTool(tool: BuildToolId): void {
     if (this.disposed) return;
@@ -782,16 +816,38 @@ export class GameSession {
     this.buildController?.setTool(tool);
     this.world?.setBuildMode(tool !== null);
     this.hud?.setBuildTool(tool);
+    this.hud?.setBuildOptions(tool, this.buildSettings);
     this.hud?.setBuildHint(describeBuildPlan(null, tool));
     if (tool) {
       this.clearSelection();
       this.world?.stopFollowing();
-      this.hud?.notify(
-        'info',
-        `${tool === 'road' ? 'Routes' : 'Rails'} : cliquez ou glissez pour tracer · Échap pour quitter.`,
-      );
+      this.hud?.notify('info', `${BUILD_TOOL_INTROS[tool]} · Échap pour quitter.`);
     }
     this.refreshHud();
+  }
+
+  /** Applique les options de gare/dépôt/signal au contrôleur et au HUD. */
+  private applyBuildSettings(settings: BuildSettings): void {
+    this.buildSettings = cloneBuildSettings(settings);
+    this.buildController?.setSettings(this.buildSettings);
+    this.hud?.setBuildOptions(this.buildTool, this.buildSettings);
+  }
+
+  /** Pivote l'outil actif (R ou bouton « Pivoter »). */
+  private rotateBuild(): boolean {
+    if (!this.buildTool || (this.buildTool !== 'station' && this.buildTool !== 'depot')) {
+      return false;
+    }
+    if (this.buildTool === 'station') {
+      this.buildSettings.station.direction = nextDirection(this.buildSettings.station.direction);
+    } else {
+      this.buildSettings.depot.direction = nextDirection(
+        this.buildSettings.depot.direction ?? 'se',
+      );
+    }
+    this.buildController?.setSettings(this.buildSettings);
+    this.hud?.setBuildOptions(this.buildTool, this.buildSettings);
+    return true;
   }
 
   /** Entreprise qui signe la commande : locale en solo, siège du joueur en réseau. */
@@ -830,7 +886,7 @@ export class GameSession {
     if (this.isNetwork) {
       // Le lockstep appliquera la commande au prochain tour : on ne peut pas
       // encore vérifier la carte, mais l'annulation reste une commande valide.
-      this.lastBuild = plan;
+      if (plan.tool !== 'signal') this.lastBuild = plan;
       this.hud?.notify(
         'info',
         'Commande de construction envoyée : elle sera appliquée au prochain tour.',
@@ -841,7 +897,9 @@ export class GameSession {
     // la route et les news d'erreur/succès sans attendre le prochain tick.
     game.refresh();
     this.refreshHud();
-    if (this.buildConfirmed(plan, company)) this.lastBuild = plan;
+    // Un signal ne se retire pas avec la démolition (elle arracherait la voie) :
+    // il n'entre pas dans la pile Ctrl+Z.
+    if (plan.tool !== 'signal' && this.buildConfirmed(plan, company)) this.lastBuild = plan;
   }
 
   /** Vérifie sur la carte que toutes les tuiles du plan ont bien été posées. */
@@ -849,8 +907,22 @@ export class GameSession {
     if (plan.tool === 'clear') return false;
     const map = this.game?.getLatestSnapshot()?.map;
     if (!map) return false;
+    if (plan.tool === 'signal') {
+      return plan.tiles.every(
+        (tile) =>
+          tileKindAt(map, tile.x, tile.y) === 'rail' &&
+          ((map.flags[tile.index] ?? 0) & TILE_FLAG.SIGNAL) !== 0,
+      );
+    }
+    const expected = plan.tool === 'station' ? 'station' : plan.depot?.kind;
+    if (!expected) {
+      return plan.tiles.every(
+        (tile) =>
+          tileKindAt(map, tile.x, tile.y) === plan.tool && map.owner[tile.index] === company,
+      );
+    }
     return plan.tiles.every(
-      (tile) => tileKindAt(map, tile.x, tile.y) === plan.tool && map.owner[tile.index] === company,
+      (tile) => tileKindAt(map, tile.x, tile.y) === expected && map.owner[tile.index] === company,
     );
   }
 
@@ -874,6 +946,40 @@ export class GameSession {
     }
     const snapshot = game.getLatestSnapshot();
     const money = snapshot?.companies.find((item) => item.id === company)?.money;
+
+    // Gare/dépôt : l'emprise est rectangulaire, on démolit chaque tuile du plan
+    // (une commande par tuile) pour ne pas déborder sur le voisinage.
+    if (last.tool === 'station' || last.tool === 'depot') {
+      const commands: EngineCommand[] = [];
+      for (const tile of last.tiles) {
+        const clear = planBuild({
+          map,
+          tool: 'clear',
+          from: { x: tile.x, y: tile.y },
+          company,
+          ...(money !== undefined ? { budget: money } : {}),
+        });
+        if (!clear.valid) {
+          this.hud?.notify(
+            'warning',
+            `Démolition impossible : ${clear.reason ?? 'tuile refusée.'}`,
+          );
+          this.lastBuild = null;
+          return;
+        }
+        commands.push(commandFromPlan(clear, company));
+      }
+      for (const command of commands) game.issueCommand(command);
+      this.lastBuild = null;
+      if (this.isNetwork) {
+        this.hud?.notify('info', 'Annulation envoyée : démolition au prochain tour.');
+        return;
+      }
+      game.refresh();
+      this.refreshHud();
+      return;
+    }
+
     const clear = planBuild({
       map,
       tool: 'clear',
