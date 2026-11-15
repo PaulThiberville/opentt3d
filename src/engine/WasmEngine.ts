@@ -9,10 +9,11 @@
  *
  * Limitations assumées en v1 (le pont ne les expose pas encore) :
  *  - `save()`/`load()` : voir #61 ;
- *  - commandes de construction et de véhicules : voir #11 ;
- *  - options de partie (climat, année, IA, difficulté) : voir #60. Elles ne sont
- *    pas silencieusement ignorées : `newGame()` produit un avertissement lisible
- *    dans `status().warnings`, relayé par l'UI.
+ *  - commandes de construction et de véhicules : voir #11.
+ *
+ * Les options de partie (climat, année, IA, difficulté) sont transmises via
+ * `ottd_new_game_ex` ; si ce build ne l'expose pas, le pilote retombe sur
+ * l'ancien `ottd_new_game` et signale les options non appliquées.
  */
 
 import {
@@ -52,6 +53,18 @@ export interface WasmEngineOptions {
 
 function describeError(error: unknown): string {
   return describeUnknownError(error);
+}
+
+/** Configuration transmise à `ottd_new_game_ex` (clés du pont, #60). */
+function buildGameConfig(options: NewGameOptions): string {
+  const config: Record<string, unknown> = {
+    climate: options.climate ?? 'temperate',
+    start_year: options.startYear ?? 1950,
+    difficulty: options.difficulty ?? 1,
+    ai_companies: options.aiCompanies ?? 0,
+    map_size: Math.trunc(options.width),
+  };
+  return JSON.stringify(config);
 }
 
 interface MapDescriptor {
@@ -196,12 +209,51 @@ export class WasmEngine implements EngineDriver {
     }
 
     this.warnings = [];
-    this.processGameOptionWarnings(options);
 
     const seed = Math.trunc(options.seed) >>> 0;
-    const created = module._ottd_new_game(seed, width, height);
-    if (created !== 0) {
-      throw new Error(this.bridgeError('ottd_new_game', created));
+    let created: number;
+    const newGameEx = module._ottd_new_game_ex;
+    const canConfigure = typeof newGameEx === 'function';
+    if (canConfigure) {
+      const configJson = buildGameConfig(options);
+      const stringToUTF8 = module.stringToUTF8;
+      const lengthBytesUTF8 = module.lengthBytesUTF8;
+      if (typeof stringToUTF8 === 'function' && typeof lengthBytesUTF8 === 'function') {
+        const size = lengthBytesUTF8(configJson) + 1;
+        const pointer = module._malloc(size);
+        try {
+          stringToUTF8(configJson, pointer, size);
+          created = newGameEx(seed, width, height, pointer);
+        } finally {
+          module._free(pointer);
+        }
+      } else if (typeof module.ccall === 'function') {
+        created = Number(
+          module.ccall(
+            'ottd_new_game_ex',
+            'number',
+            ['number', 'number', 'number', 'string'],
+            [seed, width, height, configJson],
+          ),
+        );
+      } else {
+        throw new Error(
+          'WasmEngine.newGame : le module expose ottd_new_game_ex mais pas stringToUTF8/ccall.',
+        );
+      }
+    } else {
+      // Ancien build : les options ne sont pas appliquées, on le signale.
+      this.processGameOptionWarnings(options);
+      created = module._ottd_new_game(seed, width, height);
+    }
+
+    if (created === 5) {
+      // Partie jouable, mais certaines IA n'ont pas démarré.
+      this.warn(this.bridgeError('ottd_new_game_ex', created));
+    } else if (created !== 0) {
+      throw new Error(
+        this.bridgeError(canConfigure ? 'ottd_new_game_ex' : 'ottd_new_game', created),
+      );
     }
 
     this.inGame = true;
@@ -248,6 +300,7 @@ export class WasmEngine implements EngineDriver {
       });
     }
     const world = parseWorldJson(parsed);
+    this.ingestBridgeWarnings(parsed);
     const descriptor = readMapDescriptor(parsed);
 
     let decoded: DecodedMapSnapshot;
@@ -410,6 +463,16 @@ export class WasmEngine implements EngineDriver {
     if (this.warnings.includes(message)) return;
     this.warnings.push(message);
     this.onWarning?.(message);
+  }
+
+  /** Warnings produits par le pont dans le JSON de snapshot (`warnings[]`). */
+  private ingestBridgeWarnings(parsed: unknown): void {
+    if (typeof parsed !== 'object' || parsed === null) return;
+    const warnings = (parsed as { warnings?: unknown }).warnings;
+    if (!Array.isArray(warnings)) return;
+    for (const entry of warnings) {
+      if (typeof entry === 'string' && entry.trim() !== '') this.warn(entry);
+    }
   }
 
   private warnInit(message: string): void {

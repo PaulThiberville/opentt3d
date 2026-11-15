@@ -90,7 +90,8 @@ export class FakeEngineModule implements EmscriptenModule {
   ccall(name: string, _returnType: string | null, _argTypes: string[], args: unknown[]): unknown {
     void _returnType;
     void _argTypes;
-    const fn = (this as unknown as Record<string, unknown>)[name];
+    const table = this as unknown as Record<string, unknown>;
+    const fn = table[name] ?? table[`_${name}`];
     if (typeof fn !== 'function') throw new Error(`FakeEngineModule : ${name} inconnu`);
     return (fn as (...values: unknown[]) => unknown).apply(this, args);
   }

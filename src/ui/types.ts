@@ -34,6 +34,11 @@ export interface CameraView {
   distance: number;
 }
 
+export interface NetworkStatusView {
+  text: string;
+  tone: 'ok' | 'wait' | 'warn' | 'error';
+}
+
 export interface HudState {
   snapshot: WorldSnapshot | null;
   fps: number;
@@ -43,6 +48,9 @@ export interface HudState {
   quality: QualityLevel;
   following: boolean;
   drawCalls: number;
+  /** Pause et vitesse sont séquencées par l'hôte en réseau. */
+  controlsLocked?: boolean;
+  networkStatus?: NetworkStatusView | null;
 }
 
 export interface NewsFeedItem {

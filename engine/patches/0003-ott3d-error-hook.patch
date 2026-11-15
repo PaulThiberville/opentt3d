@@ -1,0 +1,31 @@
+--- a/src/openttd.cpp
++++ b/src/openttd.cpp
+@@ -112,12 +112,20 @@
+ NewGRFScanCallback *_request_newgrf_scan_callback = nullptr;
+ 
+ /**
++ * OpenTT3D : hook optionnel du pont WebAssembly, appelé avant `_exit`/`abort`.
++ * Il permet de mémoriser le message fatal dans `ottd_last_error()`.
++ * Reste nul pour un build OpenTTD standard.
++ */
++void (*_ottd_fatal_error_hook)(const char *message) = nullptr;
++
++/**
+  * Error handling for fatal user errors.
+  * @param str the string to print.
+  * @note Does NEVER return.
+  */
+ void UserErrorI(const std::string &str)
+ {
++	if (_ottd_fatal_error_hook != nullptr) _ottd_fatal_error_hook(str.c_str());
+ 	ShowOSErrorBox(str, false);
+ 	if (VideoDriver::GetInstance() != nullptr) VideoDriver::GetInstance()->Stop();
+ 
+@@ -139,6 +147,7 @@
+  */
+ void FatalErrorI(const std::string &str)
+ {
++	if (_ottd_fatal_error_hook != nullptr) _ottd_fatal_error_hook(str.c_str());
+ 	if (VideoDriver::GetInstance() == nullptr || VideoDriver::GetInstance()->HasGUI()) {
+ 		ShowOSErrorBox(str, true);
+ 	}
