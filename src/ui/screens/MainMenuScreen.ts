@@ -16,6 +16,8 @@ export interface MainMenuOptions {
   unavailableReason?: string | null;
   /** Complément affiché sous « Multijoueur » (mode local, avertissement). */
   multiplayerNote?: string;
+  /** Une simulation tourne derrière le menu : affiche le badge « en direct ». */
+  liveSimulation?: boolean;
 }
 
 interface MenuItemOptions {
@@ -59,6 +61,8 @@ export class MainMenuScreen extends BaseScreen {
     super('menu-screen');
 
     const layout = el('div', { className: 'menu-layout' });
+    const main = el('div', { className: 'menu-main' });
+    const column = el('div', { className: 'menu-column' });
 
     const hero = el('div', { className: 'menu-hero' });
     const brand = el('div', { className: 'menu-brand' });
@@ -156,13 +160,24 @@ export class MainMenuScreen extends BaseScreen {
       }),
     );
 
-    layout.append(hero, actions, this.notice, footer);
+    column.append(hero, actions, this.notice);
+    main.append(column);
+    layout.append(main, footer);
     this.element.append(layout);
+
+    if (options.liveSimulation) {
+      const live = el('div', { className: 'menu-live' });
+      live.append(
+        el('span', { className: 'menu-live-dot' }),
+        el('span', { text: 'Simulation en direct' }),
+      );
+      this.element.append(live);
+    }
     this.cleanupNavigation = enableListNavigation(actions);
 
     if (options.unavailableReason) {
       const alert = el('p', { className: 'alert alert-error', text: options.unavailableReason });
-      layout.insertBefore(alert, actions);
+      column.insertBefore(alert, actions);
     }
   }
 

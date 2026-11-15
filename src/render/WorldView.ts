@@ -204,6 +204,13 @@ export class WorldView {
     return sunState(this.dayNight.phase).night;
   }
 
+  /** Force l'heure visuelle (démo de menu, captures) sans attendre un snapshot. */
+  setDayNightPhase(phase: number): void {
+    this.dayNight.setPhase(phase);
+    this.applyDayNightPhase(true);
+    this.applyNight(this.timeOfDay?.nightAmount ?? this.night);
+  }
+
   /** Applique immédiatement l'activation et la durée du cycle visuel. */
   setDayNightCycle(enabled: boolean, cycleSeconds: number): void {
     this.dayNight.setCycleSeconds(cycleSeconds);
