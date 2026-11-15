@@ -11,7 +11,7 @@
  * Les tests utilisent une horloge factice et le `MockEngine` : aucun DOM.
  */
 
-import type { EngineDriver, WorldSnapshot } from '../engine/protocol';
+import type { EngineCommand, EngineDriver, WorldSnapshot } from '../engine/protocol';
 import { EventBus } from './EventBus';
 import { clamp } from './interpolation';
 
@@ -45,6 +45,8 @@ export interface GameEvents {
   selection: { selection: Selection | null };
   notify: { kind: NotifyKind; text: string; tick: number };
   state: { paused: boolean; speed: GameSpeed; tick: number };
+  /** Commande acceptée par la boucle et transmise au moteur ou au réseau. */
+  command: { command: EngineCommand };
 }
 
 export interface GameOptions {
@@ -56,6 +58,12 @@ export interface GameOptions {
   snapshotRate?: number;
   /** Delta maximal accepté entre deux frames (sécurité onglet caché). */
   maxDeltaSeconds?: number;
+  /**
+   * Destinataire des commandes de jeu. Par défaut le moteur est appelé
+   * directement (solo) ; le réseau fournit `NetSession.issue` pour que la
+   * commande soit séquencée au même tick chez tous les pairs.
+   */
+  commandSink?: (command: EngineCommand) => void;
 }
 
 export const DEFAULT_TICKS_PER_SECOND = 30;
@@ -95,10 +103,12 @@ export class Game {
   private disposed = false;
   private buffer: TimedSnapshot[] = [];
   private interpolation: InterpolationState = { from: null, to: null, alpha: 0 };
+  private commandSink?: (command: EngineCommand) => void;
 
   constructor(options: GameOptions) {
     this.driver = options.driver;
     this.clock = options.clock ?? defaultClock;
+    this.commandSink = options.commandSink;
     this.ticksPerSecond = Math.max(1, options.ticksPerSecond ?? DEFAULT_TICKS_PER_SECOND);
     this.snapshotRate = Math.max(0.2, options.snapshotRate ?? DEFAULT_SNAPSHOT_RATE);
     this.maxDeltaSeconds = Math.max(0.01, options.maxDeltaSeconds ?? 0.25);
@@ -240,6 +250,19 @@ export class Game {
 
   getSimTime(): number {
     return this.simTime;
+  }
+
+  /**
+   * Émet une commande de jeu (construction, véhicules…). En solo elle part
+   * directement au moteur ; en réseau `commandSink` la confie au lockstep.
+   * L'appelant peut forcer un snapshot juste après (`refresh()`) pour voir le
+   * résultat du moteur sans attendre le prochain tick.
+   */
+  issueCommand(command: EngineCommand): void {
+    if (this.disposed) return;
+    if (this.commandSink) this.commandSink(command);
+    else this.driver.send(command);
+    this.events.emit('command', { command });
   }
 
   getFps(): number {
