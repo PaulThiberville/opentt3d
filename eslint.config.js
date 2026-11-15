@@ -6,6 +6,8 @@ export default tseslint.config(
   {
     ignores: [
       'dist/**',
+      'dist-perf/**',
+      'perf-artifacts/**',
       'release/**',
       'node_modules/**',
       'coverage/**',
@@ -27,7 +29,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['engine/scripts/**/*.mjs'],
+    files: ['engine/scripts/**/*.mjs', 'scripts/**/*.mjs'],
     languageOptions: {
       globals: {
         Buffer: 'readonly',
@@ -35,8 +37,10 @@ export default tseslint.config(
         clearTimeout: 'readonly',
         console: 'readonly',
         fetch: 'readonly',
+        performance: 'readonly',
         process: 'readonly',
         setTimeout: 'readonly',
+        WebSocket: 'readonly',
       },
     },
   },
