@@ -1851,8 +1851,10 @@ bool Succeed(CommandReply &reply, std::string message)
 template <Commands Tcmd, typename... Args>
 auto RunCompanyCommand(CompanyID company, TileIndex location, bool estimate_only, Args... args)
 {
-	Backup<CompanyID> backup(_current_company);
-	_current_company = company;
+	/* `Backup<T>` ne restaure pas tout seul et journalise un avertissement si
+	 * `Restore()` n'est pas appelé ; `AutoRestoreBackup` garantit la
+	 * restauration à la sortie, y compris sur retour précoce ou exception. */
+	AutoRestoreBackup<CompanyID> company_guard(_current_company, company);
 	return Command<Tcmd>::template Unsafe<CommandCallback>(
 			(StringID)0, nullptr, false, estimate_only, location, std::forward_as_tuple(args...));
 }
