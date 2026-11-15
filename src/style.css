@@ -85,7 +85,6 @@ body {
   cursor: default;
 }
 
-<<<<<<< HEAD
 /* Démo vivante derrière les menus (canvas dédié, contexte WebGL séparé). */
 .menu-scene {
   position: fixed;
