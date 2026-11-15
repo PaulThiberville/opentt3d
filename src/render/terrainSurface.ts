@@ -48,6 +48,34 @@ export function terrainSkinStrength(level: QualityLevel): number {
   return 1;
 }
 
+/**
+ * Bornes du mélange herbe/terre/roche/sable dans le shader.
+ *
+ * Les pentes sont exprimées en `1 - normal.y` : 0 = plat, ~0,106 pour une
+ * marche d'un niveau, ~0,293 pour deux niveaux. L'herbe reste dominante sur
+ * les terrains plats et les pentes douces ; la roche n'apparaît que sur les
+ * falaises (trois niveaux et plus), ce qui évite le terrain uniformément beige.
+ */
+export const TERRAIN_SKIN_BOUNDS = {
+  /** Pente de départ/fin du mélange herbe → terre. */
+  earthSlope: { start: 0.16, end: 0.38 },
+  /** Pente de départ/fin du mélange terre → roche. */
+  rockSlope: { start: 0.32, end: 0.58 },
+  /** Altitude monde (0..7,5) où la roche d'altitude commence à poindre. */
+  alpine: { start: 5.4, end: 7.2, weight: 0.28 },
+  /** Bande de plage : distance à l'eau (tuiles) et altitude monde. */
+  sand: { inner: 0.35, outer: 2.2, altitudeStart: 0.7, altitudeEnd: 1.7 },
+  /** Force maximale de la perturbation de normale (micro-relief). */
+  bumpStrength: 0.22,
+  /** Teinte herbe sèche, très minoritaire, pour casser les aplats. */
+  dryGrass: 0.12,
+} as const;
+
+/** Met en forme une borne pour l'injecter dans un shader GLSL. */
+export function glslBound(value: number): string {
+  return Number(value).toFixed(4);
+}
+
 export interface TerrainBudget {
   /** Nombre de tuiles couvertes (hors doublons de bord). */
   tiles: number;
