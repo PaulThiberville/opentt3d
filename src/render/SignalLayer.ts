@@ -130,10 +130,16 @@ export class SignalLayer {
   }
 
   dispose(): void {
+    this.group.remove(this.poles, this.lights);
+    this.poles.dispose();
     this.poles.geometry.dispose();
     this.poleMaterial.dispose();
+    this.lights.dispose();
     this.lights.geometry.dispose();
     this.lightMaterial.dispose();
+    this.placements = [];
+    this.poles.count = 0;
+    this.lights.count = 0;
     this.group.clear();
   }
 }

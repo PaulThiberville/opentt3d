@@ -350,6 +350,7 @@ export class IndustryLayer {
     this.coarseLods = 0;
     if (this.smoke) {
       this.group.remove(this.smoke);
+      this.smoke.dispose();
       this.smoke.geometry.dispose();
       const material = this.smoke.material;
       if (Array.isArray(material)) {

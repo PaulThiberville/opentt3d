@@ -203,15 +203,18 @@ export class DepotLayer {
   }
 
   dispose(): void {
+    for (const child of this.group.children) {
+      const mesh = child as THREE.InstancedMesh;
+      if (mesh.isInstancedMesh) {
+        mesh.count = 0;
+        mesh.dispose();
+      }
+    }
+    this.group.clear();
     for (const geometry of this.geometries) geometry.dispose();
     this.geometries = [];
     this.bodyMaterial.dispose();
     this.liveryMaterial.dispose();
-    for (const child of this.group.children) {
-      const mesh = child as THREE.InstancedMesh;
-      if (mesh.isInstancedMesh) mesh.dispose();
-    }
-    this.group.clear();
     this.placements = [];
   }
 }
