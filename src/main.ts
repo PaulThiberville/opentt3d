@@ -82,6 +82,7 @@ import { GameOverScreen } from './ui/screens/GameOverScreen';
 import { LobbyScreen } from './ui/screens/LobbyScreen';
 import { JoinScreen } from './ui/screens/JoinScreen';
 import { LoadingScreen } from './ui/screens/LoadingScreen';
+import { AttractScene } from './render/AttractScene';
 import { MainMenuScreen } from './ui/screens/MainMenuScreen';
 import { MultiplayerScreen, type CreateRoomRequest } from './ui/screens/MultiplayerScreen';
 import { NewGameScreen } from './ui/screens/NewGameScreen';
@@ -104,6 +105,10 @@ const sceneCanvas: HTMLCanvasElement = canvas;
 const uiMount: HTMLElement = mount;
 
 const screens = new ScreenManager(uiMount);
+screens.onScreenChange = (key) => {
+  // Sous une modale, la démo passe à 15 fps : le flou coûte déjà cher.
+  attractScene?.setBackdrop(key !== null && key !== 'menu');
+};
 let settings = loadSettings(window.localStorage);
 if (window.localStorage.getItem(SETTINGS_STORAGE_KEY) === null) {
   settings = {
@@ -113,6 +118,7 @@ if (window.localStorage.getItem(SETTINGS_STORAGE_KEY) === null) {
 }
 let session: GameSession | null = null;
 let settingsOrigin: SettingsOrigin = 'menu';
+let attractScene: AttractScene | null = null;
 let saveStorePromise: Promise<SaveStoreHandle> | null = null;
 let autosavePending = false;
 
@@ -284,8 +290,29 @@ function disposeSession(): void {
   closeNetworkDirectory();
 }
 
+/** Démo vivante derrière le menu : une partie mock autonome, sans HUD ni audio. */
+function ensureAttract(): void {
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!webglAvailable || attractScene || reduceMotion) return;
+  const seedParam = Number(new URLSearchParams(window.location.search).get('attractSeed'));
+  const scene = new AttractScene({
+    quality: settings.quality === 'low' ? 'low' : 'medium',
+    ...(Number.isFinite(seedParam) && seedParam > 0 ? { seed: seedParam } : {}),
+  });
+  attractScene = scene;
+  void scene.start().then(() => {
+    if (attractScene === scene && !scene.isRunning) attractScene = null;
+  });
+}
+
+function stopAttract(): void {
+  attractScene?.dispose();
+  attractScene = null;
+}
+
 function showMainMenu(): void {
   disposeSession();
+  ensureAttract();
   screens.show(
     'menu',
     new MainMenuScreen({
@@ -301,6 +328,7 @@ function showMainMenu(): void {
         networkKind === 'local'
           ? 'Mode local · deux onglets BroadcastChannel'
           : 'Salon P2P · Trystero / relais Nostr',
+      liveSimulation: webglAvailable,
     }),
   );
 }
@@ -612,6 +640,7 @@ function showAbout(): void {
 }
 
 async function startGame(options: NewGameOptions): Promise<void> {
+  stopAttract();
   disposeSession();
   if (!webglAvailable) {
     showMainMenu();
@@ -697,6 +726,7 @@ function loadedGameOptions(record: SaveRecord): NewGameOptions {
 }
 
 async function startLoadedGame(record: SaveRecord): Promise<void> {
+  stopAttract();
   // L'ancienne session (le cas échéant) est libérée avant toute allocation :
   // pas de contexte WebGL ni de listener orphelin pendant le chargement.
   disposeSession();
@@ -802,6 +832,7 @@ function networkCallbacks(
 }
 
 async function startNetworkGame(info: StartInfo): Promise<void> {
+  stopAttract();
   disposeSession();
   // Le transport vient du salon : il ne doit pas être fermé par le nettoyage
   // du menu. L'hôte répond aux retardataires via `LateJoinHost`, créé avant le
@@ -872,6 +903,7 @@ async function startNetworkGame(info: StartInfo): Promise<void> {
 
 /** Démarre le rendu et le HUD autour de la session déjà chargée par le join. */
 async function startJoinedGame(prepared: LateJoinPrepared, screen: JoinScreen): Promise<void> {
+  stopAttract();
   const start = prepared.start;
   disposeSession();
   const mapped = mapStartInfoToGameOptions(start, pendingOptions.quality);

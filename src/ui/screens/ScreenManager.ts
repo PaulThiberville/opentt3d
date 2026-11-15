@@ -13,6 +13,8 @@ export interface ShowScreenOptions {
 const TRANSITION_MS = 220;
 
 export class ScreenManager {
+  /** Notifié à chaque changement d'écran (clé, ou `null` quand tout est fermé). */
+  onScreenChange: ((key: string | null) => void) | null = null;
   private host: HTMLElement;
   private current: ScreenView | null = null;
   private currentKey: string | null = null;
@@ -35,6 +37,7 @@ export class ScreenManager {
     void element.offsetWidth;
     element.classList.add('is-visible');
     view.show?.();
+    this.onScreenChange?.(key);
     requestAnimationFrame(() => {
       if (this.current === view) focusFirst(element);
     });
@@ -46,6 +49,7 @@ export class ScreenManager {
     this.current = null;
     this.currentKey = null;
     this.detach(view);
+    this.onScreenChange?.(null);
   }
 
   isOpen(): boolean {
