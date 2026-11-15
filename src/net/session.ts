@@ -14,12 +14,24 @@
  *
  * Wall-clock time (`nowMs`) is used solely for pacing, pings and timeouts: the
  * simulation itself depends only on turns and commands.
+ *
+ * Late join (issue #38): a peer that missed the initial `start` can be admitted
+ * after the game began. The host reserves a seat, serialises the state at the
+ * current tick boundary N, pauses the whole simulation while the save travels
+ * in chunks, and requires the newcomer to load it and confirm the hash at N.
+ * Only then does the host include the peer in turns N and later; the save
+ * already covers every tick before N. One transfer is allowed at a time and the
+ * window is bounded by `joinTimeoutMs` (15 s by default) so a stuck newcomer
+ * cannot freeze the game forever.
  */
 
 import type { EngineCommand } from '../engine/protocol.js';
 import type { Transport } from './transport.js';
 import {
+  JOIN_CHANNELS,
+  JOIN_PROTOCOL_VERSION,
   NET_PROTOCOL_VERSION,
+  MAX_SAVE_CHARS,
   MAX_SAVE_CHUNK_CHARS,
   MAX_SAVE_CHUNKS,
   isAckMessage,
@@ -28,12 +40,23 @@ import {
   isEngineCommand,
   isHashMessage,
   isHelloMessage,
+  isJoinAcceptMessage,
+  isJoinChunkMessage,
+  isJoinReadyMessage,
+  isJoinRejectMessage,
+  isJoinRequestMessage,
+  isPlayerId,
+  isRecord,
   isResyncMessage,
   isTurnMessage,
   type ChatMessage,
   type Command,
   type HelloMessage,
+  type JoinAcceptMessage,
+  type JoinChunkMessage,
+  type JoinRejectReason,
   type NetMessage,
+  type SaveChunk,
   type TurnCommand,
   type TurnMessage,
 } from './types.js';
@@ -64,6 +87,12 @@ const RESYNC_RETRY_MS = 3000;
 const RESYNC_MIN_GAP_MS = 5000;
 const LOST_AFTER_MS = 15000;
 const MAX_CHAT_CHARS = 300;
+/** A join request is retried until the host answers. */
+const JOIN_REQUEST_RETRY_MS = 1000;
+/** Default lifetime of a join window and of the save transfer. */
+const JOIN_TIMEOUT_MS = 15000;
+/** Hard protocol cap on player indices (see `isPlayerId`). */
+const MAX_PLAYERS = 64;
 
 export interface Runner {
   tick(): number;
@@ -83,6 +112,47 @@ export interface NetSessionOptions {
   hostId?: string;
   peers: PeersMap;
   inputDelay?: number;
+  /** Maximum number of human players (late joiners included). Defaults to 64. */
+  maxPlayers?: number;
+  /** Engine build identifier; a late joiner with a different one is refused. */
+  engine?: string;
+  /** Display name advertised in join requests (informational). */
+  playerName?: string;
+  /** Host only: accept join requests without a prior `admitPeer` call. */
+  autoAdmit?: boolean;
+  /** Lifetime of one join window and of its save transfer, in milliseconds. */
+  joinTimeoutMs?: number;
+}
+
+/** Host-side result of `admitPeer`: the seat reserved for the newcomer. */
+export interface JoinAdmission {
+  peerId: string;
+  player: number;
+}
+
+/** Client-side progress of the late-join handshake. */
+export type JoinPhase = 'idle' | 'requesting' | 'transfer' | 'joined' | 'rejected';
+
+/** Chunk-level progress, ready for a join UI. */
+export interface JoinProgress {
+  phase: JoinPhase;
+  received: number;
+  total: number;
+  /** Assigned player index once known. */
+  player?: number;
+  /** Save frontier tick once `join-accept` was received. */
+  tick?: number;
+}
+
+/** Emitted when a join succeeds or is refused, on both sides. */
+export interface JoinEvent {
+  ok: boolean;
+  /** Host side: the peer that joined or was refused. Client side: the host. */
+  peerId?: string;
+  player?: number;
+  tick?: number;
+  reason?: JoinRejectReason;
+  message?: string;
 }
 
 export interface NetUpdate {
@@ -117,6 +187,21 @@ export interface NetSession {
   requestResync(): void;
   /** Host side: pushes an explicit save (all peers by default). */
   provideSave(data: string, target?: string): void;
+  /** Client side: asks to join a game already in progress. */
+  requestJoin(hostPeerId: string, playerIndex?: number): boolean;
+  /**
+   * Host side: reserves a seat and opens a join window for `peerId`. The save is
+   * taken and shipped when the peer's `join-request` arrives. Returns null when
+   * the room is full or the peer is already seated.
+   */
+  admitPeer(peerId: string, playerIndex?: number): JoinAdmission | null;
+  /** Host side: closes one join window (or all) and refuses pending transfers. */
+  closeJoinWindow(peerId?: string): void;
+  onJoin(fn: (event: JoinEvent) => void): () => void;
+  /** Client-side phase of the late-join handshake. */
+  joinPhase(): JoinPhase;
+  /** Client-side chunk progress of the late-join handshake. */
+  joinProgress(): JoinProgress;
   sendChat(text: string): void;
   onChat(fn: (message: ChatEvent) => void): () => void;
   dispose(): void;
@@ -147,6 +232,34 @@ interface SaveAssembly {
   chunks: (string | undefined)[];
   received: number;
   left: number[];
+}
+
+/** Host-side join window: a reserved seat, then an in-flight save transfer. */
+interface PendingJoin {
+  peerId: string;
+  player: number;
+  /** Set once the save has been serialised and sent. */
+  sent: boolean;
+  tick: number;
+  hash: string;
+  id: string;
+  total: number;
+  /** Kept for the lifetime of the transfer so a duplicate request can resend. */
+  save?: string;
+  startedAt: number;
+  expiresAt: number;
+}
+
+/** Client-side assembly of a `join` save (same chunking as `resync`). */
+interface JoinAssembly {
+  epoch: number;
+  tick: number;
+  player: number;
+  id: string;
+  hash: string;
+  total: number;
+  chunks: (string | undefined)[];
+  received: number;
 }
 
 const NO_UPDATE: NetUpdate = Object.freeze({
@@ -184,7 +297,10 @@ function normalizePeers(
     players.set(index, { index, peerId, left: false, connected: true });
     peerToPlayer.set(peerId, index);
   }
-  if (!players.has(localPlayer)) {
+  // A late joiner may not know its player index yet: `localPlayer` is only a
+  // provisional value. Never overwrite a seat already owned by another peer.
+  const provisional = players.get(localPlayer);
+  if (!provisional) {
     players.set(localPlayer, {
       index: localPlayer,
       peerId: selfId,
@@ -192,15 +308,28 @@ function normalizePeers(
       connected: true,
     });
     peerToPlayer.set(selfId, localPlayer);
+  } else if (provisional.peerId === selfId) {
+    peerToPlayer.set(selfId, localPlayer);
   }
   return { players, peerToPlayer };
 }
 
 export function createNetSession(options: NetSessionOptions): NetSession {
-  const { runner, transport, localPlayer } = options;
+  const { runner, transport } = options;
+  let localPlayer = options.localPlayer;
   const inputDelay = Number.isFinite(options.inputDelay)
     ? Math.min(32, Math.max(0, Math.floor(options.inputDelay as number)))
     : DEFAULT_INPUT_DELAY;
+  const maxPlayers = Number.isFinite(options.maxPlayers)
+    ? Math.min(MAX_PLAYERS, Math.max(1, Math.floor(options.maxPlayers as number)))
+    : MAX_PLAYERS;
+  const engineId = typeof options.engine === 'string' ? options.engine.trim().slice(0, 64) : '';
+  const autoAdmit = Boolean(options.autoAdmit);
+  const joinTimeoutMs = Number.isFinite(options.joinTimeoutMs)
+    ? Math.min(120000, Math.max(1000, Math.floor(options.joinTimeoutMs as number)))
+    : JOIN_TIMEOUT_MS;
+  const playerName =
+    typeof options.playerName === 'string' ? options.playerName.trim().slice(0, 24) : '';
 
   let amHost = Boolean(options.isHost);
   let hostPeerId: string | undefined;
@@ -226,9 +355,25 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   let waitingFor: string[] = [];
   let lastAppliedSaveTick = -1;
 
-  const { players, peerToPlayer } = normalizePeers(options.peers, transport.selfId, localPlayer);
+  // Late join (issue #38)
+  let joinPhaseState: JoinPhase = 'idle';
+  let joinMode = false;
+  let joinHostId: string | undefined;
+  let joinAssembly: JoinAssembly | null = null;
+  let lastJoinRequestAt = -Infinity;
+  let joinDeadline = 0;
+  let joinRequestedPlayer: number | undefined;
+  let selfMapped = false;
 
-  const selfRecord = players.get(localPlayer);
+  const { players, peerToPlayer } = normalizePeers(options.peers, transport.selfId, localPlayer);
+  selfMapped = peerToPlayer.get(transport.selfId) === localPlayer;
+
+  /** Host: reserved seats / join windows waiting for a `join-request`. */
+  const joinWindows = new Map<string, PendingJoin>();
+  /** Host: at most one save transfer is in flight (the simulation pauses). */
+  const joinTransfers = new Map<string, PendingJoin>();
+
+  const selfRecord = selfMapped ? players.get(localPlayer) : undefined;
   if (amHost) {
     if (selfRecord) selfRecord.connected = true;
     hostPeerId = transport.selfId;
@@ -264,6 +409,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   const desyncHandlers = new Set<() => void>();
   const chatHandlers = new Set<(message: ChatEvent) => void>();
+  const joinHandlers = new Set<(event: JoinEvent) => void>();
   const offs: (() => void)[] = [];
 
   // ------------------------------------------------------------------ helpers
@@ -330,6 +476,16 @@ export function createNetSession(options: NetSessionOptions): NetSession {
         fn(message);
       } catch (error) {
         console.error('[net:session] onChat handler error', error);
+      }
+    }
+  }
+
+  function emitJoin(event: JoinEvent): void {
+    for (const fn of [...joinHandlers]) {
+      try {
+        fn(event);
+      } catch (error) {
+        console.error('[net:session] onJoin handler error', error);
       }
     }
   }
@@ -487,10 +643,24 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     }
   }
 
+  /** Peers that may receive turns right now (pending joiners excluded). */
+  function turnTargets(): string[] | undefined {
+    if (joinWindows.size === 0 && joinTransfers.size === 0) return undefined;
+    const targets: string[] = [];
+    for (const player of players.values()) {
+      if (player.left || !player.connected) continue;
+      if (player.peerId === transport.selfId) continue;
+      if (joinWindows.has(player.peerId) || joinTransfers.has(player.peerId)) continue;
+      targets.push(player.peerId);
+    }
+    return targets;
+  }
+
   function flushTurns(): void {
     if (outTurns.length === 0) return;
+    const targets = turnTargets();
     for (const turn of outTurns) {
-      send('turn', turn);
+      send('turn', turn, targets);
     }
     outTurns = [];
   }
@@ -592,6 +762,557 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     outboxFlushPending = false;
   }
 
+  // ------------------------------------------------------------------ late join
+
+  /** Players whose seat is reserved or confirmed (departed seats excluded). */
+  function activeSeatCount(): number {
+    let count = 0;
+    for (const player of players.values()) {
+      if (!player.left) count += 1;
+    }
+    return count;
+  }
+
+  function freePlayerIndex(requested?: number): number | null {
+    if (requested !== undefined && isPlayerId(requested) && !players.has(requested)) {
+      return requested;
+    }
+    for (let index = 0; index < MAX_PLAYERS; index++) {
+      if (!players.has(index)) return index;
+    }
+    return null;
+  }
+
+  function sendJoinReject(
+    peerId: string,
+    reason: JoinRejectReason,
+    message: string,
+    tick?: number,
+    wireVersion?: number,
+  ): void {
+    const version =
+      wireVersion !== undefined && Number.isInteger(wireVersion) && wireVersion >= 0
+        ? wireVersion
+        : NET_PROTOCOL_VERSION;
+    send(
+      JOIN_CHANNELS.reject,
+      {
+        v: version,
+        k: 'join-reject',
+        reason,
+        message: message.slice(0, 240),
+        ...(tick === undefined ? {} : { tick }),
+      },
+      peerId,
+    );
+  }
+
+  function rejectJoin(
+    peerId: string,
+    reason: JoinRejectReason,
+    message: string,
+    player?: number,
+    tick?: number,
+    wireVersion?: number,
+  ): void {
+    sendJoinReject(peerId, reason, message, tick, wireVersion);
+    emitJoin({ ok: false, peerId, reason, message, player, tick });
+  }
+
+  function removeJoinSeat(pending: PendingJoin): void {
+    const record = players.get(pending.player);
+    if (record && record.peerId === pending.peerId) players.delete(pending.player);
+    if (peerToPlayer.get(pending.peerId) === pending.player) peerToPlayer.delete(pending.peerId);
+    joinWindows.delete(pending.peerId);
+    joinTransfers.delete(pending.peerId);
+  }
+
+  /** Host: refuses a reserved seat or aborts an in-flight transfer. */
+  function cancelJoin(peerId: string, reason: JoinRejectReason, message: string): void {
+    const pending = joinTransfers.get(peerId) ?? joinWindows.get(peerId);
+    if (!pending) return;
+    removeJoinSeat(pending);
+    sendJoinReject(peerId, reason, message, pending.sent ? pending.tick : undefined);
+    emitJoin({
+      ok: false,
+      peerId,
+      player: pending.player,
+      tick: pending.sent ? pending.tick : undefined,
+      reason,
+      message,
+    });
+  }
+
+  function openJoinWindow(peerId: string, requested?: number): PendingJoin | null {
+    const existing = joinWindows.get(peerId) ?? joinTransfers.get(peerId);
+    if (existing) return existing;
+    if (peerToPlayer.has(peerId)) return null; // already seated or already left
+    if (activeSeatCount() >= maxPlayers) return null;
+    const player = freePlayerIndex(requested);
+    if (player === null) return null;
+    players.set(player, { index: player, peerId, left: false, connected: false });
+    peerToPlayer.set(peerId, player);
+    const pending: PendingJoin = {
+      peerId,
+      player,
+      sent: false,
+      tick: 0,
+      hash: '',
+      id: '',
+      total: 0,
+      startedAt: currentNow,
+      expiresAt: currentNow + joinTimeoutMs,
+    };
+    joinWindows.set(peerId, pending);
+    return pending;
+  }
+
+  /** Host: (re)sends the accept plan and every chunk of a prepared transfer. */
+  function sendJoinPlan(pending: PendingJoin): void {
+    const save = pending.save;
+    if (save === undefined) return;
+    send(
+      JOIN_CHANNELS.accept,
+      {
+        k: 'join-accept',
+        epoch,
+        tick: pending.tick,
+        total: pending.total,
+        player: pending.player,
+        id: pending.id,
+        hash: pending.hash,
+        ...(engineId ? { engine: engineId } : {}),
+      },
+      pending.peerId,
+    );
+    for (let index = 0; index < pending.total; index++) {
+      const start = index * MAX_SAVE_CHUNK_CHARS;
+      const chunk: SaveChunk = {
+        id: pending.id,
+        index,
+        total: pending.total,
+        data: save.slice(start, start + MAX_SAVE_CHUNK_CHARS),
+      };
+      send(
+        JOIN_CHANNELS.chunk,
+        { k: 'join-chunk', epoch, tick: pending.tick, save: chunk },
+        pending.peerId,
+      );
+    }
+  }
+
+  /** Host: serialises the state at the current tick and pauses until ready. */
+  function startJoinTransfer(pending: PendingJoin): boolean {
+    if (joinTransfers.size > 0 && !joinTransfers.has(pending.peerId)) {
+      rejectJoin(
+        pending.peerId,
+        'closed',
+        'Un autre joueur est déjà en train de rejoindre la partie.',
+        pending.player,
+      );
+      return false;
+    }
+    if (pending.sent) {
+      sendJoinPlan(pending);
+      return true;
+    }
+
+    const tick = runner.tick();
+    let save: string;
+    let hash: string;
+    try {
+      save = runner.serialize();
+      hash = runner.hash();
+    } catch (error) {
+      console.error('[net:session] join : sérialisation impossible', error);
+      cancelJoin(pending.peerId, 'invalid-save', 'L’hôte ne peut pas sérialiser la partie.');
+      return false;
+    }
+    if (typeof save !== 'string' || typeof hash !== 'string') {
+      cancelJoin(pending.peerId, 'invalid-save', 'Sauvegarde d’hôte invalide.');
+      return false;
+    }
+    const total = Math.max(1, Math.ceil(save.length / MAX_SAVE_CHUNK_CHARS));
+    if (total > MAX_SAVE_CHUNKS || save.length > MAX_SAVE_CHARS) {
+      cancelJoin(
+        pending.peerId,
+        'invalid-save',
+        'La sauvegarde dépasse la taille maximale du protocole de join.',
+      );
+      return false;
+    }
+
+    pending.sent = true;
+    pending.tick = tick;
+    pending.hash = hash;
+    pending.total = total;
+    pending.save = save;
+    pending.id = `join-${tick}-${++saveSeq}`;
+    pending.startedAt = currentNow;
+    pending.expiresAt = currentNow + joinTimeoutMs;
+    joinWindows.delete(pending.peerId);
+    joinTransfers.set(pending.peerId, pending);
+    sendJoinPlan(pending);
+    return true;
+  }
+
+  /** Host: expires idle windows and aborted transfers. */
+  function expireJoins(now: number): void {
+    for (const pending of [...joinWindows.values()]) {
+      if (now >= pending.expiresAt) {
+        cancelJoin(pending.peerId, 'closed', 'La fenêtre de join a expiré.');
+      }
+    }
+    for (const pending of [...joinTransfers.values()]) {
+      if (now >= pending.expiresAt) {
+        cancelJoin(pending.peerId, 'timeout', 'Le transfert de sauvegarde a expiré.');
+      }
+    }
+  }
+
+  /** Host: receives a late-join request (including incompatible versions). */
+  function handleJoinRequest(raw: unknown, from: string): void {
+    if (!amHost || disposed || from === transport.selfId) return;
+    if (!isRecord(raw) || raw.k !== 'join-request') return;
+    if (raw.v !== NET_PROTOCOL_VERSION) {
+      rejectJoin(
+        from,
+        'version',
+        'Version de protocole incompatible.',
+        undefined,
+        undefined,
+        typeof raw.v === 'number' ? raw.v : undefined,
+      );
+      return;
+    }
+    if (raw.pv !== JOIN_PROTOCOL_VERSION) {
+      rejectJoin(from, 'version', 'Version du protocole de join incompatible.');
+      return;
+    }
+    if (!isJoinRequestMessage(raw)) {
+      rejectJoin(from, 'version', 'Demande de join invalide.');
+      return;
+    }
+    if (engineId && raw.engine !== engineId) {
+      rejectJoin(from, 'version', 'Version du moteur incompatible.');
+      return;
+    }
+
+    const existing = playerOf(from);
+    if (existing && existing.connected && !existing.left) return; // already playing
+    if (existing && existing.left) {
+      rejectJoin(from, 'closed', 'Ce joueur a déjà quitté la partie.', existing.index);
+      return;
+    }
+
+    let pending = joinTransfers.get(from) ?? joinWindows.get(from);
+    if (!pending) {
+      if (activeSeatCount() >= maxPlayers) {
+        rejectJoin(from, 'full', 'La partie est complète.');
+        return;
+      }
+      if (!autoAdmit) {
+        rejectJoin(
+          from,
+          hostStarted ? 'started' : 'closed',
+          hostStarted
+            ? 'La partie a déjà démarré : l’hôte doit ouvrir une fenêtre de join.'
+            : 'La partie n’a pas encore démarré.',
+        );
+        return;
+      }
+      if (!hostStarted) {
+        rejectJoin(from, 'closed', 'La partie n’a pas encore démarré.');
+        return;
+      }
+      pending = openJoinWindow(from, raw.player) ?? undefined;
+      if (!pending) {
+        rejectJoin(from, 'full', 'La partie est complète.');
+        return;
+      }
+    }
+
+    if (joinTransfers.size > 0 && !joinTransfers.has(from)) {
+      rejectJoin(
+        from,
+        'closed',
+        'Un autre joueur est déjà en train de rejoindre la partie.',
+        pending.player,
+      );
+      return;
+    }
+    startJoinTransfer(pending);
+  }
+
+  /** Host: the newcomer loaded the save and reports its hash at tick N. */
+  function handleJoinReady(raw: unknown, from: string): void {
+    if (!amHost || disposed) return;
+    if (!isJoinReadyMessage(raw)) return;
+    const pending = joinTransfers.get(from);
+    if (!pending) {
+      const player = playerOf(from);
+      if (!player || !player.connected) {
+        sendJoinReject(from, 'closed', 'Aucun join en cours pour ce pair.');
+      }
+      return;
+    }
+    if (raw.ok === false || raw.tick !== pending.tick || raw.hash !== pending.hash) {
+      cancelJoin(
+        from,
+        'invalid-save',
+        'La sauvegarde chargée ne correspond pas à l’état de l’hôte.',
+      );
+      return;
+    }
+    if (pending.tick < historyStart) {
+      cancelJoin(from, 'invalid-save', 'L’historique nécessaire au join a été purgé.');
+      return;
+    }
+
+    joinTransfers.delete(from);
+    joinWindows.delete(from);
+    const player = players.get(pending.player);
+    if (!player || player.peerId !== from) {
+      sendJoinReject(from, 'invalid-save', 'Place de joueur introuvable.', pending.tick);
+      return;
+    }
+    player.left = false;
+    player.connected = true;
+    ready.add(from);
+    lastAckByPeer.set(from, pending.tick);
+    clientHashes.delete(from);
+    // The new peer must not receive turns before N: the save covers state N.
+    sendTurnsTo(from, pending.tick);
+    emitJoin({ ok: true, peerId: from, player: pending.player, tick: pending.tick });
+  }
+
+  // ------------------------------------------------------------ client join
+
+  function sendJoinRequest(): void {
+    if (disposed || amHost || !joinHostId) return;
+    lastJoinRequestAt = currentNow;
+    send(
+      JOIN_CHANNELS.request,
+      {
+        k: 'join-request',
+        pv: JOIN_PROTOCOL_VERSION,
+        ...(joinRequestedPlayer === undefined ? {} : { player: joinRequestedPlayer }),
+        ...(playerName ? { name: playerName } : {}),
+        ...(engineId ? { engine: engineId } : {}),
+      },
+      joinHostId,
+    );
+  }
+
+  function sendJoinReady(ok: boolean, tick: number, hash: string, error?: string): void {
+    if (!joinHostId) return;
+    send(
+      JOIN_CHANNELS.ready,
+      {
+        k: 'join-ready',
+        epoch,
+        tick,
+        hash,
+        ok,
+        ...(error ? { error: error.slice(0, 240) } : {}),
+      },
+      joinHostId,
+    );
+  }
+
+  function failJoin(reason: JoinRejectReason, message: string, notifyHost: boolean): void {
+    joinAssembly = null;
+    joinPhaseState = 'rejected';
+    if (notifyHost) sendJoinReady(false, runner.tick(), '', message);
+    emitJoin({ ok: false, peerId: joinHostId, reason, message });
+  }
+
+  /** Adopts the player index assigned by the host, never the requested one. */
+  function assignLocalPlayer(index: number): boolean {
+    if (!isPlayerId(index)) return false;
+    const occupied = players.get(index);
+    if (occupied && occupied.peerId !== transport.selfId) return false;
+    const previous = players.get(localPlayer);
+    if (previous && previous.peerId === transport.selfId && localPlayer !== index) {
+      players.delete(localPlayer);
+    }
+    players.set(index, { index, peerId: transport.selfId, left: false, connected: true });
+    peerToPlayer.set(transport.selfId, index);
+    localPlayer = index;
+    selfMapped = true;
+    return true;
+  }
+
+  function handleJoinAccept(message: JoinAcceptMessage, from: string): void {
+    if (amHost || disposed || !joinMode) return;
+    if (from !== joinHostId) return;
+    if (joinPhaseState === 'joined' || joinPhaseState === 'rejected') return;
+    if (engineId && message.engine !== undefined && message.engine !== engineId) {
+      failJoin('version', 'Version du moteur incompatible.', false);
+      return;
+    }
+    if (joinAssembly && joinAssembly.id === message.id && joinAssembly.total === message.total) {
+      return; // duplicate accept (retransmission)
+    }
+    hostPeerId = from;
+    joinPhaseState = 'transfer';
+    joinDeadline = currentNow + joinTimeoutMs;
+    joinAssembly = {
+      epoch: message.epoch,
+      tick: message.tick,
+      player: message.player,
+      id: message.id,
+      hash: message.hash,
+      total: message.total,
+      chunks: new Array<string | undefined>(message.total),
+      received: 0,
+    };
+  }
+
+  function completeJoin(assembly: JoinAssembly, data: string): void {
+    let loadError: unknown = null;
+    try {
+      runner.load(data);
+    } catch (error) {
+      loadError = error;
+    }
+    if (loadError !== null) {
+      console.error('[net:session] join : sauvegarde illisible', loadError);
+      failJoin('invalid-save', 'La sauvegarde reçue est illisible.', true);
+      return;
+    }
+    const loadedTick = runner.tick();
+    let hash: string;
+    try {
+      hash = runner.hash();
+    } catch (error) {
+      console.error('[net:session] join : hash impossible', error);
+      failJoin('invalid-save', 'L’état chargé ne produit pas de hash.', true);
+      return;
+    }
+    if (loadedTick !== assembly.tick || hash !== assembly.hash) {
+      failJoin(
+        'invalid-save',
+        'La sauvegarde chargée ne correspond pas au tick ou au hash annoncés.',
+        true,
+      );
+      return;
+    }
+    if (!assignLocalPlayer(assembly.player)) {
+      failJoin('invalid-save', 'La place attribuée est déjà occupée.', true);
+      return;
+    }
+
+    if (assembly.epoch > epoch) epoch = assembly.epoch;
+    turns.clear();
+    ownHashes.clear();
+    hostHashes.clear();
+    clientHashes.clear();
+    historyStart = loadedTick;
+    turnsEnd = loadedTick;
+    acc = 0;
+    stallSince = null;
+    lost = false;
+    lastAppliedSaveTick = Math.max(lastAppliedSaveTick, loadedTick);
+    lastHelloAt = currentNow;
+    joinAssembly = null;
+    joinPhaseState = 'joined';
+    // Confirm first: the host only accepts commands once the seat is active.
+    sendJoinReady(true, loadedTick, hash);
+    // Commands issued while waiting for the save are still relevant.
+    resendPending();
+    emitJoin({ ok: true, peerId: joinHostId, player: localPlayer, tick: loadedTick });
+  }
+
+  function handleJoinChunk(message: JoinChunkMessage, from: string): void {
+    if (amHost || disposed || !joinMode) return;
+    if (from !== joinHostId) return;
+    if (joinPhaseState !== 'transfer' || !joinAssembly) return;
+    const chunk = message.save;
+    const assembly = joinAssembly;
+    if (
+      message.epoch !== assembly.epoch ||
+      message.tick !== assembly.tick ||
+      chunk.id !== assembly.id ||
+      chunk.total !== assembly.total
+    ) {
+      return; // stale or inconsistent transfer
+    }
+    if (assembly.chunks[chunk.index] !== undefined) return;
+    assembly.chunks[chunk.index] = chunk.data;
+    assembly.received += 1;
+    if (assembly.received < assembly.total) return;
+    const complete = assembly.chunks.every((part): part is string => typeof part === 'string');
+    if (!complete) {
+      failJoin('invalid-save', 'Le transfert de sauvegarde est incomplet.', true);
+      return;
+    }
+    joinAssembly = null;
+    completeJoin(assembly, assembly.chunks.join(''));
+  }
+
+  function handleJoinReject(message: unknown, from: string): void {
+    if (amHost || disposed || !joinMode) return;
+    if (from !== joinHostId) return;
+    if (joinPhaseState === 'rejected') return;
+    if (!isJoinRejectMessage(message)) return;
+    joinAssembly = null;
+    joinPhaseState = 'rejected';
+    const detail = message.message ?? 'Join refusé par l’hôte.';
+    emitJoin({
+      ok: false,
+      peerId: from,
+      reason: message.reason,
+      message: detail,
+      tick: message.tick,
+    });
+  }
+
+  function requestJoin(hostId: string, playerIndex?: number): boolean {
+    if (disposed || amHost) return false;
+    if (typeof hostId !== 'string' || hostId.length === 0) return false;
+    if (hostId === transport.selfId) return false;
+    if (playerIndex !== undefined && !isPlayerId(playerIndex)) return false;
+    if (joinPhaseState === 'joined') return false;
+    joinMode = true;
+    joinPhaseState = 'requesting';
+    joinHostId = hostId;
+    hostPeerId = hostId;
+    joinRequestedPlayer = playerIndex;
+    joinAssembly = null;
+    lastJoinRequestAt = -Infinity;
+    joinDeadline = currentNow + joinTimeoutMs;
+    sendJoinRequest();
+    return true;
+  }
+
+  function admitPeer(peerId: string, playerIndex?: number): JoinAdmission | null {
+    if (!amHost || disposed) return null;
+    if (typeof peerId !== 'string' || peerId.length === 0) return null;
+    if (peerId === transport.selfId) return null;
+    const existing = playerOf(peerId);
+    if (existing) {
+      if (existing.left) return null;
+      return { peerId, player: existing.index };
+    }
+    const pending = joinWindows.get(peerId) ?? joinTransfers.get(peerId);
+    if (pending) return { peerId, player: pending.player };
+    if (!hostStarted) return null;
+    const opened = openJoinWindow(peerId, playerIndex);
+    return opened ? { peerId, player: opened.player } : null;
+  }
+
+  function closeJoinWindow(peerId?: string): void {
+    if (!amHost || disposed) return;
+    const targets =
+      peerId === undefined
+        ? [...new Set([...joinWindows.keys(), ...joinTransfers.keys()])]
+        : [peerId];
+    for (const target of targets) {
+      cancelJoin(target, 'closed', 'La fenêtre de join a été fermée par l’hôte.');
+    }
+  }
+
   // ------------------------------------------------------------------ commands
 
   function issue(cmd: EngineCommand): void {
@@ -640,6 +1361,8 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   function sendHello(target?: string): void {
     if (disposed) return;
+    // A late joiner has no authoritative player index until `join-accept`.
+    if (!amHost && !selfMapped) return;
     lastHelloAt = currentNow;
     send(
       'hello',
@@ -661,6 +1384,9 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     if (message.player !== player.index) return; // mapping is authoritative
 
     if (amHost) {
+      // A reserved seat is not playing yet: only `join-request`/`join-ready`
+      // can confirm the handshake and unblock its turns.
+      if (joinWindows.has(from) || joinTransfers.has(from)) return;
       ready.add(from);
       if (!lastAckByPeer.has(from)) lastAckByPeer.set(from, message.tick);
       if (!message.reply) {
@@ -683,6 +1409,8 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     }
 
     if (!message.host) return;
+    // While joining, the join handshake is the only authority: ignore hello.
+    if (joinMode && joinPhaseState !== 'joined') return;
     if (from === hostPeerId) return;
     if (hostLostSince !== null || hostPeerId === undefined) {
       // Host migration: accept the peer that took over.
@@ -736,6 +1464,12 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     migrationCandidate = undefined;
     hostLostSince = null;
     lost = false;
+    joinWindows.clear();
+    joinTransfers.clear();
+    if (joinMode && joinPhaseState !== 'joined') {
+      joinAssembly = null;
+      joinPhaseState = 'rejected';
+    }
     ready.clear();
     lastAckByPeer.clear();
     hostQueue = [];
@@ -757,6 +1491,10 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     const player = playerOf(peerId);
     if (player) player.connected = false;
     if (amHost) {
+      if (joinWindows.has(peerId) || joinTransfers.has(peerId)) {
+        cancelJoin(peerId, 'closed', 'Le pair a quitté pendant la fenêtre de join.');
+        return;
+      }
       if (player) {
         queueLeave(player.index);
       }
@@ -773,6 +1511,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   function onPeerJoin(peerId: string): void {
     if (amHost) {
+      if (joinWindows.has(peerId) || joinTransfers.has(peerId)) return;
       const player = playerOf(peerId);
       if (player && !player.left) {
         player.connected = true;
@@ -787,6 +1526,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   function onTurn(message: TurnMessage, from: string): void {
     if (amHost) return;
+    if (joinMode && joinPhaseState !== 'joined') return;
     if (from !== hostPeerId) return;
     if (message.tick < runner.tick()) return;
     if (message.tick > runner.tick() + MAX_TURN_AHEAD) return;
@@ -816,6 +1556,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       return;
     }
     if (from !== hostPeerId) return;
+    if (joinMode && joinPhaseState !== 'joined') return;
     rememberHash(hostHashes, message.tick, message.hash);
     const mine = ownHashes.get(message.tick);
     if (mine !== undefined && mine !== message.hash) requestResync();
@@ -831,6 +1572,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       return;
     }
     if (from !== hostPeerId) return;
+    if (joinMode && joinPhaseState !== 'joined') return;
     if (message.request || !message.save) return;
     const chunk = message.save;
     if (chunk.total > MAX_SAVE_CHUNKS) return;
@@ -874,6 +1616,7 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   function requestResync(): void {
     if (disposed || amHost || !hostPeerId) return;
+    if (joinMode && joinPhaseState !== 'joined') return;
     if (currentNow - lastResyncRequestAt < RESYNC_RETRY_MS) return;
     lastResyncRequestAt = currentNow;
     send('resync', { k: 'resync', epoch, tick: runner.tick(), request: true }, hostPeerId);
@@ -930,6 +1673,31 @@ export function createNetSession(options: NetSessionOptions): NetSession {
       }
     }),
   );
+  offs.push(
+    transport.on(JOIN_CHANNELS.request, (data, from) => {
+      handleJoinRequest(data, from);
+    }),
+  );
+  offs.push(
+    transport.on(JOIN_CHANNELS.accept, (data, from) => {
+      if (isJoinAcceptMessage(data)) handleJoinAccept(data, from);
+    }),
+  );
+  offs.push(
+    transport.on(JOIN_CHANNELS.chunk, (data, from) => {
+      if (isJoinChunkMessage(data)) handleJoinChunk(data, from);
+    }),
+  );
+  offs.push(
+    transport.on(JOIN_CHANNELS.ready, (data, from) => {
+      handleJoinReady(data, from);
+    }),
+  );
+  offs.push(
+    transport.on(JOIN_CHANNELS.reject, (data, from) => {
+      handleJoinReject(data, from);
+    }),
+  );
   offs.push(transport.onPeerJoin(onPeerJoin));
   offs.push(transport.onPeerLeave(onPeerLeave));
   offs.push(
@@ -950,6 +1718,15 @@ export function createNetSession(options: NetSessionOptions): NetSession {
 
   function updateHost(now: number, dt: number): NetUpdate {
     if (firstUpdateAt === null) firstUpdateAt = now;
+    expireJoins(now);
+    if (joinTransfers.size > 0) {
+      // Simple, deterministic policy: a join pauses the whole simulation. The
+      // state is serialised at the current tick N; no turn is executed or sent
+      // until the newcomer has confirmed the hash at N (or the window expires).
+      acc = 0;
+      waitingFor = [...joinTransfers.keys()];
+      return { ticks: 0, waiting: true, waitingFor: [...waitingFor], desyncs };
+    }
     const expected = expectedClients();
     if (!hostStarted) {
       const missing = expected.filter((player) => !ready.has(player.peerId));
@@ -998,6 +1775,25 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   }
 
   function updateClient(now: number, dt: number): NetUpdate {
+    if (joinMode && joinPhaseState !== 'joined') {
+      if (
+        (joinPhaseState === 'requesting' || joinPhaseState === 'transfer') &&
+        now - lastJoinRequestAt >= JOIN_REQUEST_RETRY_MS
+      ) {
+        // A retry makes the host resend its plan if chunks were lost.
+        sendJoinRequest();
+      }
+      if (
+        (joinPhaseState === 'requesting' || joinPhaseState === 'transfer') &&
+        now >= joinDeadline
+      ) {
+        failJoin('timeout', 'Le délai de join est dépassé.', false);
+      }
+      const waiting = joinPhaseState === 'requesting' || joinPhaseState === 'transfer';
+      waitingFor = waiting && joinHostId ? [joinHostId] : [];
+      return { ticks: 0, waiting, waitingFor: [...waitingFor], desyncs };
+    }
+
     flushOwnCommands();
 
     if (now - lastHelloAt >= READY_RESEND_MS) {
@@ -1119,6 +1915,29 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     };
   }
 
+  function onJoin(fn: (event: JoinEvent) => void): () => void {
+    if (typeof fn !== 'function') throw new TypeError('Un handler doit être une fonction');
+    joinHandlers.add(fn);
+    return () => {
+      joinHandlers.delete(fn);
+    };
+  }
+
+  function joinPhase(): JoinPhase {
+    return joinPhaseState;
+  }
+
+  function joinProgress(): JoinProgress {
+    const progress: JoinProgress = {
+      phase: joinPhaseState,
+      received: joinAssembly?.received ?? 0,
+      total: joinAssembly?.total ?? 0,
+    };
+    if (selfMapped) progress.player = localPlayer;
+    if (joinAssembly) progress.tick = joinAssembly.tick;
+    return progress;
+  }
+
   function provideSave(data: string, target?: string): void {
     if (disposed || !amHost || typeof data !== 'string') return;
     const total = Math.max(1, Math.ceil(data.length / MAX_SAVE_CHUNK_CHARS));
@@ -1154,12 +1973,18 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     offs.length = 0;
     desyncHandlers.clear();
     chatHandlers.clear();
+    joinHandlers.clear();
     saveAssemblies.clear();
+    joinWindows.clear();
+    joinTransfers.clear();
+    joinAssembly = null;
     transport.leave();
   }
 
   return {
-    localPlayer,
+    get localPlayer() {
+      return localPlayer;
+    },
     issue,
     update,
     alpha,
@@ -1167,6 +1992,12 @@ export function createNetSession(options: NetSessionOptions): NetSession {
     onDesync,
     requestResync,
     provideSave,
+    requestJoin,
+    admitPeer,
+    closeJoinWindow,
+    onJoin,
+    joinPhase,
+    joinProgress,
     sendChat,
     onChat,
     dispose,

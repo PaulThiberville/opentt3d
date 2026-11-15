@@ -281,7 +281,9 @@ export async function loadEngine(options: EngineLoadOptions = {}): Promise<Loade
 
   let factory = options.factory;
   if (!factory) {
-    await assertReachable(moduleUrl);
+    // Un importeur injecté (tests, embarquement) gère lui-même l'accessibilité :
+    // ne pas pré-vérifier en HTTP, ce qui rendrait les tests dépendants du réseau.
+    if (!options.importModule) await assertReachable(moduleUrl);
     report(0.06, 'Téléchargement du module moteur…');
     const importer = options.importModule ?? ((url: string) => import(/* @vite-ignore */ url));
     let imported: unknown;
