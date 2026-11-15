@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="OpenTT3D">
+  <rect width="64" height="64" rx="12" fill="#10151c" />
+  <path d="M32 14 56 32 32 50 8 32Z" fill="#3f7d4a" />
+  <path d="M32 14 56 32 32 50Z" fill="#2f5f3d" />
+  <path d="M13 34 51 22" stroke="#d9e2ec" stroke-width="2.4" stroke-linecap="round" />
+  <path d="M13 42 51 30" stroke="#d9e2ec" stroke-width="2.4" stroke-linecap="round" />
+  <path d="M32 25.5 40 31 32 36.5 24 31Z" fill="#f2b544" />
+  <path d="M24 31 32 36.5V41L24 35.5Z" fill="#c98a1f" />
+  <path d="M40 31 32 36.5V41L40 35.5Z" fill="#c98a1f" />
+</svg>
