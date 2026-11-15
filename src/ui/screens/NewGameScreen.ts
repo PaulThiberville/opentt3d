@@ -4,6 +4,7 @@
  */
 
 import { QUALITY_LEVELS, QUALITY_PRESETS } from '../../render/quality';
+import type { EngineMode } from '../../engine/loadEngine';
 import { el, fieldLabel, enableListNavigation } from '../dom';
 import {
   AI_COMPANIES,
@@ -23,6 +24,8 @@ export interface NewGameScreenOptions {
   initial: NewGameOptions;
   onStart: (options: NewGameOptions) => void;
   onBack: () => void;
+  /** Moteur qui sera utilisé (?engine=mock|wasm). */
+  engineMode?: EngineMode;
 }
 
 export class NewGameScreen extends BaseScreen {
@@ -112,7 +115,7 @@ export class NewGameScreen extends BaseScreen {
     sizeField.append(
       el('p', {
         className: 'field-hint',
-        text: '128 pour une partie rapide, 256 pour l’expérience par défaut, 384 pour une grande carte.',
+        text: '128 pour une partie rapide, 256 pour l’expérience par défaut, 512 pour une grande carte. Le moteur WASM exige des puissances de 2.',
       }),
     );
 
@@ -209,7 +212,7 @@ export class NewGameScreen extends BaseScreen {
       this.submit();
     });
 
-    panel.append(header, form);
+    panel.append(header, this.engineInfo(), form);
     this.element.append(panel);
     this.cleanupNavigation = enableListNavigation(panel);
 
@@ -218,6 +221,30 @@ export class NewGameScreen extends BaseScreen {
       text: 'Astuce : Échap revient au menu. Aucune donnée n’est envoyée sur le réseau.',
     });
     panel.append(footer);
+  }
+
+  /** Indicateur du moteur actif et avertissement sur les options non gérées. */
+  private engineInfo(): HTMLElement {
+    const mode = this.options.engineMode ?? 'mock';
+    const block = el('div', { className: 'field-hint' });
+    const badges = el('div', { className: 'menu-badges' });
+    badges.append(
+      el('span', {
+        className: 'badge',
+        text: mode === 'wasm' ? 'Moteur WASM (OpenTTD réel)' : 'Moteur simulé (Mock)',
+      }),
+    );
+    block.append(badges);
+    block.append(
+      el('p', {
+        className: 'field-hint',
+        text:
+          mode === 'wasm'
+            ? 'Le pont WASM ne gère pas encore le climat, l’année de départ, les IA ni la difficulté : la partie démarre en tempéré, en 1950, sans IA (#60).'
+            : 'Simulation déterministe locale. Ajoutez ?engine=wasm à l’URL pour tester le moteur OpenTTD réel.',
+      }),
+    );
+    return block;
   }
 
   protected override onKeyDown(event: KeyboardEvent): void {
