@@ -8,6 +8,58 @@
 
 import type { CameraView } from './types';
 
+const MINIMAP_SIGNATURE_OFFSET = 0x811c9dc5;
+const MINIMAP_SIGNATURE_PRIME = 0x01000193;
+
+/**
+ * Empreinte stable de la carte affichée par la minimap.
+ *
+ * Seuls le type de tuile et la hauteur influencent l'ImageData de base : les
+ * entités (villes, industries, véhicules) sont redessinées à part et n'ont pas
+ * besoin de déclencher une reconstruction du fond.
+ */
+export function computeMapSignature(map: {
+  width: number;
+  height: number;
+  kind: Uint8Array;
+  heightMap: Uint8Array;
+}): number {
+  let hash = MINIMAP_SIGNATURE_OFFSET;
+  hash = Math.imul(hash ^ map.width, MINIMAP_SIGNATURE_PRIME) >>> 0;
+  hash = Math.imul(hash ^ map.height, MINIMAP_SIGNATURE_PRIME) >>> 0;
+  for (let index = 0; index < map.kind.length; index += 1) {
+    hash = Math.imul(hash ^ (map.kind[index] ?? 0), MINIMAP_SIGNATURE_PRIME) >>> 0;
+  }
+  for (let index = 0; index < map.heightMap.length; index += 1) {
+    hash = Math.imul(hash ^ (map.heightMap[index] ?? 0), MINIMAP_SIGNATURE_PRIME) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+/** Limite les redraws de la minimap à une fréquence cible (4-10 Hz). */
+export class RedrawThrottle {
+  private last = Number.NEGATIVE_INFINITY;
+  private interval: number;
+
+  constructor(intervalMs = 100) {
+    this.interval = Math.max(0, intervalMs);
+  }
+
+  shouldDraw(now: number, force = false): boolean {
+    if (force) {
+      this.last = now;
+      return true;
+    }
+    if (now - this.last < this.interval) return false;
+    this.last = now;
+    return true;
+  }
+
+  reset(): void {
+    this.last = Number.NEGATIVE_INFINITY;
+  }
+}
+
 export interface Point {
   x: number;
   y: number;
