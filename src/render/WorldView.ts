@@ -10,6 +10,8 @@ import type * as THREE from 'three';
 import type { MapSnapshot, WorldSnapshot } from '../engine/protocol';
 import { VehicleInterpolator, type RenderVehicle } from '../game/vehicleInterpolation';
 import type { InterpolationState } from '../game/Game';
+import type { BuildPlan, BuildPoint } from '../game/buildRules';
+import { BuildOverlay } from './BuildOverlay';
 import { CameraController } from './CameraController';
 import { CityLayer } from './CityLayer';
 import { IndustryLayer } from './IndustryLayer';
@@ -41,6 +43,12 @@ export interface WorldViewOptions {
   onSelect?: (target: WorldTarget | null) => void;
   onHover?: (target: WorldTarget | null) => void;
   onNotice?: (text: string) => void;
+  /** Mode construction : survol, début de drag, déplacement, fin et annulation. */
+  onBuildHover?: (tile: BuildPoint | null) => void;
+  onBuildStart?: (tile: BuildPoint | null) => void;
+  onBuildMove?: (tile: BuildPoint | null) => void;
+  onBuildEnd?: (tile: BuildPoint | null) => void;
+  onBuildCancel?: () => void;
 }
 
 export class WorldView {
@@ -66,6 +74,13 @@ export class WorldView {
   private onSelect?: (target: WorldTarget | null) => void;
   private onHover?: (target: WorldTarget | null) => void;
   private onNotice?: (text: string) => void;
+  private onBuildHover?: (tile: BuildPoint | null) => void;
+  private onBuildStart?: (tile: BuildPoint | null) => void;
+  private onBuildMove?: (tile: BuildPoint | null) => void;
+  private onBuildEnd?: (tile: BuildPoint | null) => void;
+  private onBuildCancel?: () => void;
+  private buildOverlay = new BuildOverlay();
+  private buildMode = false;
   private lastHoverKey: string | null = null;
 
   constructor(options: WorldViewOptions) {
@@ -77,12 +92,18 @@ export class WorldView {
     this.onSelect = options.onSelect;
     this.onHover = options.onHover;
     this.onNotice = options.onNotice;
+    this.onBuildHover = options.onBuildHover;
+    this.onBuildStart = options.onBuildStart;
+    this.onBuildMove = options.onBuildMove;
+    this.onBuildEnd = options.onBuildEnd;
+    this.onBuildCancel = options.onBuildCancel;
 
     this.scene.add(this.terrain.group);
     this.scene.add(this.cityLayer.group);
     this.scene.add(this.industries.group);
     this.scene.add(this.vegetation.group);
     this.scene.add(this.vehicles.group);
+    this.scene.add(this.buildOverlay.group);
 
     this.picking = new Picking(
       {
@@ -151,7 +172,54 @@ export class WorldView {
     this.vegetation.update(deltaSeconds);
     this.industries.update(deltaSeconds, this.camera.position);
     this.applyNight(this.timeOfDay?.nightAmount ?? this.night);
-    this.updateHover();
+    if (this.buildMode) this.updateBuildHover();
+    else this.updateHover();
+  }
+
+  /**
+   * Active le mode construction : le clic gauche appartient à l'outil et le
+   * survol alimente l'aperçu. Le picking véhicule/bâtiment est suspendu pour
+   * que les entités ne détournent pas la tuile visée.
+   */
+  setBuildMode(enabled: boolean): void {
+    if (this.buildMode === enabled) return;
+    this.buildMode = enabled;
+    this.buildOverlay.clear();
+    this.picking.clearHover();
+    this.lastHoverKey = null;
+    if (enabled) {
+      this.controller.setPlacement({
+        begin: (ndc) => this.onBuildStart?.(this.pickTileAtNdc(ndc)),
+        move: (ndc) => this.onBuildMove?.(this.pickTileAtNdc(ndc)),
+        end: (ndc) => this.onBuildEnd?.(this.pickTileAtNdc(ndc)),
+        cancel: () => this.onBuildCancel?.(),
+      });
+      this.onBuildHover?.(null);
+    } else {
+      this.controller.setPlacement(null);
+    }
+  }
+
+  isBuildMode(): boolean {
+    return this.buildMode;
+  }
+
+  /** Affiche le fantôme du plan courant (ou le masque avec `null`). */
+  setBuildPlan(plan: BuildPlan | null): void {
+    this.buildOverlay.setPlan(plan, this.currentMap);
+  }
+
+  /** Tuile de terrain sous un point NDC (ignore véhicules et bâtiments). */
+  pickTileAtNdc(ndc: { x: number; y: number }): BuildPoint | null {
+    const hit = this.picking.pickTileWithCamera(ndc, this.camera);
+    return hit ? { x: hit.x, y: hit.y } : null;
+  }
+
+  private updateBuildHover(): void {
+    const ndc = this.controller.takeHover();
+    this.picking.clearHover();
+    if (ndc) this.onBuildHover?.(this.pickTileAtNdc(ndc));
+    else if (!this.controller.isPointerInside()) this.onBuildHover?.(null);
   }
 
   private updateHover(): void {
@@ -318,11 +386,13 @@ export class WorldView {
     this.scene.remove(this.industries.group);
     this.scene.remove(this.vegetation.group);
     this.scene.remove(this.vehicles.group);
+    this.scene.remove(this.buildOverlay.group);
     this.terrain.dispose();
     this.cityLayer.dispose();
     this.industries.dispose();
     this.vegetation.dispose();
     this.vehicles.dispose();
+    this.buildOverlay.dispose();
     this.renderVehicles = [];
     this.currentMap = null;
   }
