@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defineConfig, type Plugin } from 'vitest/config';
@@ -82,10 +83,20 @@ function pwaServiceWorker(): Plugin {
   };
 }
 
+const APP_VERSION =
+  (
+    JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as {
+      version?: string;
+    }
+  ).version ?? '0.0.0';
+
 // Relative base keeps the build deployable on GitHub Pages project sites,
 // in a sub-directory, or from the local file system.
 export default defineConfig({
   base: './',
+  define: {
+    __APP_VERSION__: JSON.stringify(APP_VERSION),
+  },
   plugins: [pwaServiceWorker()],
   build: {
     target: 'es2022',

@@ -25,6 +25,10 @@ export class AboutScreen extends BaseScreen {
       el('h1', { className: 'panel-title', text: 'OpenTT3D' }),
       el('p', { className: 'panel-subtitle', text: t('about.subtitle') }),
     );
+    const version = el('p', {
+      className: 'about-version',
+      text: `Version ${__APP_VERSION__}`,
+    });
 
     const body = el('div', { className: 'about-grid' });
     body.append(
@@ -70,7 +74,7 @@ export class AboutScreen extends BaseScreen {
     back.addEventListener('click', () => options.onBack());
     actions.append(back);
 
-    panel.append(header, body, links, actions);
+    panel.append(header, version, body, links, actions);
     this.element.append(panel);
   }
 
