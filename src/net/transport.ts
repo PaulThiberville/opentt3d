@@ -558,7 +558,7 @@ function createLocalTransport(
     const envelope: unknown = event.data;
     if (!isEnvelope(envelope) || envelope.f === selfId) return;
     try {
-      if (textBytes(JSON.stringify(envelope)) > MAX_MESSAGE_BYTES * 2) return;
+      if (textBytes(JSON.stringify(envelope)) > MAX_MESSAGE_BYTES + 4096) return;
     } catch {
       return;
     }
@@ -762,7 +762,13 @@ function createTrysteroTransport(
       if (closed) return;
       const logicalId = physicalToLogical.get(context.peerId);
       if (!logicalId) return;
-      if (textBytes(JSON.stringify(data)) > MAX_MESSAGE_BYTES + 1024) return;
+      let bytes: number;
+      try {
+        bytes = textBytes(JSON.stringify(data));
+      } catch {
+        return;
+      }
+      if (bytes > MAX_MESSAGE_BYTES + 1024) return;
       if (!rateLimit.allow(logicalId)) {
         const now = nowMs();
         if (now - lastRateError > 1000) {
