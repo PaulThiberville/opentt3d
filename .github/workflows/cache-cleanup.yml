@@ -20,6 +20,7 @@ jobs:
   cleanup:
     name: Supprimer les caches > 1 h
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Purger les caches expirés
         env:
