@@ -4,13 +4,20 @@
  * Module pur (aucun DOM) utilisé par l'écran « Nouvelle partie » et testé sous
  * Node. Les valeurs rejetées par le mock (taille, difficulté, IA, climat) sont
  * bornées ici avant d'atteindre le moteur.
+ *
+ * Tailles : le pont WASM exige des puissances de 2 entre 64 et 4096
+ * (`ottd_new_game`). L'UI n'expose donc que 128, 256 et 512 ; toute autre
+ * valeur est refusée ici, avant d'atteindre le moteur.
  */
 
 import type { QualityLevel } from '../render/quality';
 import { QUALITY_LEVELS } from '../render/quality';
 
-export const MAP_SIZES = [128, 192, 256, 384] as const;
+export const MAP_SIZES = [128, 256, 512] as const;
 export type MapSize = (typeof MAP_SIZES)[number];
+
+/** Taille par défaut : 256×256 (compromis lisibilité / coût du snapshot). */
+export const DEFAULT_MAP_SIZE: MapSize = 256;
 
 export const DIFFICULTIES = [
   { value: 0, label: 'Facile' },
@@ -55,7 +62,7 @@ export const MAX_START_YEAR = 2100;
 export function createDefaultNewGameOptions(quality: QualityLevel = 'medium'): NewGameOptions {
   return {
     seed: 1337,
-    size: 256,
+    size: DEFAULT_MAP_SIZE,
     quality,
     difficulty: 1,
     aiCompanies: 1,

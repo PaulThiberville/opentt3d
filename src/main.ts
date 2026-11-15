@@ -8,6 +8,12 @@
  */
 
 import './style.css';
+import {
+  EngineLoadError,
+  describeUnknownError,
+  parseEngineMode,
+  type EngineMode,
+} from './engine/loadEngine';
 import { Renderer } from './render/Renderer';
 import { detectQuality } from './render/quality';
 import { GameSession, LoadCancelledError, type LoadToken } from './ui/gameSession';
@@ -55,6 +61,24 @@ let session: GameSession | null = null;
 let settingsOrigin: SettingsOrigin = 'menu';
 
 const webglAvailable = Renderer.isWebGLAvailable();
+
+/**
+ * Moteur sélectionné par `?engine=mock|wasm`. Le mock reste le défaut : le
+ * moteur réel n'est activé que sur demande explicite, le temps de valider
+ * l'intégration (issue #13).
+ */
+function readEngineMode(): EngineMode {
+  const raw = new URLSearchParams(window.location.search).get('engine');
+  if (raw === null || raw.trim() === '') return 'mock';
+  const parsed = parseEngineMode(raw);
+  if (parsed) return parsed;
+  console.warn(
+    `[OpenTT3D] Moteur inconnu « ${raw} » : moteur mock utilisé. Valeurs acceptées : mock, wasm.`,
+  );
+  return 'mock';
+}
+
+const engineMode: EngineMode = readEngineMode();
 
 interface UrlBoot {
   options: NewGameOptions;
@@ -111,6 +135,7 @@ function showNewGame(): void {
     'new-game',
     new NewGameScreen({
       initial: pendingOptions,
+      engineMode,
       onStart: (options) => {
         pendingOptions = options;
         replayOptions = options;
@@ -172,6 +197,7 @@ async function startGame(options: NewGameOptions): Promise<void> {
     uiRoot: uiMount,
     config: options,
     settings,
+    engine: engineMode,
     callbacks: {
       onProgress: (progress, message) => loading.setProgress(progress, message),
       onPauseRequested: () => showPause(),
@@ -203,8 +229,13 @@ async function startGame(options: NewGameOptions): Promise<void> {
       showMainMenu();
       return;
     }
-    const message = error instanceof Error ? error.message : String(error);
-    loading.setError('Impossible de démarrer la partie', message);
+    const message = describeUnknownError(error);
+    if (error instanceof EngineLoadError) {
+      const hint = error.hint ? ` ${error.hint}` : '';
+      loading.setError('Moteur WASM indisponible', `${message}${hint}`);
+    } else {
+      loading.setError('Impossible de démarrer la partie', message);
+    }
   }
 }
 
@@ -263,6 +294,7 @@ function showGameOver(summary: GameOverSummary): void {
 function exposeDebug(current: GameSession): void {
   if (!import.meta.env.DEV) return;
   const api = {
+    engineMode,
     get game() {
       return current.gameInstance;
     },
