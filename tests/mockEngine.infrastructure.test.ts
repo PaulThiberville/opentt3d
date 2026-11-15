@@ -9,7 +9,6 @@ import {
   type StationSettings,
 } from '../src/game/buildRules';
 import { tileIndex } from '../src/game/mapGrid';
-import { DEPOT_TRACK_BIT } from '../src/game/vehicleRules';
 
 async function createEngine(seed = 1234, size = 128): Promise<MockEngine> {
   const engine = new MockEngine();
@@ -223,9 +222,28 @@ describe('MockEngine : dépôts et signaux', () => {
     expect(built.kind[index]).toBe(TILE_KIND_INDEX.road);
     expect(built.owner[index]).toBe(0);
     expect((built.trackBits[index] ?? 0) & 0x0f).toBe(1 | 4);
-    expect((built.trackBits[index] ?? 0) & DEPOT_TRACK_BIT).toBe(DEPOT_TRACK_BIT);
+    const depot = after.depots.find((item) => item.x === spot.x && item.y === spot.y);
+    expect(depot).toMatchObject({ company: 0, kind: 'road', direction: 1, width: 1, height: 1 });
     expect((after.companies[0]?.money ?? 0) - moneyBefore).toBe(-520);
     expect(after.news.some((item) => item.text.includes('Dépôt routier'))).toBe(true);
+  });
+
+  it('retire un dépôt du snapshot quand il est démoli', async () => {
+    const engine = await createEngine(909);
+    const map = mapOf(engine);
+    const spot = findDepotSpot(map, 'road');
+    engine.send({
+      type: 'build',
+      tool: 'depot',
+      company: 0,
+      from: spot,
+      options: { kind: 'road', direction: 'ne' },
+    });
+    const built = engine.snapshot().depots.find((item) => item.x === spot.x && item.y === spot.y);
+    if (!built) throw new Error('dépôt construit attendu');
+    engine.send({ type: 'build', tool: 'clear', company: 0, from: spot });
+    const after = engine.snapshot();
+    expect(after.depots.some((item) => item.id === built.id)).toBe(false);
   });
 
   it('pose un signal de bloc sur une voie de l’entreprise', async () => {

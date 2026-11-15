@@ -30,7 +30,7 @@ import {
 import { tileKindAt } from '../game/mapGrid';
 import {
   buyVehicleCommand,
-  depotKindAt,
+  depotAtTile,
   depotOrder,
   orderVehicleCommand,
   ordersFromSnapshot,
@@ -201,8 +201,8 @@ export class GameSession {
 
   private quality: QualityLevel;
   private lastTarget: WorldTarget | null = null;
-  /** Dépôt ouvert par un clic (panneau achat/gestion). */
-  private openDepot: { x: number; y: number } | null = null;
+  /** Dépôt ouvert par un clic (id stable de `snapshot.depots`). */
+  private openDepot: number | null = null;
   /** Véhicule dont la tournée attend un clic sur une gare/dépôt. */
   private orderPickingFor: number | null = null;
   private hudTimer = 0;
@@ -759,7 +759,7 @@ export class GameSession {
         this.cancelOrderPicking();
         return;
       }
-      if (this.openDepot) {
+      if (this.openDepot !== null) {
         this.closeDepot();
         return;
       }
@@ -921,10 +921,9 @@ export class GameSession {
     const map = world.getMap();
     const selection = game.getSelection();
     const companyId = this.localCompanyId();
-    let depot = this.openDepot
-      ? describeDepotPanel(snapshot, map, companyId, this.openDepot)
-      : null;
-    if (this.openDepot && !depot) this.openDepot = null;
+    let depot =
+      this.openDepot !== null ? describeDepotPanel(snapshot, companyId, this.openDepot) : null;
+    if (this.openDepot !== null && !depot) this.openDepot = null;
     let vehicle = null;
     if (selection?.kind === 'vehicle') {
       vehicle = describeVehiclePanel(
@@ -969,8 +968,9 @@ export class GameSession {
     this.lastTarget = target;
 
     if (target && target.kind === 'tile' && map) {
-      if (depotKindAt(map, target.x, target.y)) {
-        this.openDepot = { x: target.x, y: target.y };
+      const depot = depotAtTile(snapshot, target.x, target.y);
+      if (depot) {
+        this.openDepot = depot.id;
       } else {
         const station = stationAtTile(snapshot, target.x, target.y);
         if (station) {
@@ -1028,15 +1028,15 @@ export class GameSession {
    */
   private buyVehicle(modelId: string): void {
     const game = this.game;
-    const depot = this.openDepot;
-    if (!game || !depot) return;
+    const depotId = this.openDepot;
+    if (!game || depotId === null) return;
     const company = this.localCompanyId();
     if (company === null) {
       this.hud?.notify('warning', 'Aucune entreprise locale : achat impossible.');
       return;
     }
     const before = new Set(game.getLatestSnapshot()?.vehicles.map((item) => item.id) ?? []);
-    game.issueCommand(buyVehicleCommand(company, depot, modelId));
+    game.issueCommand(buyVehicleCommand(company, depotId, modelId));
     if (this.isNetwork) {
       this.hud?.notify('info', 'Achat envoyé : il sera appliqué au prochain tour.');
       return;
@@ -1128,8 +1128,7 @@ export class GameSession {
     const vehicleId = this.orderPickingFor;
     if (vehicleId === null) return;
     const snapshot = this.game?.getLatestSnapshot() ?? null;
-    const map = this.world?.getMap() ?? null;
-    if (!snapshot || !map) return;
+    if (!snapshot) return;
     const vehicle = snapshot.vehicles.find((item) => item.id === vehicleId);
     if (!vehicle) {
       this.cancelOrderPicking();
@@ -1140,8 +1139,9 @@ export class GameSession {
       return;
     }
     let order: VehicleOrder | null = null;
-    if (depotKindAt(map, target.x, target.y)) {
-      order = depotOrder(target.x, target.y, map.width);
+    const depot = depotAtTile(snapshot, target.x, target.y);
+    if (depot) {
+      order = depotOrder(depot);
     } else {
       const station = stationAtTile(snapshot, target.x, target.y);
       if (station) order = stationOrder(station);
@@ -1150,8 +1150,8 @@ export class GameSession {
       this.hud?.notify('warning', 'Ordre invalide : seules les gares et les dépôts sont acceptés.');
       return;
     }
-    const orders = [...ordersFromSnapshot(vehicle, snapshot, map), order];
-    const validation = validateVehicleOrders(orders, snapshot, map);
+    const orders = [...ordersFromSnapshot(vehicle, snapshot), order];
+    const validation = validateVehicleOrders(orders, snapshot);
     if (!validation.ok) {
       this.hud?.notify('warning', validation.reason ?? 'Ordre refusé.');
       return;
@@ -1186,11 +1186,10 @@ export class GameSession {
     transform: (orders: VehicleOrder[]) => VehicleOrder[],
   ): void {
     const snapshot = this.game?.getLatestSnapshot() ?? null;
-    const map = this.world?.getMap() ?? null;
-    if (!snapshot || !map) return;
+    if (!snapshot) return;
     const vehicle = snapshot.vehicles.find((item) => item.id === vehicleId);
     if (!vehicle) return;
-    const orders = transform(ordersFromSnapshot(vehicle, snapshot, map));
+    const orders = transform(ordersFromSnapshot(vehicle, snapshot));
     const company = this.localCompanyId();
     if (company === null) return;
     this.issueVehicleCommand(orderVehicleCommand(company, vehicleId, orders));

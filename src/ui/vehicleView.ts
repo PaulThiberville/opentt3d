@@ -8,7 +8,7 @@
 
 import type { MapSnapshot, WorldSnapshot } from '../engine/protocol';
 import {
-  depotKindAt,
+  depotById,
   depotKindLabel,
   modelsForDepot,
   orderTargetLabel,
@@ -19,28 +19,22 @@ import { formatInt, formatMoney } from './format';
 import { describeSelection } from './selection';
 import type { DepotPanelView, VehiclePanelView } from './types';
 
-export interface DepotTarget {
-  x: number;
-  y: number;
-}
-
 /** Distance maximale (tuiles) pour considérer un véhicule « dans » le dépôt. */
 const DEPOT_RADIUS = 1.25;
 
 /** Panneau d'un dépôt : modèles achetables et véhicules sur place. */
 export function describeDepotPanel(
   snapshot: WorldSnapshot | null,
-  map: MapSnapshot | null,
   companyId: number | null,
-  depot: DepotTarget,
+  depotId: number,
 ): DepotPanelView | null {
-  if (!snapshot || !map || companyId === null) return null;
-  const kind = depotKindAt(map, depot.x, depot.y);
-  if (!kind) return null;
+  if (!snapshot || companyId === null) return null;
+  const depot = depotById(snapshot, depotId);
+  if (!depot) return null;
   const company = snapshot.companies.find((item) => item.id === companyId) ?? null;
   const money = company?.money ?? 0;
-  const kindLabel = depotKindLabel(kind);
-  const models = modelsForDepot(kind).map((model) => ({
+  const kindLabel = depotKindLabel(depot.kind);
+  const models = modelsForDepot(depot.kind).map((model) => ({
     id: model.id,
     name: model.name,
     cargo: cargoLabel(model.cargo),
@@ -51,13 +45,15 @@ export function describeDepotPanel(
     description: model.description,
     affordable: money >= model.cost,
   }));
+  const centreX = depot.x + depot.width / 2;
+  const centreY = depot.y + depot.height / 2;
   const vehicles = snapshot.vehicles
     .filter(
       (vehicle) =>
         vehicle.company === companyId &&
         vehicle.status === 3 &&
-        Math.abs(vehicle.x - (depot.x + 0.5)) <= DEPOT_RADIUS &&
-        Math.abs(vehicle.y - (depot.y + 0.5)) <= DEPOT_RADIUS,
+        Math.abs(vehicle.x - centreX) <= DEPOT_RADIUS &&
+        Math.abs(vehicle.y - centreY) <= DEPOT_RADIUS,
     )
     .map((vehicle) => {
       const cargo = vehicle.cargo
@@ -74,6 +70,7 @@ export function describeDepotPanel(
       };
     });
   return {
+    id: depot.id,
     x: depot.x,
     y: depot.y,
     kindLabel,
@@ -101,9 +98,9 @@ export function describeVehiclePanel(
   if (!vehicle) return null;
   const summary = describeSelection(snapshot, { kind: 'vehicle', id: vehicleId }, null, map);
   if (!summary) return null;
-  const orders = ordersFromSnapshot(vehicle, snapshot, map).map((order, index) => ({
+  const orders = ordersFromSnapshot(vehicle, snapshot).map((order, index) => ({
     index,
-    label: orderTargetLabel(order, snapshot, map),
+    label: orderTargetLabel(order, snapshot),
     kind: order.kind,
   }));
   const status = vehicleStatusLabel(vehicle.status);

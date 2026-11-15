@@ -45,6 +45,8 @@ export interface DepotVehicleView {
 }
 
 export interface DepotPanelView {
+  /** Id stable de `snapshot.depots` (transmis à l'achat). */
+  id: number;
   x: number;
   y: number;
   kindLabel: string;

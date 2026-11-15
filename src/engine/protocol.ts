@@ -92,6 +92,9 @@ export interface MapSnapshot {
 
 export type VehicleKind = 'train' | 'road' | 'ship' | 'aircraft';
 
+/** Type d'une cible de tournée (gare, industrie ou dépôt). */
+export type OrderTargetKind = 'station' | 'industry' | 'depot';
+
 export interface VehicleSnapshot {
   id: number;
   kind: VehicleKind;
@@ -107,8 +110,15 @@ export interface VehicleSnapshot {
   /** 0 = arrêté, 1 = en route, 2 = en gare, 3 = en dépôt, 4 = en attente. */
   status: number;
   cargo: { type: string; amount: number; capacity: number } | null;
-  /** Identifiants de gares/industries de la tournée, dans l'ordre. */
+  /** Identifiants de gares/industries/dépôts de la tournée, dans l'ordre. */
   orderTargets: number[];
+  /**
+   * Type de chaque cible de `orderTargets` (même index). Optionnel : le pont
+   * v1 n'expose que des cibles de gare dans `orderTargets`, l'UI retombe alors
+   * sur une inférence. Le mock le fournit pour lever toute ambiguïté entre
+   * pools d'identifiants.
+   */
+  orderKinds?: OrderTargetKind[];
   profitLastYear: number;
   ageDays: number;
 }
@@ -125,6 +135,28 @@ export interface StationSnapshot {
   width: number;
   height: number;
   waiting: { cargo: string; amount: number }[];
+}
+
+export type DepotKind = 'road' | 'rail';
+
+/**
+ * Dépôt route ou rail. `id` est l'index du pool OpenTTD : il reste stable tant
+ * que le dépôt existe et sert directement de cible aux commandes véhicule
+ * (`depotId`, `orders[].target`). Les dépôts maritimes et hangars ne sont pas
+ * exposés en v1.
+ */
+export interface DepotSnapshot {
+  id: number;
+  company: CompanyId;
+  kind: DepotKind;
+  /** Tuile entière du dépôt (coin nord-ouest de l'emprise). */
+  x: number;
+  y: number;
+  /** Direction d'entrée 0..3 (DiagDirection : 0 = NE, 1 = SE, 2 = SW, 3 = NW). */
+  direction: number;
+  /** Emprise en tuiles ; 1×1 en v1. */
+  width: number;
+  height: number;
 }
 
 export interface TownSnapshot {
@@ -197,6 +229,8 @@ export interface WorldSnapshot {
   towns: TownSnapshot[];
   industries: IndustrySnapshot[];
   stations: StationSnapshot[];
+  /** Dépôts route/rail, ids de pool stables (voir `DepotSnapshot`). */
+  depots: DepotSnapshot[];
   vehicles: VehicleSnapshot[];
   /** Nouvelles du jeu, consommées par le HUD. */
   news: { tick: number; kind: 'info' | 'warning' | 'error' | 'company'; text: string }[];
@@ -270,9 +304,16 @@ export type EngineCommand =
       action: 'buy' | 'sell' | 'refit' | 'order' | 'start' | 'stop';
       company: CompanyId;
       vehicle?: number;
+      /** Dépôt d'achat par identifiant stable de `depots[]` (prioritaire). */
+      depotId?: number;
+      /** Compatibilité : tuile du dépôt quand le client n'a pas d'id. */
       depot?: { x: number; y: number };
       model?: string;
-      orders?: { target: number; kind: 'station' | 'industry' | 'depot' }[];
+      /**
+       * Tournée complète. `target` est un id de gare, d'industrie ou de dépôt
+       * (`depots[].id` pour `kind: 'depot'`).
+       */
+      orders?: { target: number; kind: OrderTargetKind }[];
     };
 
 export interface EngineStatus {
