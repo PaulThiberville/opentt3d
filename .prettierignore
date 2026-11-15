@@ -5,5 +5,6 @@ package-lock.json
 engine/upstream/
 engine/build/
 engine/build-host/
+engine/.cache/
 public/
 *.wasm
