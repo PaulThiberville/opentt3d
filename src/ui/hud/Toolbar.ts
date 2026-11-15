@@ -1,20 +1,20 @@
 /**
  * Barre d'outils de construction.
  *
- * Routes et rails sont actifs (#27) : un clic arme l'outil, un second clic sur
- * le même bouton le désarme. Gares, dépôts et signaux restent désactivés et
- * expliquent leur feuille de route (#28) au survol, au focus et au clic.
+ * Routes, rails, gares, dépôts et signaux sont actifs (#27, #28) : un clic
+ * arme l'outil, un second clic sur le même bouton le désarme. Chaque bouton
+ * rappelle le geste attendu au survol et au focus.
  */
 
+import type { BuildTool } from '../../game/buildRules';
 import { el } from '../dom';
 
-export type BuildToolId = 'road' | 'rail';
+export type BuildToolId = BuildTool;
 
 interface ToolDefinition {
-  id: BuildToolId | 'station' | 'depot' | 'signal';
+  id: BuildToolId;
   icon: string;
   label: string;
-  available: boolean;
   hint: string;
 }
 
@@ -23,42 +23,45 @@ const TOOLS: ToolDefinition[] = [
     id: 'road',
     icon: '▤',
     label: 'Routes',
-    available: true,
     hint: 'Cliquer puis glisser sur la carte pour construire une route.',
   },
   {
     id: 'rail',
     icon: '╪',
     label: 'Rails',
-    available: true,
     hint: 'Cliquer puis glisser sur la carte pour construire une voie ferrée.',
   },
   {
     id: 'station',
     icon: '▣',
     label: 'Gares',
-    available: false,
-    hint: 'Gares — à venir (#28).',
+    hint: 'Gare ferroviaire ou routière : cliquez pour poser, R pivote, taille dans la barre d’options.',
   },
   {
     id: 'depot',
     icon: '◫',
     label: 'Dépôts',
-    available: false,
-    hint: 'Dépôts — à venir (#28).',
+    hint: 'Dépôt route ou rail : posez-le à côté d’une voie, R oriente l’entrée.',
   },
   {
     id: 'signal',
     icon: '◉',
     label: 'Signaux',
-    available: false,
-    hint: 'Signaux — à venir (#28).',
+    hint: 'Signal de bloc : cliquez (ou glissez) sur une voie ferrée existante.',
   },
 ];
 
+const SHORT_LABELS: Record<BuildToolId, string> = {
+  road: 'routes',
+  rail: 'rails',
+  station: 'gares',
+  depot: 'dépôts',
+  signal: 'signaux',
+  clear: 'démolition',
+};
+
 export interface ToolbarOptions {
   onToggleTool: (tool: BuildToolId) => void;
-  onUnavailable: (label: string, reason: string) => void;
 }
 
 export class Toolbar {
@@ -72,13 +75,12 @@ export class Toolbar {
       attrs: { 'aria-label': 'Outils de construction' },
     });
     for (const tool of TOOLS) {
-      const available = tool.available;
       const button = el('button', {
         className: 'hud-tool',
         attrs: {
           type: 'button',
           'aria-pressed': 'false',
-          'aria-disabled': available ? 'false' : 'true',
+          'aria-disabled': 'false',
           title: tool.hint,
           'data-tooltip': tool.hint,
         },
@@ -92,10 +94,7 @@ export class Toolbar {
         }),
         el('span', { className: 'hud-tool-label', text: tool.label }),
       );
-      button.addEventListener('click', () => {
-        if (available) options.onToggleTool(tool.id as BuildToolId);
-        else options.onUnavailable(tool.label, tool.hint);
-      });
+      button.addEventListener('click', () => options.onToggleTool(tool.id));
       this.buttons.set(tool.id, button);
       this.element.append(button);
     }
@@ -108,7 +107,7 @@ export class Toolbar {
       button.classList.toggle('is-active', active);
       button.setAttribute('aria-pressed', active ? 'true' : 'false');
       const definition = TOOLS.find((candidate) => candidate.id === id);
-      if (definition?.available) {
+      if (definition) {
         button.title = active
           ? `${definition.label} — outil actif (Échap pour quitter)`
           : definition.hint;
@@ -116,9 +115,7 @@ export class Toolbar {
     }
     this.element.setAttribute(
       'aria-label',
-      tool
-        ? `Outils de construction — ${tool === 'road' ? 'routes' : 'rails'} actif`
-        : 'Outils de construction',
+      tool ? `Outils de construction — ${SHORT_LABELS[tool]} actif` : 'Outils de construction',
     );
   }
 }

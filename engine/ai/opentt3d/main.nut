@@ -17,14 +17,25 @@
 class OpenTT3D extends AIController {
 	static MAX_LINK_LENGTH = 80;
 
+	/**
+	 * Vrai dès que la construction initiale a été tentée. Persisté par
+	 * Save()/Load() : sans cela, un chargement de partie relancerait Start()
+	 * et l'IA construirait une seconde ligne sur l'infrastructure existante
+	 * (divergence de hash après un resync, #61/#38).
+	 */
+	built = false;
+
 	function Start()
 	{
-		try {
-			if (!this.BuildFirstLink()) {
-				AILog.Warning("OpenTT3D : aucune liaison construite");
+		if (!this.built) {
+			try {
+				if (!this.BuildFirstLink()) {
+					AILog.Warning("OpenTT3D : aucune liaison construite");
+				}
+			} catch (error) {
+				AILog.Error("OpenTT3D : " + error);
 			}
-		} catch (error) {
-			AILog.Error("OpenTT3D : " + error);
+			this.built = true;
 		}
 
 		/* La ligne vit toute seule : on garde le script en vie en dormant. */
@@ -33,11 +44,12 @@ class OpenTT3D extends AIController {
 
 	function Save()
 	{
-		return {};
+		return { built = this.built };
 	}
 
 	function Load(version, data)
 	{
+		this.built = (data.built == true);
 	}
 
 	/* --------------------------------------------------------------------- */

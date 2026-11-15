@@ -14,7 +14,9 @@ const CONTROLS: [string, string][] = [
   ['Clic', 'Sélectionner'],
   ['Double-clic', 'Centrer et suivre'],
   ['Routes / Rails + glisser', 'Construire un tronçon'],
-  ['Ctrl + Z', 'Démolir le dernier tronçon'],
+  ['Gares / Dépôts / Signaux + clic', 'Poser une infrastructure'],
+  ['R (gare/dépôt)', 'Pivoter l’orientation'],
+  ['Ctrl + Z', 'Démolir la dernière construction'],
   ['Clic droit (construction)', 'Annuler le tracé'],
   ['Échap', 'Quitter l’outil / pause'],
   ['Espace', 'Pause'],
@@ -39,7 +41,7 @@ export class HelpPanel {
     }
     const hint = el('p', {
       className: 'hud-help-hint',
-      text: 'Minimap : clic pour recentrer. Routes et rails : barre du bas, puis cliquez ou glissez sur la carte.',
+      text: 'Minimap : clic pour recentrer. Gares, dépôts et signaux : barre du bas, options au-dessus de la barre.',
     });
     this.element.append(title, list, hint);
     this.element.hidden = true;

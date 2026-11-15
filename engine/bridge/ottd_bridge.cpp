@@ -47,6 +47,7 @@
 #include "landscape_cmd.h"
 #include "landscape_type.h"
 #include "map_func.h"
+#include "newgrf_config.h"
 #include "newgrf_roadstop.h"
 #include "newgrf_station.h"
 #include "openttd.h"
@@ -62,6 +63,8 @@
 #include "road_func.h"
 #include "road_map.h"
 #include "road_type.h"
+#include "saveload/saveload.h"
+#include "saveload/saveload_filter.h"
 #include "settings_type.h"
 #include "station_base.h"
 #include "station_cmd.h"
@@ -112,6 +115,14 @@ namespace {
 bool _ottd_booted = false;
 bool _ottd_in_game = false;
 std::string _ottd_error;
+
+/**
+ * Sauvegarde mémoire en attente (`ottd_save_size` puis `ottd_save`).
+ * Le cache est invalidé dès qu'une opération peut modifier l'état simulé :
+ * `ottd_step`, `ottd_command`, `ottd_new_game*`, `ottd_load`.
+ */
+std::vector<uint8_t> _ottd_save_cache;
+bool _ottd_save_cache_valid = false;
 
 /** Compteurs de séquence indépendants pour les deux formats de snapshot. */
 uint32_t _ottd_json_sequence = 0;
@@ -792,6 +803,30 @@ inline void WriteU32(uint8_t *out, uint32_t value)
 	out[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
 	out[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
 	out[3] = static_cast<uint8_t>((value >> 24) & 0xFF);
+}
+
+inline void WriteU64(uint8_t *out, uint64_t value)
+{
+	WriteU32(out, static_cast<uint32_t>(value & 0xFFFFFFFFULL));
+	WriteU32(out + 4, static_cast<uint32_t>(value >> 32));
+}
+
+inline uint16_t ReadU16(const uint8_t *in)
+{
+	return static_cast<uint16_t>(in[0] | (in[1] << 8));
+}
+
+inline uint32_t ReadU32(const uint8_t *in)
+{
+	return static_cast<uint32_t>(in[0]) |
+		(static_cast<uint32_t>(in[1]) << 8) |
+		(static_cast<uint32_t>(in[2]) << 16) |
+		(static_cast<uint32_t>(in[3]) << 24);
+}
+
+inline uint64_t ReadU64(const uint8_t *in)
+{
+	return static_cast<uint64_t>(ReadU32(in)) | (static_cast<uint64_t>(ReadU32(in + 4)) << 32);
 }
 
 /** Taille totale du snapshot binaire pour la carte courante. */
@@ -2765,6 +2800,7 @@ int FinishCommand(CommandReply &reply)
 int ExecuteCommandJson(std::string_view json)
 {
 	CommandReply reply;
+	_ottd_save_cache_valid = false;
 
 	if (!_ottd_in_game) {
 		FailWith(reply, "NO_GAME", "Aucune partie en cours : démarrez une partie avant d'envoyer une commande.");
@@ -2809,6 +2845,323 @@ int ExecuteCommandJson(std::string_view json)
 	return FinishCommand(reply);
 }
 
+/* ------------------------------------------------------------------------- */
+/*  Sauvegarde / chargement mémoire (issue #61)                              */
+/* ------------------------------------------------------------------------- */
+
+/** Codes de retour des fonctions de sauvegarde (voir wiki, Protocole). */
+enum OttdSaveLoadStatus : int {
+	OTTD_SL_OK = 0,            ///< Opération réussie.
+	OTTD_SL_NO_GAME = -1,      ///< Aucune partie en cours (sauvegarde impossible).
+	OTTD_SL_NOT_BOOTED = -2,   ///< `ottd_boot()` n'a pas été appelé.
+	OTTD_SL_BAD_ARGUMENT = -3, ///< Pointeur nul ou longueur invalide.
+	OTTD_SL_CORRUPT = -4,      ///< Conteneur invalide, tronqué ou corrompu.
+	OTTD_SL_SAVE_FAILED = -5,  ///< OpenTTD a refusé d'écrire la sauvegarde.
+	OTTD_SL_LOAD_FAILED = -6,  ///< OpenTTD a refusé la sauvegarde, état restauré.
+	OTTD_SL_STATE_LOST = -7,   ///< Chargement refusé et restauration impossible.
+};
+
+/**
+ * Conteneur de sauvegarde mémoire.
+ *
+ * Disposition little-endian (en-tête de 32 octets) :
+ *   0  u32 magic         0x5333544F ("OT3S")
+ *   4  u16 version       = 1
+ *   6  u16 header_size   = 32
+ *   8  u32 payload_size  taille du .sav OpenTTD standard qui suit les métadonnées
+ *   12 u32 tick          tick courant au moment de la sauvegarde (diagnostic)
+ *   16 u64 checksum      FNV-1a 64 des métadonnées puis du .sav
+ *   24 u32 metadata_size taille des métadonnées du pont
+ *   28 u32 reserved      = 0
+ *   puis `metadata_size` octets de métadonnées, puis `payload_size` octets de
+ *   sauvegarde OpenTTD standard (format .sav avec en-tête et compression).
+ *
+ * Les métadonnées conservent la configuration du pont (climat, année,
+ * difficulté, IA, villes, industries, nom) et les avertissements de partie,
+ * que le .sav OpenTTD ne contient pas.
+ */
+static constexpr uint32_t OTTD_SAVE_MAGIC = 0x5333544F; ///< "OT3S" en little-endian.
+static constexpr uint16_t OTTD_SAVE_VERSION = 1;
+static constexpr uint16_t OTTD_SAVE_HEADER_SIZE = 32;
+
+/** Filtre de sauvegarde qui accumule les octets dans un vecteur. */
+class OttdMemorySaveFilter final : public SaveFilter {
+public:
+	OttdMemorySaveFilter(std::shared_ptr<SaveFilter> chain, std::vector<uint8_t> &out) :
+		SaveFilter(std::move(chain)), out(out)
+	{
+	}
+
+	void Write(uint8_t *buf, size_t len) override
+	{
+		if (len != 0) this->out.insert(this->out.end(), buf, buf + len);
+	}
+
+private:
+	std::vector<uint8_t> &out;
+};
+
+/** Filtre de chargement qui lit un buffer mémoire (sans copie). */
+class OttdMemoryLoadFilter final : public LoadFilter {
+public:
+	OttdMemoryLoadFilter(std::shared_ptr<LoadFilter> chain, const uint8_t *data, size_t size) :
+		LoadFilter(std::move(chain)), data(data), size(size)
+	{
+	}
+
+	size_t Read(uint8_t *buf, size_t len) override
+	{
+		const size_t count = std::min(len, this->size - this->pos);
+		if (count != 0) std::copy(this->data + this->pos, this->data + this->pos + count, buf);
+		this->pos += count;
+		return count;
+	}
+
+	void Reset() override
+	{
+		this->pos = 0;
+		if (this->chain != nullptr) this->chain->Reset();
+	}
+
+private:
+	const uint8_t *data;
+	size_t size;
+	size_t pos = 0;
+};
+
+/** Message lisible de la dernière erreur saveload d'OpenTTD. */
+std::string SaveLoadErrorMessage()
+{
+	std::string message = GetSaveLoadErrorMessage().GetDecodedString();
+	if (message.empty()) message = "sauvegarde OpenTTD invalide ou incomplète";
+	return message;
+}
+
+void AppendSaveU32(std::vector<uint8_t> &out, uint32_t value)
+{
+	const size_t offset = out.size();
+	out.resize(offset + 4);
+	WriteU32(out.data() + offset, value);
+}
+
+void AppendSaveString(std::vector<uint8_t> &out, std::string_view text)
+{
+	AppendSaveU32(out, static_cast<uint32_t>(text.size()));
+	out.insert(out.end(), text.begin(), text.end());
+}
+
+/**
+ * Sérialise la configuration du pont et les avertissements.
+ *
+ * Disposition fixe de 36 octets, puis le nom de partie et les avertissements :
+ *   0  u8  flags (bit 0..7 : landscape, start_year, difficulty, ai_companies,
+ *              towns, industries, map_size, disasters)
+ *   1  u8  landscape
+ *   2  u16 réservé
+ *   4  i32 start_year
+ *   8  i32 difficulty
+ *   12 i32 ai_companies
+ *   16 i32 towns
+ *   20 i32 industries
+ *   24 i32 map_size
+ *   28 u8  disasters
+ *   29 3 octets réservés
+ *   32 u32 longueur du nom de partie
+ *   36 nom (UTF-8), puis u32 nombre d'avertissements et, pour chacun,
+ *      u32 longueur + octets UTF-8.
+ */
+void BuildSaveMetadata(std::vector<uint8_t> &meta)
+{
+	const GameSetupConfig &config = _ottd_active_config;
+	uint8_t flags = 0;
+	if (config.landscape.has_value()) flags |= 1 << 0;
+	if (config.start_year.has_value()) flags |= 1 << 1;
+	if (config.difficulty.has_value()) flags |= 1 << 2;
+	if (config.ai_companies.has_value()) flags |= 1 << 3;
+	if (config.towns.has_value()) flags |= 1 << 4;
+	if (config.industries.has_value()) flags |= 1 << 5;
+	if (config.map_size.has_value()) flags |= 1 << 6;
+	if (config.disasters.has_value()) flags |= 1 << 7;
+
+	meta.assign(36, 0);
+	meta[0] = flags;
+	meta[1] = config.landscape.has_value() ? static_cast<uint8_t>(*config.landscape) : 0;
+	WriteU32(meta.data() + 4, static_cast<uint32_t>(config.start_year.value_or(0)));
+	WriteU32(meta.data() + 8, static_cast<uint32_t>(config.difficulty.value_or(0)));
+	WriteU32(meta.data() + 12, static_cast<uint32_t>(config.ai_companies.value_or(0)));
+	WriteU32(meta.data() + 16, static_cast<uint32_t>(config.towns.value_or(0)));
+	WriteU32(meta.data() + 20, static_cast<uint32_t>(config.industries.value_or(0)));
+	WriteU32(meta.data() + 24, static_cast<uint32_t>(config.map_size.value_or(0)));
+	meta[28] = config.disasters.value_or(false) ? 1 : 0;
+
+	const std::string_view game_name = config.game_name.has_value() ? std::string_view(*config.game_name) : std::string_view{};
+	WriteU32(meta.data() + 32, static_cast<uint32_t>(game_name.size()));
+	meta.insert(meta.end(), game_name.begin(), game_name.end());
+
+	AppendSaveU32(meta, static_cast<uint32_t>(_ottd_warnings.size()));
+	for (const std::string &warning : _ottd_warnings) AppendSaveString(meta, warning);
+}
+
+/**
+ * Relit les métadonnées du pont.
+ * @return true si le bloc est cohérent et entièrement consommé.
+ */
+bool ParseSaveMetadata(const uint8_t *data, size_t size, GameSetupConfig &config, std::vector<std::string> &warnings)
+{
+	config = GameSetupConfig{};
+	warnings.clear();
+	if (size < 40) return false;
+
+	const uint8_t flags = data[0];
+	const uint8_t landscape = data[1];
+	if ((flags & (1 << 0)) != 0) {
+		if (landscape > static_cast<uint8_t>(LandscapeType::Toyland)) return false;
+		config.landscape = static_cast<LandscapeType>(landscape);
+	}
+	if ((flags & (1 << 1)) != 0) config.start_year = static_cast<int32_t>(ReadU32(data + 4));
+	if ((flags & (1 << 2)) != 0) config.difficulty = static_cast<int32_t>(ReadU32(data + 8));
+	if ((flags & (1 << 3)) != 0) config.ai_companies = static_cast<int32_t>(ReadU32(data + 12));
+	if ((flags & (1 << 4)) != 0) config.towns = static_cast<int32_t>(ReadU32(data + 16));
+	if ((flags & (1 << 5)) != 0) config.industries = static_cast<int32_t>(ReadU32(data + 20));
+	if ((flags & (1 << 6)) != 0) config.map_size = static_cast<int32_t>(ReadU32(data + 24));
+	if ((flags & (1 << 7)) != 0) {
+		if (data[28] > 1) return false;
+		config.disasters = data[28] != 0;
+	}
+
+	size_t pos = 36;
+	auto read_length = [&](uint32_t &length) {
+		if (pos + 4 > size) return false;
+		length = ReadU32(data + pos);
+		pos += 4;
+		return true;
+	};
+	auto read_string = [&](std::string &text) {
+		uint32_t length = 0;
+		if (!read_length(length) || pos + length > size) return false;
+		text.assign(reinterpret_cast<const char *>(data + pos), length);
+		pos += length;
+		return true;
+	};
+
+	/* Le nom de partie est précédé de sa longueur à l'offset 32 (en-tête
+	 * fixe) ; les octets suivent immédiatement à l'offset 36. */
+	const uint32_t game_name_length = ReadU32(data + 32);
+	if (pos + game_name_length > size) return false;
+	if (game_name_length != 0) {
+		config.game_name = std::string(reinterpret_cast<const char *>(data + pos), game_name_length);
+	}
+	pos += game_name_length;
+
+	uint32_t warning_count = 0;
+	if (!read_length(warning_count) || warning_count > 64) return false;
+	warnings.reserve(warning_count);
+	for (uint32_t i = 0; i < warning_count; i++) {
+		std::string warning;
+		if (!read_string(warning)) return false;
+		warnings.push_back(std::move(warning));
+	}
+
+	return pos == size;
+}
+
+/** Sauvegarde l'état courant via le chemin officiel `SaveWithFilter`. */
+bool SaveToMemory(std::vector<uint8_t> &payload, std::vector<uint8_t> &meta, std::string &error)
+{
+	payload.clear();
+	meta.clear();
+
+	const SaveOrLoadResult result = SaveWithFilter(
+		std::make_shared<OttdMemorySaveFilter>(nullptr, payload), false);
+	if (result != SL_OK) {
+		error = fmt::format("échec de la sauvegarde OpenTTD : {}", SaveLoadErrorMessage());
+		payload.clear();
+		return false;
+	}
+	if (payload.empty()) {
+		error = "sauvegarde OpenTTD vide";
+		return false;
+	}
+
+	BuildSaveMetadata(meta);
+	return true;
+}
+
+/** Assemble l'en-tête du pont autour d'un .sav et de ses métadonnées. */
+std::vector<uint8_t> BuildSaveContainer(const std::vector<uint8_t> &payload, const std::vector<uint8_t> &meta)
+{
+	std::vector<uint8_t> out(OTTD_SAVE_HEADER_SIZE + meta.size() + payload.size(), 0);
+	uint64_t checksum = HashBytes(0xcbf29ce484222325ULL, meta.data(), meta.size());
+	checksum = HashBytes(checksum, payload.data(), payload.size());
+
+	WriteU32(out.data() + 0, OTTD_SAVE_MAGIC);
+	WriteU16(out.data() + 4, OTTD_SAVE_VERSION);
+	WriteU16(out.data() + 6, OTTD_SAVE_HEADER_SIZE);
+	WriteU32(out.data() + 8, static_cast<uint32_t>(payload.size()));
+	WriteU32(out.data() + 12, static_cast<uint32_t>(TimerGameTick::counter));
+	WriteU64(out.data() + 16, checksum);
+	WriteU32(out.data() + 24, static_cast<uint32_t>(meta.size()));
+	WriteU32(out.data() + 28, 0);
+
+	std::copy(meta.begin(), meta.end(), out.begin() + OTTD_SAVE_HEADER_SIZE);
+	std::copy(payload.begin(), payload.end(), out.begin() + OTTD_SAVE_HEADER_SIZE + meta.size());
+	return out;
+}
+
+/** Reconstruit le cache (ou le renvoie s'il est encore valide). */
+int EnsureSaveCache()
+{
+	if (_ottd_save_cache_valid) return static_cast<int>(_ottd_save_cache.size());
+
+	std::vector<uint8_t> payload;
+	std::vector<uint8_t> meta;
+	std::string error;
+	if (!SaveToMemory(payload, meta, error)) {
+		SetError(error);
+		return OTTD_SL_SAVE_FAILED;
+	}
+
+	_ottd_save_cache = BuildSaveContainer(payload, meta);
+	_ottd_save_cache_valid = true;
+	return static_cast<int>(_ottd_save_cache.size());
+}
+
+/**
+ * Charge un .sav brut dans l'état OpenTTD.
+ *
+ * Reproduit le chemin de `SafeLoad` + `SM_LOAD_GAME` sans passer par la GUI :
+ * `_game_mode` est forcé à `GM_NORMAL`, la configuration NewGRF est
+ * réinitialisée, puis `LoadWithFilter` effectue le chargement officiel.
+ */
+SaveOrLoadResult LoadPayload(const uint8_t *data, size_t size)
+{
+	_game_mode = GM_NORMAL;
+	_switch_mode = SM_NONE;
+	ResetGRFConfig(true);
+	ResetWindowSystem();
+	return LoadWithFilter(std::make_shared<OttdMemoryLoadFilter>(nullptr, data, size));
+}
+
+/** Finalise un chargement réussi : entreprise locale, compteurs, métadonnées. */
+void ApplyLoadedState(const GameSetupConfig &config, const std::vector<std::string> &warnings)
+{
+	_ottd_active_config = config;
+	_ottd_warnings = warnings;
+	_ottd_json_sequence = 0;
+	_ottd_map_sequence = 0;
+	_ottd_last_command_json = "{}";
+	_ottd_last_command_status = OTTD_CMD_OK;
+	_ottd_save_cache_valid = false;
+	_ottd_error.clear();
+
+	/* Comme `OnStartGame` : le .sav ne contient pas l'entreprise locale. */
+	_current_company = _local_company;
+	const CompanyID company = GetFirstPlayableCompanyID();
+	SetLocalCompany(Company::IsValidID(company) ? company : COMPANY_SPECTATOR);
+
+	_ottd_in_game = _game_mode == GM_NORMAL;
+}
+
 } // namespace
 
 extern "C" {
@@ -2839,6 +3192,8 @@ EMSCRIPTEN_KEEPALIVE int ottd_boot(void)
 	_ottd_error.clear();
 	_ottd_warnings.clear();
 	_ottd_has_pending_config = false;
+	_ottd_save_cache.clear();
+	_ottd_save_cache_valid = false;
 	_exit_game = false;
 	/* Installé avant `openttd_main` : une erreur de pilote ou de baseset est
 	 * ainsi mémorisée avant `_exit`. */
@@ -2911,6 +3266,7 @@ static int StartGame(uint32_t seed, uint32_t w, uint32_t h, const GameSetupConfi
 
 	_ottd_error.clear();
 	_ottd_warnings.clear();
+	_ottd_save_cache_valid = false;
 
 	std::string config_error;
 	if (!ApplyGameConfig(config, w, h, config_error)) {
@@ -3076,6 +3432,7 @@ EMSCRIPTEN_KEEPALIVE int ottd_step(uint32_t ticks)
 		PumpOneTick();
 		executed++;
 	}
+	if (executed != 0) _ottd_save_cache_valid = false;
 	return static_cast<int>(executed);
 }
 
@@ -3143,6 +3500,175 @@ EMSCRIPTEN_KEEPALIVE int ottd_company_id(void)
 {
 	if (!_ottd_in_game || !Company::IsValidID(_local_company)) return -1;
 	return static_cast<int>(_local_company.base());
+}
+
+/**
+ * Taille du conteneur de sauvegarde mémoire de l'état courant (issue #61).
+ *
+ * La sauvegarde est produite une fois puis mise en cache jusqu'au prochain
+ * `ottd_step`, `ottd_command`, `ottd_new_game` ou `ottd_load`.
+ *
+ * @return nombre d'octets requis (> 0), ou un code `OttdSaveLoadStatus`
+ *         négatif : -1 aucune partie, -2 module non démarré, -5 échec
+ *         d'OpenTTD (détail dans `ottd_last_error`).
+ */
+EMSCRIPTEN_KEEPALIVE int ottd_save_size(void)
+{
+	if (!_ottd_booted) {
+		SetError("ottd_save_size() appelé avant ottd_boot()");
+		return OTTD_SL_NOT_BOOTED;
+	}
+	if (!_ottd_in_game) {
+		SetError("ottd_save_size() appelé sans partie en cours");
+		return OTTD_SL_NO_GAME;
+	}
+
+	_ottd_error.clear();
+	return EnsureSaveCache();
+}
+
+/**
+ * Écrit une sauvegarde mémoire de l'état complet dans `out`.
+ *
+ * Le format est un conteneur de 32 octets (magie `OT3S`, version, tailles,
+ * tick, somme de contrôle) suivi des métadonnées du pont puis d'un fichier
+ * `.sav` OpenTTD standard (en-tête et compression officiels). Il peut donc
+ * être extrait et ouvert par OpenTTD, et rechargé par `ottd_load`.
+ *
+ * @param out      destination, ou `nullptr` pour ne mesurer que la taille.
+ * @param capacity taille de `out` en octets.
+ * @return nombre d'octets écrits (ou requis si `out` est `nullptr` ou trop
+ *         petit), ou un code négatif (voir `ottd_save_size`).
+ */
+EMSCRIPTEN_KEEPALIVE int ottd_save(uint8_t *out, int capacity)
+{
+	const int required = ottd_save_size();
+	if (required < 0) return required;
+	if (out == nullptr || capacity < required) return required;
+
+	std::copy(_ottd_save_cache.begin(), _ottd_save_cache.end(), out);
+	return required;
+}
+
+/**
+ * Charge une sauvegarde produite par `ottd_save` (issue #61).
+ *
+ * Le conteneur est intégralement validé (taille, magie, version, somme de
+ * contrôle, métadonnées) avant de toucher à l'état OpenTTD. Si le chargement
+ * échoue malgré tout, l'état précédent est sauvegardé puis restauré : une
+ * sauvegarde tronquée ou corrompue laisse le module utilisable.
+ *
+ * @param data   conteneur `OT3S` (peut être un buffer WASM).
+ * @param length taille du conteneur en octets.
+ * @return 0 en cas de succès, sinon un code `OttdSaveLoadStatus` négatif :
+ *         -2 module non démarré, -3 argument invalide, -4 conteneur corrompu,
+ *         -5 sauvegarde de sécurité impossible (état inchangé), -6 chargement
+ *         refusé (état précédent restauré), -7 chargement refusé et
+ *         restauration impossible.
+ */
+EMSCRIPTEN_KEEPALIVE int ottd_load(const uint8_t *data, int length)
+{
+	if (!_ottd_booted) {
+		SetError("ottd_load() appelé avant ottd_boot()");
+		return OTTD_SL_NOT_BOOTED;
+	}
+	if (data == nullptr || length <= 0) {
+		SetError("ottd_load() : buffer nul ou vide");
+		return OTTD_SL_BAD_ARGUMENT;
+	}
+
+	_ottd_error.clear();
+	_ottd_save_cache_valid = false;
+
+	if (length < static_cast<int>(OTTD_SAVE_HEADER_SIZE)) {
+		SetError(fmt::format("sauvegarde tronquée : {} octets, en-tête de {} requis",
+			length, OTTD_SAVE_HEADER_SIZE));
+		return OTTD_SL_CORRUPT;
+	}
+
+	const uint32_t magic = ReadU32(data + 0);
+	if (magic != OTTD_SAVE_MAGIC) {
+		SetError(fmt::format("sauvegarde invalide : magie 0x{:08x} au lieu de 0x{:08x}", magic, OTTD_SAVE_MAGIC));
+		return OTTD_SL_CORRUPT;
+	}
+	const uint16_t version = ReadU16(data + 4);
+	if (version != OTTD_SAVE_VERSION) {
+		SetError(fmt::format("version de sauvegarde {} non supportée (attendu {})", version, OTTD_SAVE_VERSION));
+		return OTTD_SL_CORRUPT;
+	}
+	const uint16_t header_size = ReadU16(data + 6);
+	if (header_size != OTTD_SAVE_HEADER_SIZE) {
+		SetError(fmt::format("en-tête de sauvegarde invalide : {} octets", header_size));
+		return OTTD_SL_CORRUPT;
+	}
+
+	const uint32_t payload_size = ReadU32(data + 8);
+	const uint32_t metadata_size = ReadU32(data + 24);
+	const uint64_t expected_size = static_cast<uint64_t>(header_size) + metadata_size + payload_size;
+	if (expected_size != static_cast<uint64_t>(length)) {
+		SetError(fmt::format("sauvegarde incohérente : {} octets annoncés, {} reçus (tronquée ou corrompue)",
+			expected_size, length));
+		return OTTD_SL_CORRUPT;
+	}
+
+	const uint8_t *metadata = data + header_size;
+	const uint8_t *payload = metadata + metadata_size;
+	uint64_t checksum = HashBytes(0xcbf29ce484222325ULL, metadata, metadata_size);
+	checksum = HashBytes(checksum, payload, payload_size);
+	if (checksum != ReadU64(data + 16)) {
+		SetError("sauvegarde corrompue : somme de contrôle invalide");
+		return OTTD_SL_CORRUPT;
+	}
+
+	GameSetupConfig config;
+	std::vector<std::string> warnings;
+	if (!ParseSaveMetadata(metadata, metadata_size, config, warnings)) {
+		SetError("sauvegarde corrompue : métadonnées du pont invalides");
+		return OTTD_SL_CORRUPT;
+	}
+
+	/* Sauvegarde de sécurité : si OpenTTD échoue en cours de chargement,
+	 * `SlError` remet les pointeurs à zéro et détruit l'état courant. */
+	const bool had_game = _ottd_in_game;
+	std::vector<uint8_t> backup_payload;
+	std::vector<uint8_t> backup_meta;
+	if (had_game) {
+		std::string backup_error;
+		if (!SaveToMemory(backup_payload, backup_meta, backup_error)) {
+			SetError(fmt::format("chargement annulé : sauvegarde de sécurité impossible ({})", backup_error));
+			return OTTD_SL_SAVE_FAILED;
+		}
+	}
+	const GameSetupConfig previous_config = _ottd_active_config;
+	const std::vector<std::string> previous_warnings = _ottd_warnings;
+
+	_ottd_in_game = false;
+	const SaveOrLoadResult result = LoadPayload(payload, payload_size);
+	if (result == SL_OK) {
+		ApplyLoadedState(config, warnings);
+		return OTTD_SL_OK;
+	}
+
+	const std::string load_error = SaveLoadErrorMessage();
+	if (!had_game) {
+		_ottd_in_game = false;
+		SetError(fmt::format("chargement refusé : {}", load_error));
+		return OTTD_SL_LOAD_FAILED;
+	}
+
+	const SaveOrLoadResult restored = LoadPayload(backup_payload.data(), backup_payload.size());
+	if (restored == SL_OK) {
+		ApplyLoadedState(previous_config, previous_warnings);
+		SetError(fmt::format("chargement refusé ({}), état précédent restauré", load_error));
+		return OTTD_SL_LOAD_FAILED;
+	}
+
+	_ottd_in_game = false;
+	_ottd_active_config = previous_config;
+	_ottd_warnings = previous_warnings;
+	SetError(fmt::format("chargement refusé ({}) et restauration impossible ({})",
+		load_error, SaveLoadErrorMessage()));
+	return OTTD_SL_STATE_LOST;
 }
 
 /**
@@ -3288,6 +3814,8 @@ EMSCRIPTEN_KEEPALIVE void ottd_shutdown(void)
 	PostMainLoop();
 	_ottd_in_game = false;
 	_ottd_booted = false;
+	_ottd_save_cache.clear();
+	_ottd_save_cache_valid = false;
 }
 
 } // extern "C"
