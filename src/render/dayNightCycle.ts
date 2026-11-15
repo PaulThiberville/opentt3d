@@ -25,7 +25,7 @@ export const MAX_DAY_NIGHT_CYCLE_SECONDS = 900;
 /** Phase de repli quand le cycle est désactivé (0,5 = midi). */
 export const DISABLED_DAY_NIGHT_PHASE = 0.5;
 /** Phase initiale avant le premier snapshot (matinée, cohérente avec le rendu). */
-export const DEFAULT_DAY_NIGHT_PHASE = 0.35;
+export const DEFAULT_DAY_NIGHT_PHASE = 0.45;
 
 /** Normalise une durée de cycle inconnue dans les bornes autorisées. */
 export function sanitizeCycleSeconds(value: unknown): number {
