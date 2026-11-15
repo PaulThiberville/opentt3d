@@ -171,10 +171,11 @@ async function run(label) {
     `[${label}] ${executed} ticks en ${stepMs} ms ` +
       `(${((TICKS / stepMs) * 1000).toFixed(1)} ticks/s)`,
   );
+  const memoryMiB = (api.engine.HEAPU8.byteLength / (1024 * 1024)).toFixed(1);
   log(
     `[${label}] tick=${state.tick} date=${state.date.day}/${state.date.month + 1}/${state.date.year} ` +
       `entreprises=${state.companies} villes=${state.towns} véhicules=${state.vehicles} ` +
-      `gares=${state.stations} industries=${state.industries}`,
+      `gares=${state.stations} industries=${state.industries} mémoire=${memoryMiB} Mio`,
   );
   log(`[${label}] hash=${hash} (total ${elapsed} ms)`);
 
