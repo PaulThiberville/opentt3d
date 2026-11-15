@@ -90,6 +90,16 @@ uint64_t HashValue(uint64_t hash, const T &value)
 	return HashBytes(hash, &value, sizeof(value));
 }
 
+/** Nombre de véhicules appartenant à une entreprise (hors effets/désastres). */
+uint32_t CountCompanyVehicles()
+{
+	uint32_t count = 0;
+	for (const Vehicle *v : Vehicle::Iterate()) {
+		if (v->type < VEH_COMPANY_END) count++;
+	}
+	return count;
+}
+
 /** Hash FNV-1a de l'état simulé : carte, compteurs globaux et véhicules. */
 uint64_t ComputeStateHash()
 {
@@ -106,7 +116,7 @@ uint64_t ComputeStateHash()
 	const uint32_t companies = static_cast<uint32_t>(Company::GetNumItems());
 	const uint32_t towns = static_cast<uint32_t>(Town::GetNumItems());
 	const uint32_t stations = static_cast<uint32_t>(Station::GetNumItems());
-	const uint32_t vehicles = static_cast<uint32_t>(Vehicle::GetNumItems());
+	const uint32_t vehicles = CountCompanyVehicles();
 	hash = HashValue(hash, companies);
 	hash = HashValue(hash, towns);
 	hash = HashValue(hash, stations);
@@ -318,7 +328,7 @@ EMSCRIPTEN_KEEPALIVE int ottd_snapshot_json(char *out, int capacity)
 
 	const auto companies = static_cast<uint32_t>(Company::GetNumItems());
 	const auto towns = static_cast<uint32_t>(Town::GetNumItems());
-	const auto vehicles = static_cast<uint32_t>(Vehicle::GetNumItems());
+	const auto vehicles = CountCompanyVehicles();
 	const auto stations = static_cast<uint32_t>(Station::GetNumItems());
 	const auto industries = static_cast<uint32_t>(Industry::GetNumItems());
 
