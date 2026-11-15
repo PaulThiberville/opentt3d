@@ -30,7 +30,7 @@ jobs:
           cutoff=$(( $(date +%s) - 3600 ))
           echo "Suppression des caches créés avant $(date -u -d "@$cutoff" +%FT%TZ)"
           gh cache list --repo "$REPO" --limit 100 --json id,createdAt \
-            --jq ".[] | select((.createdAt | fromdateiso8601) < $cutoff) | .id" \
+            --jq '.[] | select((.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) < '"$cutoff"') | .id' \
             | while read -r id; do
                 if [ -n "$id" ]; then
                   gh cache delete "$id" --repo "$REPO" || true
