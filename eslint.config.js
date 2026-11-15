@@ -6,6 +6,7 @@ export default tseslint.config(
   {
     ignores: [
       'dist/**',
+      'release/**',
       'node_modules/**',
       'coverage/**',
       'engine/upstream/**',
@@ -37,6 +38,28 @@ export default tseslint.config(
         process: 'readonly',
         setTimeout: 'readonly',
       },
+    },
+  },
+  {
+    files: ['electron/**/*.cjs', 'build/**/*.cjs'],
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: {
+        Buffer: 'readonly',
+        Response: 'readonly',
+        URL: 'readonly',
+        __dirname: 'readonly',
+        clearTimeout: 'readonly',
+        console: 'readonly',
+        module: 'writable',
+        process: 'readonly',
+        require: 'readonly',
+        setTimeout: 'readonly',
+      },
+    },
+    rules: {
+      // CommonJS est imposé par Electron pour le processus principal et le preload sandboxé.
+      '@typescript-eslint/no-require-imports': 'off',
     },
   },
   prettier,

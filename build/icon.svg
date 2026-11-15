@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">OpenTT3D</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16485a"/>
+      <stop offset="0.55" stop-color="#0d2a35"/>
+      <stop offset="1" stop-color="#071820"/>
+    </linearGradient>
+    <linearGradient id="top" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#67cf6f"/>
+      <stop offset="1" stop-color="#35934a"/>
+    </linearGradient>
+    <linearGradient id="left" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2c7d40"/>
+      <stop offset="1" stop-color="#174d2a"/>
+    </linearGradient>
+    <linearGradient id="right" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#225f35"/>
+      <stop offset="1" stop-color="#0f381f"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f7a253"/>
+      <stop offset="1" stop-color="#d8621f"/>
+    </linearGradient>
+    <linearGradient id="roof" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd89c"/>
+      <stop offset="1" stop-color="#ef9f49"/>
+    </linearGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="26" stdDeviation="30" flood-color="#021016" flood-opacity="0.55"/>
+    </filter>
+    <clipPath id="tile">
+      <path d="M512 268 L806 438 L512 608 L218 438 Z"/>
+    </clipPath>
+  </defs>
+
+  <rect x="72" y="72" width="880" height="880" rx="204" fill="url(#bg)"/>
+  <g opacity="0.14" stroke="#8fd6c8" stroke-width="3">
+    <path d="M170 322 L512 118 L854 322"/>
+    <path d="M170 754 L512 958 L854 754"/>
+    <path d="M120 438 L462 640"/>
+    <path d="M562 640 L904 438"/>
+  </g>
+
+  <g filter="url(#shadow)">
+    <path d="M218 438 L512 608 L512 682 L218 512 Z" fill="url(#left)"/>
+    <path d="M806 438 L512 608 L512 682 L806 512 Z" fill="url(#right)"/>
+    <path d="M512 268 L806 438 L512 608 L218 438 Z" fill="url(#top)"/>
+  </g>
+
+  <g clip-path="url(#tile)">
+    <path d="M258 456 L744 456 L744 480 L258 480 Z" fill="#2d6f3c" opacity="0.42"/>
+    <g stroke="#c9a06a" stroke-width="20" stroke-linecap="round">
+      <path d="M292 484 L742 412"/>
+      <path d="M306 532 L756 460"/>
+      <path d="M320 580 L770 508"/>
+      <path d="M334 628 L784 556"/>
+    </g>
+    <g stroke="#dce6ea" stroke-width="14" stroke-linecap="round">
+      <path d="M284 496 L734 424"/>
+      <path d="M312 544 L762 472"/>
+    </g>
+    <g stroke="#6f7d84" stroke-width="4" opacity="0.7">
+      <path d="M284 496 L734 424"/>
+      <path d="M312 544 L762 472"/>
+    </g>
+  </g>
+
+  <!-- Locomotive isométrique -->
+  <g>
+    <!-- caisse -->
+    <path d="M430 456 L548 389 L666 456 L548 523 Z" fill="#f6b162"/>
+    <path d="M430 456 L548 523 L548 613 L430 546 Z" fill="url(#body)"/>
+    <path d="M666 456 L548 523 L548 613 L666 546 Z" fill="#a84414"/>
+    <!-- bas de caisse -->
+    <path d="M430 518 L548 585 L548 613 L430 546 Z" fill="#7c3210"/>
+    <path d="M666 518 L548 585 L548 613 L666 546 Z" fill="#5f260c"/>
+    <!-- pare-brise et hublots -->
+    <path d="M566 500 L650 452 L650 486 L566 534 Z" fill="#bfe7f5"/>
+    <path d="M566 504 L650 456 L650 468 L566 516 Z" fill="#eaf8ff" opacity="0.9"/>
+    <path d="M446 494 L520 536 L520 564 L446 522 Z" fill="#1b2b33"/>
+    <path d="M446 498 L520 540 L520 550 L446 508 Z" fill="#8fd0e6" opacity="0.85"/>
+    <!-- cabine -->
+    <path d="M462 410 L520 376 L578 410 L520 444 Z" fill="url(#roof)"/>
+    <path d="M462 410 L520 444 L520 500 L462 466 Z" fill="#e89a43"/>
+    <path d="M578 410 L520 444 L520 500 L578 466 Z" fill="#b9671c"/>
+    <path d="M500 430 L560 396 L560 416 L500 450 Z" fill="#bfe7f5"/>
+    <!-- phare avant -->
+    <path d="M606 476 L632 461 L632 477 L606 492 Z" fill="#ffe08a"/>
+    <path d="M632 461 L650 451 L650 467 L632 477 Z" fill="#ffc247"/>
+  </g>
+
+  <path d="M512 268 L806 438 L512 608 L218 438 Z" fill="none" stroke="#9ef0a8" stroke-width="6" opacity="0.4"/>
+</svg>
