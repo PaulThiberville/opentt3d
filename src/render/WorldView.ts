@@ -21,6 +21,7 @@ import { IndustryLayer } from './IndustryLayer';
 import { InfrastructureLayer } from './InfrastructureLayer';
 import { Picking, type PickResult } from './Picking';
 import { SignalLayer } from './SignalLayer';
+import { StructureLayer } from './StructureLayer';
 import { SurroundingsLayer } from './SurroundingsLayer';
 import { TerrainLayer } from './TerrainLayer';
 import { TownPropsLayer } from './TownPropsLayer';
@@ -80,6 +81,7 @@ export class WorldView {
   readonly catenary = new CatenaryLayer();
   readonly depots = new DepotLayer();
   readonly infrastructure = new InfrastructureLayer();
+  readonly structures = new StructureLayer();
   readonly atmosphere = new AtmosphereLayer();
   readonly surroundings = new SurroundingsLayer();
 
@@ -146,6 +148,7 @@ export class WorldView {
     this.scene.add(this.catenary.group);
     this.scene.add(this.depots.group);
     this.scene.add(this.infrastructure.group);
+    this.scene.add(this.structures.group);
     this.scene.add(this.atmosphere.group);
     this.scene.add(this.surroundings.group);
     this.scene.add(this.buildOverlay.group);
@@ -196,6 +199,7 @@ export class WorldView {
       this.signals.setMap(map);
       this.catenary.setMap(map);
       this.surroundings.build(map, this.quality);
+      this.structures.setStructures(snapshot.structures ?? [], map);
       this.mapApplied = true;
       if (first) {
         this.controller.setBounds({ minX: 0, maxX: map.width, minZ: 0, maxZ: map.height });
@@ -282,6 +286,7 @@ export class WorldView {
     this.controller.update(deltaSeconds);
     this.terrain.update(deltaSeconds);
     this.tracks.update(this.camera.position);
+    this.structures.update(this.camera.position);
     this.vegetation.update(deltaSeconds, this.camera.position);
     this.cityLayer.update(this.camera.position);
     this.townProps.update(this.camera.position);
@@ -470,6 +475,8 @@ export class WorldView {
   private applyQuality(level: QualityLevel): void {
     this.terrain.setQuality(level);
     this.tracks.setQuality(level);
+    this.structures.setQuality(level);
+    this.structures.setShadows(level === 'high');
     this.cityLayer.setQuality(level);
     this.cityLayer.setShadows(level === 'high');
     this.cityLayer.setNightLights(qualitySettings(level).nightWindows);
@@ -535,6 +542,10 @@ export class WorldView {
     };
   }
 
+  getStructureCount(): number {
+    return this.structures.count;
+  }
+
   getTrackChunkCount(): number {
     return this.tracks.chunkCount;
   }
@@ -552,6 +563,7 @@ export class WorldView {
       this.industries.drawCallCount +
       this.depots.drawCallCount +
       this.tracks.drawCallCount +
+      this.structures.drawCallCount +
       this.atmosphere.drawCallCount +
       this.surroundings.drawCallCount +
       this.vehicles.accessoryDrawCalls
@@ -585,6 +597,7 @@ export class WorldView {
     this.scene.remove(this.signals.group);
     this.scene.remove(this.depots.group);
     this.scene.remove(this.infrastructure.group);
+    this.scene.remove(this.structures.group);
     this.scene.remove(this.atmosphere.group);
     this.scene.remove(this.surroundings.group);
     this.scene.remove(this.buildOverlay.group);
@@ -599,6 +612,7 @@ export class WorldView {
     this.catenary.dispose();
     this.depots.dispose();
     this.infrastructure.dispose();
+    this.structures.dispose();
     this.atmosphere.dispose();
     this.surroundings.dispose();
     this.buildOverlay.dispose();

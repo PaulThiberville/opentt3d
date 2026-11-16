@@ -15,6 +15,7 @@ import {
   createBuildSettings,
   nextDirection,
   planAqueduct,
+  planBridge,
   planBuild,
   planCanal,
   planConvertRail,
@@ -26,6 +27,7 @@ import {
   planStation,
   planTerraform,
   planTree,
+  planTunnel,
   type BuildPlan,
   type BuildPoint,
   type BuildSettings,
@@ -263,6 +265,14 @@ export class BuildController {
       plan = planAqueduct({ ...shared, to: to ?? from });
     } else if (tool === 'crossing') {
       plan = planCrossing({ ...shared });
+    } else if (tool === 'bridge') {
+      const target = to ?? defaultStructureTarget(from, map);
+      plan = planBridge({ ...shared, to: target, settings: this.settings.bridge });
+    } else if (tool === 'tunnel') {
+      // La portée d'un tunnel se lit dans le relief : on prévisualise un
+      // tunnel court vers l'est à défaut de drag.
+      const target = to ?? defaultStructureTarget(from, map);
+      plan = planTunnel({ ...shared, to: target, settings: this.settings.tunnel });
     } else {
       plan = planBuild({
         ...shared,
@@ -275,4 +285,13 @@ export class BuildController {
     this.plan = plan;
     this.options.onPreview(plan);
   }
+}
+
+/** Cible par défaut d'un aperçu d'ouvrage au simple survol (3 tuiles à l'est). */
+function defaultStructureTarget(
+  from: BuildPoint,
+  map: { width: number; height: number },
+): BuildPoint {
+  const offset = from.x + 3 < map.width ? 3 : -3;
+  return { x: Math.max(0, Math.min(map.width - 1, from.x + offset)), y: from.y };
 }

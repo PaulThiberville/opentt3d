@@ -1348,7 +1348,10 @@ export class TrackLayer {
         const wx = x0 + tx;
         const wy = y0 + ty;
         const index = wy * map.width + wx;
-        if ((map.kind[index] ?? 0) === TILE_KIND_INDEX.tunnel) continue;
+        const kind = map.kind[index] ?? 0;
+        // Ponts et tunnels sont dessinés par `StructureLayer` : la voie de
+        // surface s'arrête aux culées et aux portails.
+        if (kind === TILE_KIND_INDEX.tunnel || kind === TILE_KIND_INDEX.bridge) continue;
         if (masks.rail[index]) plans.push(inferTilePlan(map, masks, wx, wy, 'rail'));
         else if (masks.road[index]) plans.push(inferTilePlan(map, masks, wx, wy, 'road'));
       }
