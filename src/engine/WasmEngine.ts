@@ -396,6 +396,7 @@ export class WasmEngine implements EngineDriver {
       case 'vehicle':
       case 'finance':
       case 'town_action':
+      case 'group':
         this.executeBridgeCommand(command);
         return;
       default:

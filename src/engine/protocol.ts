@@ -155,6 +155,62 @@ export interface MapSnapshot {
 
 export type VehicleKind = 'train' | 'road' | 'ship' | 'aircraft';
 
+/** État de panne en cours d'un véhicule (#163). */
+export type BreakdownState = 'none' | 'slowing' | 'stopped';
+
+/**
+ * Usure et fiabilité d'un véhicule (#163).
+ *
+ * `wear` et `reliability` sont des pourcentages : `wear` 0 = neuf, 100 = usé ;
+ * `reliability` vaut `100 - wear`. Les moteurs antérieurs à #163 n'exposent pas
+ * ce bloc, l'UI masque alors les indicateurs d'entretien.
+ */
+export interface VehicleReliabilitySnapshot {
+  /** Usure 0..100 (100 = véhicule à remplacer). */
+  wear: number;
+  /** Fiabilité restante 0..100. */
+  reliability: number;
+  /** Panne en cours : aucune, ralentissement ou arrêt temporaire. */
+  breakdown: BreakdownState;
+  /** Ticks restants de la panne courante (0 = aucune). */
+  breakdownTicks: number;
+  /** Tick du dernier service au dépôt, ou null si jamais entretenu. */
+  lastServiceTick: number | null;
+  /** Intervalle d'entretien recommandé, en jours de jeu. */
+  serviceIntervalDays: number;
+  /** Jours écoulés depuis le dernier service. */
+  daysSinceService: number;
+  /** Coût d'entretien annuel indicatif, en livres. */
+  maintenancePerYear: number;
+}
+
+/** Groupe auquel appartient un véhicule (#164). */
+export interface VehicleGroupRef {
+  id: number;
+  name: string;
+}
+
+/**
+ * Groupe de véhicules d'une entreprise (#164). Les groupes sont typés : un
+ * groupe routier ne peut contenir que des véhicules routiers, comme dans
+ * OpenTTD. `parent` permet une hiérarchie facultative.
+ */
+export interface VehicleGroupSnapshot {
+  id: number;
+  company: CompanyId;
+  name: string;
+  kind: VehicleKind;
+  /** Groupe parent, ou null pour un groupe racine. */
+  parent: number | null;
+  /** Nombre de véhicules rattachés. */
+  vehicles: number;
+  /**
+   * Règle de remplacement automatique du groupe. `model` est un identifiant
+   * du catalogue partagé (mock) ou un nom de moteur (pont WASM).
+   */
+  autoreplace: { model: string; whenOld: boolean } | null;
+}
+
 /**
  * Type d'une cible de tournée : gare, industrie, dépôt, ou ordre conditionnel
  * (#161). Un ordre conditionnel n'a pas de cible physique : `target` est
@@ -266,6 +322,10 @@ export interface VehicleSnapshot {
   currentOrder?: number;
   profitLastYear: number;
   ageDays: number;
+  /** Usure, fiabilité et panne en cours (#163), absent des anciens moteurs. */
+  reliability?: VehicleReliabilitySnapshot;
+  /** Groupe de véhicules (#164), absent pour un véhicule non groupé. */
+  group?: VehicleGroupRef;
 }
 
 export interface StationSnapshot {
@@ -501,6 +561,8 @@ export interface WorldSnapshot {
   vehicles: VehicleSnapshot[];
   /** Subventions proposées et attribuées (#166/#167). */
   subsidies?: SubsidySnapshot[];
+  /** Groupes de véhicules de toutes les entreprises (#164). */
+  groups?: VehicleGroupSnapshot[];
   /** Nouvelles du jeu, consommées par le HUD. */
   news: { tick: number; kind: 'info' | 'warning' | 'error' | 'company'; text: string }[];
   /**
@@ -551,7 +613,12 @@ export type WorldEvent =
   | { type: 'subsidy_expired'; subsidy: number; tick: number }
   | { type: 'disaster_started'; disaster: number; kind: DisasterKind; tick: number }
   | { type: 'disaster_ended'; disaster: number; tick: number }
-  | { type: 'town_action'; town: number; action: TownActionKind; tick: number };
+  | { type: 'town_action'; town: number; action: TownActionKind; tick: number }
+  | { type: 'vehicle_breakdown'; vehicle: number; breakdown: BreakdownState; tick: number }
+  | { type: 'vehicle_repaired'; vehicle: number; cost: number; tick: number }
+  | { type: 'vehicle_autoreplaced'; vehicle: number; model: string; tick: number }
+  | { type: 'group_created'; group: number; company: CompanyId; tick: number }
+  | { type: 'group_deleted'; group: number; company: CompanyId; tick: number };
 
 export interface EngineInitOptions {
   /** URL du module WASM ou chemin local. */
@@ -643,7 +710,16 @@ export type EngineCommand =
     }
   | {
       type: 'vehicle';
-      action: 'buy' | 'sell' | 'refit' | 'order' | 'start' | 'stop' | 'clone';
+      action:
+        | 'buy'
+        | 'sell'
+        | 'refit'
+        | 'order'
+        | 'start'
+        | 'stop'
+        | 'clone'
+        | 'service'
+        | 'send_to_depot';
       company: CompanyId;
       vehicle?: number;
       /** Dépôt d'achat par identifiant stable de `depots[]` (prioritaire). */
@@ -674,6 +750,38 @@ export type EngineCommand =
       action: TownActionKind;
       company: CompanyId;
       town: number;
+    }
+  | {
+      /**
+       * Groupes de véhicules et actions groupées (#164). `group` cible un
+       * groupe existant ; `vehicles` liste les véhicules à affecter.
+       */
+      type: 'group';
+      action:
+        | 'create'
+        | 'rename'
+        | 'delete'
+        | 'assign'
+        | 'remove'
+        | 'start'
+        | 'stop'
+        | 'send_to_depot'
+        | 'sell'
+        | 'autoreplace';
+      company: CompanyId;
+      group?: number;
+      /** Nom du groupe à créer ou renommer. */
+      name?: string;
+      /** Type du groupe à créer (obligatoire pour un groupe non vide). */
+      kind?: VehicleKind;
+      /** Groupe parent d'un nouveau groupe. */
+      parent?: number;
+      /** Véhicules ciblés par `assign` (null = véhicules non groupés). */
+      vehicles?: number[];
+      /** Modèle cible d'un `autoreplace` ; absent/null efface la règle. */
+      model?: string | null;
+      /** Remplace seulement les véhicules anciens (défaut : true). */
+      whenOld?: boolean;
     };
 
 /** Index OpenTTD du type de rail/route demandé (`rail_type`, `road_type`). */

@@ -2,13 +2,18 @@ import { describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION, type DepotSnapshot, type WorldSnapshot } from '../src/engine/protocol';
 import {
   MAX_VEHICLE_ORDERS,
+  assignGroupCommand,
   buyVehicleCommand,
   cloneOrderOptions,
   cloneVehicleCommand,
+  createGroupCommand,
+  deleteGroupCommand,
   depotAtTile,
   depotById,
   depotKindLabel,
   depotOrder,
+  groupActionCommand,
+  groupAutoreplaceCommand,
   inferVehicleModel,
   modelsForDepot,
   orderTargetLabel,
@@ -18,6 +23,9 @@ import {
   refitOption,
   refitOptions,
   refitVehicleCommand,
+  renameGroupCommand,
+  sendVehicleToDepotCommand,
+  serviceVehicleCommand,
   stationAtTile,
   validateVehicleOrders,
   vehicleActionCommand,
@@ -360,5 +368,67 @@ describe('vehicleRules : ordres et commandes', () => {
     });
     expect(inferVehicleModel('road', 'coal')?.id).toBe('truck_flatbed');
     expect(inferVehicleModel('train', 'passengers')?.id).toBe('rail_autorail');
+  });
+
+  it('construit les commandes d’entretien et de groupes (#163/#164)', () => {
+    expect(serviceVehicleCommand(1, 8)).toEqual({
+      type: 'vehicle',
+      action: 'service',
+      company: 1,
+      vehicle: 8,
+    });
+    expect(sendVehicleToDepotCommand(1, 8)).toEqual({
+      type: 'vehicle',
+      action: 'send_to_depot',
+      company: 1,
+      vehicle: 8,
+    });
+    expect(createGroupCommand(1, 'road', 'Ligne A')).toEqual({
+      type: 'group',
+      action: 'create',
+      company: 1,
+      kind: 'road',
+      name: 'Ligne A',
+    });
+    expect(renameGroupCommand(1, 4, 'Ligne B')).toEqual({
+      type: 'group',
+      action: 'rename',
+      company: 1,
+      group: 4,
+      name: 'Ligne B',
+    });
+    expect(deleteGroupCommand(1, 4)).toEqual({
+      type: 'group',
+      action: 'delete',
+      company: 1,
+      group: 4,
+    });
+    expect(assignGroupCommand(1, 4, [8, 9])).toEqual({
+      type: 'group',
+      action: 'assign',
+      company: 1,
+      group: 4,
+      vehicles: [8, 9],
+    });
+    expect(assignGroupCommand(1, null, [8])).toEqual({
+      type: 'group',
+      action: 'remove',
+      company: 1,
+      vehicles: [8],
+    });
+    expect(groupActionCommand(1, 4, 'send_to_depot')).toEqual({
+      type: 'group',
+      action: 'send_to_depot',
+      company: 1,
+      group: 4,
+    });
+    expect(groupAutoreplaceCommand(1, 4, 'bus_intercity', false)).toEqual({
+      type: 'group',
+      action: 'autoreplace',
+      company: 1,
+      group: 4,
+      model: 'bus_intercity',
+      whenOld: false,
+    });
   });
 });
