@@ -807,6 +807,16 @@ async function runAiRoundTrip() {
   assert(state.counts.companies === 3, `IA : ${state.counts.companies} entreprises au lieu de 3`);
   assert(state.counts.stations >= 2, `IA : ${state.counts.stations} gares construites`);
   assert(state.counts.vehicles >= 2, `IA : ${state.counts.vehicles} véhicules construits`);
+  assert(
+    state.config.aiCompanies === 2,
+    `IA : configuration ${state.config.aiCompanies} au lieu de 2`,
+  );
+  const aiCompanies = state.companies.filter((company) => company.isAI);
+  assert(aiCompanies.length === 2, `IA : ${aiCompanies.length} entreprises isAI au lieu de 2`);
+  assert(
+    aiCompanies.every((company) => company.aiLevel === 2),
+    `IA : niveaux ${aiCompanies.map((company) => company.aiLevel).join(',')} au lieu de 2`,
+  );
   const hash = hashHex(source.engine);
   const tick = source.engine._ottd_tick();
   const saved = saveGame(source);

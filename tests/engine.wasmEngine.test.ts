@@ -124,6 +124,7 @@ describe('WasmEngine : chargement et cycle de vie', () => {
       climate: 'toyland',
       startYear: 2000,
       difficulty: 3,
+      disasters: true,
     });
     expect(fake.state.seed).toBe(7);
     const status = engine.status();
@@ -133,6 +134,7 @@ describe('WasmEngine : chargement et cycle de vie', () => {
     expect(warning).toContain('climat « toyland »');
     expect(warning).toContain('année de départ 2000');
     expect(warning).toContain('difficulté 3');
+    expect(warning).toContain('désastres');
     expect(warning).toContain('#60');
     expect(warnings).toEqual(status.warnings);
   });
@@ -160,6 +162,7 @@ describe('WasmEngine : chargement et cycle de vie', () => {
       climate: 'toyland',
       startYear: 2000,
       difficulty: 3,
+      disasters: true,
     });
 
     expect(calls).toHaveLength(1);
@@ -170,6 +173,7 @@ describe('WasmEngine : chargement et cycle de vie', () => {
       difficulty: 3,
       ai_companies: 2,
       map_size: 64,
+      disasters: true,
     });
     expect(warnings).toEqual([]);
     expect(engine.status().warnings).toEqual([]);

@@ -423,6 +423,12 @@ function validateJson(state, label, size) {
       Number.isInteger(company.monthsOfBankruptcy) && company.monthsOfBankruptcy >= 0,
       `${label} : mois de faillite ${company.monthsOfBankruptcy}`,
     );
+    if (company.isAI) {
+      assert(
+        Number.isInteger(company.aiLevel) && company.aiLevel >= 1 && company.aiLevel <= 3,
+        `${label} : niveau IA ${company.aiLevel}`,
+      );
+    }
     assert(
       state.companies.filter((c) => c.isLocal).length <= 1,
       `${label} : plusieurs entreprises locales`,
@@ -527,6 +533,21 @@ function validateJson(state, label, size) {
 
   assert(Array.isArray(state.news), `${label} : news`);
   assert(Array.isArray(state.events), `${label} : events`);
+  assert(Array.isArray(state.disasters), `${label} : disasters`);
+  for (const disaster of state.disasters) {
+    assert(
+      ['fire', 'road_accident', 'train_crash', 'aircraft_crash'].includes(disaster.kind),
+      `${label} : type de désastre ${disaster.kind}`,
+    );
+    assert(
+      Number.isFinite(disaster.x) && Number.isFinite(disaster.y),
+      `${label} : coordonnées de désastre`,
+    );
+    assert(
+      Number.isInteger(disaster.severity) && disaster.severity >= 1 && disaster.severity <= 3,
+      `${label} : gravité de désastre ${disaster.severity}`,
+    );
+  }
 }
 
 function waitForMap(api, reader, width, height) {

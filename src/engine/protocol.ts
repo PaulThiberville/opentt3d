@@ -443,6 +443,12 @@ export interface CompanySnapshot {
   maxLoan?: number;
   /** Mois consécutifs de trésorerie négative ; 0 = entreprise saine. */
   monthsOfBankruptcy?: number;
+  /**
+   * Niveau de l'IA 1..3 (#168), absent pour une entreprise humaine. Le mock
+   * l'utilise pour espacer ses constructions ; le pont le dérive de la
+   * difficulté (vitesse des concurrents).
+   */
+  aiLevel?: number;
 }
 
 export interface EconomySnapshot {
@@ -497,8 +503,41 @@ export interface WorldSnapshot {
   subsidies?: SubsidySnapshot[];
   /** Nouvelles du jeu, consommées par le HUD. */
   news: { tick: number; kind: 'info' | 'warning' | 'error' | 'company'; text: string }[];
+  /**
+   * Désastres actifs (#172). Absent = aucun désastre dans cette partie, ce qui
+   * est le comportement par défaut (option désactivée).
+   */
+  disasters?: DisasterSnapshot[];
   /** Événements ponctuels entre deux snapshots (départ, arrivée, panne…). */
   events: WorldEvent[];
+}
+
+/** Type de désastre (#172), aligné sur les catastrophes d'OpenTTD. */
+export type DisasterKind = 'fire' | 'road_accident' | 'train_crash' | 'aircraft_crash';
+
+/**
+ * Désastre actif exposé par le snapshot. Les coordonnées sont en tuiles
+ * fractionnaires, comme les entités ; `remainingDays` permet au HUD et au
+ * rendu de faire disparaître l'incident sans commande supplémentaire.
+ */
+export interface DisasterSnapshot {
+  id: number;
+  kind: DisasterKind;
+  x: number;
+  y: number;
+  /** Entreprise touchée, ou `COMPANY_NONE` pour un incident neutre. */
+  company: CompanyId;
+  /** Véhicule détruit/immobilisé, si le désastre en vise un. */
+  vehicle?: number;
+  /** Ville ou industrie touchée, selon le type. */
+  town?: number;
+  industry?: number;
+  /** Gravité 1..3 (nombre de dégâts et rayon visuel). */
+  severity: number;
+  /** Tick de déclenchement. */
+  startedTick: number;
+  /** Jours restants avant la fin de l'incident (0 = dernier jour). */
+  remainingDays: number;
 }
 
 export type WorldEvent =
@@ -510,6 +549,8 @@ export type WorldEvent =
   | { type: 'loan_changed'; company: CompanyId; loan: number; tick: number }
   | { type: 'subsidy_awarded'; subsidy: number; company: CompanyId; tick: number }
   | { type: 'subsidy_expired'; subsidy: number; tick: number }
+  | { type: 'disaster_started'; disaster: number; kind: DisasterKind; tick: number }
+  | { type: 'disaster_ended'; disaster: number; tick: number }
   | { type: 'town_action'; town: number; action: TownActionKind; tick: number };
 
 export interface EngineInitOptions {
@@ -545,6 +586,11 @@ export interface NewGameOptions {
   startYear?: number;
   /** Climat : temperate, subarctic, subtropical, toyland. */
   climate?: 'temperate' | 'subarctic' | 'subtropical' | 'toyland';
+  /**
+   * Active les catastrophes d'OpenTTD (#172) : incendies, accidents et
+   * crashes. Désactivées par défaut ; la difficulté règle leur fréquence.
+   */
+  disasters?: boolean;
   /**
    * Entreprises humaines à créer au démarrage (#99), dans l'ordre des ids
    * 0..n-1. Absent : une seule entreprise locale (comportement solo). En
