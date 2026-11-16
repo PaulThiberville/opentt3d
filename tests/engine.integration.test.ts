@@ -238,7 +238,10 @@ suite('intégration moteur WASM réel', () => {
         orders: [{ target: depot.id, kind: 'depot' }],
       });
       const ordered = engine.snapshot();
-      expect(ordered.news.some((item) => /ordre\(s\) enregistré\(s\)/i.test(item.text))).toBe(true);
+      // Le libellé de news varie selon la version du pont : on vérifie l'effet
+      // réel de la commande sur la tournée du véhicule.
+      const orderedBus = ordered.vehicles.find((item) => item.id === bus.id);
+      expect(orderedBus?.orderDetails?.length ?? 0).toBeGreaterThan(0);
 
       engine.send({
         type: 'vehicle',
