@@ -33,6 +33,7 @@ import {
   type RailType,
   type SignalDirection,
   type StationSnapshot,
+  type StructureSnapshot,
   type SubsidySnapshot,
   type TownActionKind,
   type TownActionSnapshot,
@@ -54,8 +55,11 @@ import {
 } from '../game/economyRules';
 import {
   BUILD_TOOL_LABELS,
+  BRIDGE_MATERIALS,
+  BRIDGE_MATERIAL_LABELS,
   directionToIndex,
   planAqueduct,
+  planBridge,
   planBuild,
   planCanal,
   planConvertRail,
@@ -67,11 +71,13 @@ import {
   planStation,
   planTerraform,
   planTree,
+  planTunnel,
 } from '../game/buildRules';
 import { stationFootprint } from '../game/buildRules';
 import {
   depotConnections,
   parseBuildDirection,
+  type BridgeMaterial,
   type BuildDirection,
   type BuildTransport,
   type DepotSettings,
@@ -278,6 +284,25 @@ interface MockNews {
   text: string;
 }
 
+/**
+ * Pont ou tunnel construit par le mock. `underlay` mémorise les types de
+ * tuiles d'origine pour restaurer exactement l'eau ou l'herbe à la démolition.
+ */
+interface MockStructure {
+  id: number;
+  type: 'bridge' | 'tunnel';
+  company: number;
+  transport: BuildTransport;
+  material?: BridgeMaterial;
+  from: P2;
+  to: P2;
+  length: number;
+  deckHeight?: number;
+  portalHeight?: number;
+  maintenancePerYear: number;
+  underlay: { index: number; kind: number; owner: number; flags: number; trackBits: number }[];
+}
+
 interface MockWorld {
   seed: number;
   width: number;
@@ -317,6 +342,7 @@ interface MockWorld {
   industries: MockIndustry[];
   stations: MockStation[];
   depots: MockDepot[];
+  structures: MockStructure[];
   vehicles: MockVehicle[];
   subsidies: MockSubsidy[];
 
@@ -374,6 +400,8 @@ interface SerializedWorld {
   stations: MockStation[];
   /** Absent des sauvegardes mock antérieures à #90 (migration héritée). */
   depots?: MockDepot[];
+  /** Absent des sauvegardes mock antérieures à #154/#155. */
+  structures?: MockStructure[];
   vehicles: (Omit<MockVehicle, 'pathLengths' | 'segmentStops'> & {
     segmentStops?: (MockStop | null)[];
     /** Ancien format (#29) : arrêts de gare uniquement. */
@@ -843,6 +871,7 @@ class WorldBuilder {
   readonly industries: MockIndustry[] = [];
   readonly stations: MockStation[] = [];
   readonly depots: MockDepot[] = [];
+  readonly structures: MockStructure[] = [];
   readonly vehicles: MockVehicle[] = [];
   readonly subsidies: MockSubsidy[] = [];
 
@@ -1769,6 +1798,7 @@ class WorldBuilder {
       industries: this.industries,
       stations: this.stations,
       depots: this.depots,
+      structures: this.structures,
       vehicles: this.vehicles,
       subsidies: this.subsidies,
       news: [
@@ -1932,13 +1962,11 @@ function updateVehiclesTransforms(world: MockWorld): void {
 // Construction
 // ---------------------------------------------------------------------------
 
-const UNAVAILABLE_BUILD: Partial<Record<string, string>> = {
-  bridge: 'Ponts : construction à venir.',
-  tunnel: 'Tunnels : construction à venir.',
-};
+const UNAVAILABLE_BUILD: Partial<Record<string, string>> = {};
 
 const BUILT_KIND: Record<'road' | 'rail', number> = { road: K.road, rail: K.rail };
 const SIGNAL_TRACKS: readonly SignalTrack[] = ['x', 'y', 'upper', 'lower', 'left', 'right'];
+const BRIDGE_MATERIAL_IDS = Object.keys(BRIDGE_MATERIALS) as BridgeMaterial[];
 
 function optionText(
   options: Record<string, number | string | boolean> | undefined,
@@ -2032,6 +2060,35 @@ function depotSettingsFromCommand(
     kindText === 'rail' || kindText === 'train' || kindText === 'ferroviaire' ? 'rail' : 'road';
   const direction: BuildDirection | null = parseBuildDirection(options?.direction);
   return { kind, direction };
+}
+
+/** Réseau (`rail`/`road`) commun aux ponts et tunnels. */
+function structureTransportFromCommand(
+  command: Extract<EngineCommand, { type: 'build' }>,
+): BuildTransport {
+  const options = command.options;
+  const kindText =
+    optionText(options, 'kind') ??
+    optionText(options, 'transport') ??
+    optionText(options, 'vehicle') ??
+    'rail';
+  return kindText === 'road' || kindText === 'route' || kindText === 'routier' ? 'road' : 'rail';
+}
+
+/** Famille de pont demandée ; `null` si le libellé est inconnu. */
+function bridgeMaterialFromCommand(
+  command: Extract<EngineCommand, { type: 'build' }>,
+): BridgeMaterial | null {
+  const options = command.options;
+  const raw = optionText(options, 'material') ?? optionText(options, 'bridge_material');
+  if (!raw) return 'wood';
+  if ((BRIDGE_MATERIAL_IDS as string[]).includes(raw)) return raw as BridgeMaterial;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric >= 0) {
+    // Indices alignés sur `BRIDGE_MATERIAL_ORDER`.
+    return BRIDGE_MATERIAL_IDS[Math.floor(numeric) % BRIDGE_MATERIAL_IDS.length] ?? 'wood';
+  }
+  return null;
 }
 
 function signalSettingsFromCommand(command: Extract<EngineCommand, { type: 'build' }>): {
@@ -2550,6 +2607,178 @@ function applyCrossing(
   );
 }
 
+/** Prochain id d'ouvrage : monotone, jamais réutilisé après démolition. */
+function nextStructureId(world: MockWorld): number {
+  let next = 0;
+  for (const structure of world.structures) next = Math.max(next, structure.id + 1);
+  return next;
+}
+
+/** Ouvrage dont l'emprise contient la tuile, ou `null`. */
+function structureAtTile(world: MockWorld, index: number): MockStructure | null {
+  for (const structure of world.structures) {
+    if (structure.underlay.some((entry) => entry.index === index)) return structure;
+  }
+  return null;
+}
+
+/** Restaure les tuiles d'origine et retire l'ouvrage (démolition). */
+function removeStructure(world: MockWorld, structure: MockStructure): void {
+  for (const entry of structure.underlay) {
+    world.kind[entry.index] = entry.kind;
+    world.owner[entry.index] = entry.owner;
+    world.flags[entry.index] = entry.flags;
+    world.trackBits[entry.index] = entry.trackBits;
+  }
+  world.structures = world.structures.filter((item) => item !== structure);
+}
+
+function captureUnderlay(
+  world: MockWorld,
+  tiles: readonly { index: number }[],
+): MockStructure['underlay'] {
+  return tiles.map((tile) => ({
+    index: tile.index,
+    kind: world.kind[tile.index] ?? K.grass,
+    owner: world.owner[tile.index] ?? COMPANY_NONE,
+    flags: world.flags[tile.index] ?? 0,
+    trackBits: world.trackBits[tile.index] ?? 0,
+  }));
+}
+
+/** Construit un pont rectiligne (#154). */
+function applyBridge(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+): void {
+  if (!command.to) {
+    addNews(
+      world,
+      'error',
+      'Construction impossible : un pont exige deux culées (« from » et « to »).',
+    );
+    return;
+  }
+  const material = bridgeMaterialFromCommand(command);
+  if (!material) {
+    addNews(world, 'error', 'Construction impossible : matériau de pont inconnu.');
+    return;
+  }
+  const kind = structureTransportFromCommand(command);
+  const plan = planBridge({
+    map: mapSnapshotView(world),
+    from: command.from,
+    to: command.to,
+    settings: { kind, material },
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid || !plan.bridge) {
+    addNews(world, 'error', `Construction impossible : ${plan.reason ?? 'pont refusé.'}`);
+    return;
+  }
+
+  const underlay = captureUnderlay(world, plan.tiles);
+  for (let i = 0; i < plan.tiles.length; i += 1) {
+    const tile = plan.tiles[i];
+    if (!tile) continue;
+    const end = i === 0 || i === plan.tiles.length - 1;
+    if (end) {
+      world.kind[tile.index] = K.bridge;
+      world.owner[tile.index] = command.company;
+      world.trackBits[tile.index] = 0;
+      world.flags[tile.index] = TILE_FLAG.BRIDGE;
+    } else {
+      // Le tablier survole le terrain : on conserve l'eau, l'herbe ou la voie
+      // en dessous et on ne pose que le drapeau BRIDGE, comme OpenTTD.
+      world.flags[tile.index] = (world.flags[tile.index] ?? 0) | TILE_FLAG.BRIDGE;
+    }
+  }
+  world.structures.push({
+    id: nextStructureId(world),
+    type: 'bridge',
+    company: command.company,
+    transport: kind,
+    material,
+    from: { ...plan.from },
+    to: { ...plan.to },
+    length: plan.bridge.length,
+    deckHeight: plan.bridge.deckHeight,
+    maintenancePerYear: plan.bridge.maintenance,
+    underlay,
+  });
+  completeBuild(
+    world,
+    company,
+    plan.cost,
+    `Pont en ${BRIDGE_MATERIAL_LABELS[material]} construit (${plan.bridge.length} tuiles, portée ${plan.bridge.span}) pour ${Math.round(plan.cost)} £.`,
+  );
+}
+
+/** Construit un tunnel rectiligne (#155). */
+function applyTunnel(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'build' }>,
+  company: MockCompany,
+): void {
+  if (!command.to) {
+    addNews(
+      world,
+      'error',
+      'Construction impossible : un tunnel exige deux portails (« from » et « to »).',
+    );
+    return;
+  }
+  const kind = structureTransportFromCommand(command);
+  const plan = planTunnel({
+    map: mapSnapshotView(world),
+    from: command.from,
+    to: command.to,
+    settings: { kind },
+    company: command.company,
+    budget: company.money,
+  });
+  if (!plan.valid || !plan.tunnel) {
+    addNews(world, 'error', `Construction impossible : ${plan.reason ?? 'tunnel refusé.'}`);
+    return;
+  }
+
+  const underlay = captureUnderlay(world, plan.tiles);
+  for (let i = 0; i < plan.tiles.length; i += 1) {
+    const tile = plan.tiles[i];
+    if (!tile) continue;
+    const end = i === 0 || i === plan.tiles.length - 1;
+    if (end) {
+      world.kind[tile.index] = K.tunnel;
+      world.owner[tile.index] = command.company;
+      world.trackBits[tile.index] = 0;
+      world.flags[tile.index] = TILE_FLAG.TUNNEL;
+    } else {
+      world.flags[tile.index] = (world.flags[tile.index] ?? 0) | TILE_FLAG.TUNNEL;
+    }
+  }
+  const portalHeight = world.heightMap[tileIndex(plan.from.x, plan.from.y, world.width)] ?? 0;
+  world.structures.push({
+    id: nextStructureId(world),
+    type: 'tunnel',
+    company: command.company,
+    transport: kind,
+    from: { ...plan.from },
+    to: { ...plan.to },
+    length: plan.tunnel.length,
+    portalHeight,
+    maintenancePerYear: plan.tunnel.maintenance,
+    underlay,
+  });
+  completeBuild(
+    world,
+    company,
+    plan.cost,
+    `Tunnel ${kind === 'rail' ? 'ferroviaire' : 'routier'} construit (${plan.tunnel.length} tuiles, profondeur ${plan.tunnel.depth}) pour ${Math.round(plan.cost)} £.`,
+  );
+}
+
 /**
  * Applique une commande de construction. Le mock rejoue les règles partagées
  * (`buildRules.ts`) avant de toucher la carte : une commande invalide ne change
@@ -2611,6 +2840,14 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     applyCrossing(world, command, company);
     return;
   }
+  if (command.tool === 'bridge') {
+    applyBridge(world, command, company);
+    return;
+  }
+  if (command.tool === 'tunnel') {
+    applyTunnel(world, command, company);
+    return;
+  }
   if (command.tool !== 'road' && command.tool !== 'rail' && command.tool !== 'clear') {
     addNews(
       world,
@@ -2638,8 +2875,16 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     return;
   }
 
-  for (const tile of plan.tiles) {
-    if (tool === 'clear') {
+  if (tool === 'clear') {
+    const handled = new Set<number>();
+    for (const tile of plan.tiles) {
+      if (handled.has(tile.index)) continue;
+      const structure = structureAtTile(world, tile.index);
+      if (structure) {
+        for (const entry of structure.underlay) handled.add(entry.index);
+        removeStructure(world, structure);
+        continue;
+      }
       const wasBridge = ((world.flags[tile.index] ?? 0) & TILE_FLAG.BRIDGE) !== 0;
       const current = world.kind[tile.index] ?? K.grass;
       const bits = world.trackBits[tile.index] ?? 0;
@@ -2654,7 +2899,9 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
         world.owner[tile.index] = COMPANY_NONE;
         world.flags[tile.index] = 0;
       } else {
-        // Un pont démoli laisse apparaître l'eau qu'il franchissait.
+        // Un pont démoli laisse apparaître l'eau qu'il franchissait ; un
+        // tunnel rend simplement l'herbe (les ouvrages récents ont leur
+        // propre `underlay` traité ci-dessus).
         world.kind[tile.index] = wasBridge ? K.water : K.grass;
         world.trackBits[tile.index] = 0;
         world.owner[tile.index] = COMPANY_NONE;
@@ -2668,8 +2915,19 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
         (depot) =>
           x < depot.x || x >= depot.x + depot.width || y < depot.y || y >= depot.y + depot.height,
       );
-      continue;
     }
+    company.money -= plan.cost;
+    world.mapDirty = true;
+    world.mapVersion += 1;
+    addNews(
+      world,
+      'info',
+      `${BUILD_TOOL_LABELS.clear} : ${plan.tiles.length} tuile${plan.tiles.length > 1 ? 's' : ''} pour ${Math.round(plan.cost)} £.`,
+    );
+    return;
+  }
+
+  for (const tile of plan.tiles) {
     world.kind[tile.index] = BUILT_KIND[tool];
     world.owner[tile.index] = command.company;
     world.trackBits[tile.index] = tile.connections;
@@ -3685,9 +3943,13 @@ function updateCompanyEconomy(world: MockWorld): void {
     company.stationCount = world.stations.filter(
       (station) => station.company === company.id,
     ).length;
+    const structureUpkeep = world.structures
+      .filter((structure) => structure.company === company.id)
+      .reduce((total, structure) => total + structure.maintenancePerYear, 0);
     company.income = company.deliveredToday;
     company.expenses = Math.round(
-      (220 * company.vehicleCount + 160 * company.stationCount + 900) * priceFactor(world),
+      (220 * company.vehicleCount + 160 * company.stationCount + 900) * priceFactor(world) +
+        structureUpkeep / 365,
     );
     company.money += company.income - company.expenses;
     company.deliveredToday = 0;
@@ -4011,6 +4273,7 @@ function serializeWorld(world: MockWorld): SerializedWorld {
     industries: world.industries,
     stations: world.stations,
     depots: world.depots,
+    structures: world.structures,
     vehicles: world.vehicles.map((vehicle) => ({
       id: vehicle.id,
       kind: vehicle.kind,
@@ -4261,6 +4524,31 @@ export class MockEngine implements EngineDriver {
       ...(depot.railType ? { railType: depot.railType } : {}),
     }));
 
+    const structures: StructureSnapshot[] = world.structures.map((structure) =>
+      structure.type === 'bridge'
+        ? {
+            id: structure.id,
+            kind: 'bridge' as const,
+            company: structure.company,
+            transport: structure.transport,
+            material: structure.material ?? 'wood',
+            from: { ...structure.from },
+            to: { ...structure.to },
+            length: structure.length,
+            deckHeight: structure.deckHeight ?? 0,
+          }
+        : {
+            id: structure.id,
+            kind: 'tunnel' as const,
+            company: structure.company,
+            transport: structure.transport,
+            from: { ...structure.from },
+            to: { ...structure.to },
+            length: structure.length,
+            portalHeight: structure.portalHeight ?? 0,
+          },
+    );
+
     const vehicles: VehicleSnapshot[] = world.vehicles.map((vehicle) => ({
       id: vehicle.id,
       kind: vehicle.kind,
@@ -4311,6 +4599,7 @@ export class MockEngine implements EngineDriver {
       stations,
       depots,
       signals: world.signalCount > 0 ? signalsFromMap(mapSnapshotView(world)) : [],
+      structures,
       vehicles,
       subsidies,
       news,
@@ -4406,6 +4695,18 @@ export class MockEngine implements EngineDriver {
       hash.mixInt(depot.x);
       hash.mixInt(depot.y);
       hash.mixInt(depot.direction);
+    }
+    for (const structure of world.structures) {
+      hash.mixInt(structure.id);
+      hash.mixString(structure.type);
+      hash.mixInt(structure.company);
+      hash.mixString(structure.transport);
+      hash.mixString(structure.material ?? '');
+      hash.mixInt(structure.from.x);
+      hash.mixInt(structure.from.y);
+      hash.mixInt(structure.to.x);
+      hash.mixInt(structure.to.y);
+      hash.mixInt(structure.length);
     }
     for (const vehicle of world.vehicles) {
       hash.mixInt(vehicle.id);
@@ -4532,6 +4833,7 @@ export class MockEngine implements EngineDriver {
       }),
       stations: saved.stations,
       depots: saved.depots ?? [],
+      structures: saved.structures ?? [],
       vehicles: [],
       subsidies: saved.subsidies ?? [],
       news: saved.news,

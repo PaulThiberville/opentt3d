@@ -21,6 +21,8 @@
 
 #include "ai/ai_info.hpp"
 #include "articulated_vehicles.h"
+#include "bridge.h"
+#include "bridge_map.h"
 #include "cargo_type.h"
 #include "cargotype.h"
 #include "clear_map.h"
@@ -88,6 +90,8 @@
 #include "track_type.h"
 #include "tree_cmd.h"
 #include "tree_map.h"
+#include "transport_type.h"
+#include "tunnelbridge.h"
 #include "tunnelbridge_cmd.h"
 #include "tunnelbridge_map.h"
 #include "vehicle_base.h"
@@ -1050,6 +1054,7 @@ uint8_t TileKind(Tile tile)
 uint8_t TileFlags(Tile tile, uint8_t snow_line)
 {
 	uint8_t flags = 0;
+	if (IsBridgeAbove(tile)) flags |= TF_BRIDGE;
 
 	switch (GetTileType(tile)) {
 		case MP_WATER:
@@ -1145,6 +1150,20 @@ uint8_t PackSignalData(Tile tile)
 	}
 	const uint8_t semaphore = GetSignalVariant(tile, track) == SIG_SEMAPHORE ? 1 : 0;
 	return static_cast<uint8_t>(kind | (both << 3) | (aspect << 4) | (semaphore << 6));
+}
+
+/** Famille de pont exposée au protocole (#154). */
+const char *BridgeMaterialName(BridgeType type)
+{
+	switch (type) {
+		case 0: return "wood";
+		case 1: return "concrete";
+		case 2: case 9: return "steel";
+		case 3: case 4: case 5: return "suspension";
+		case 6: case 7: case 8: return "cantilever";
+		case 10: case 11: case 12: return "tubular";
+		default: return "wood";
+	}
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1830,6 +1849,51 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 	}
 	out.push_back(']');
 
+	/* --- Ponts et tunnels (#154/#155) ------------------------------------- */
+	/* `structures` évite au rendu de deviner le matériau et les tabliers.
+	 * Les milieux de pont ne sont pas des tuiles MP_TUNNELBRIDGE : on émet un
+	 * ouvrage depuis sa culée nord/ouest, et un tunnel depuis son entrée de
+	 * plus petit index. Les aqueducs (TRANSPORT_WATER) sont ignorés en v1. */
+	out += ",\"structures\":[";
+	first = true;
+	for (uint index = 0; index < Map::Size(); index++) {
+		const TileIndex tile(index);
+		if (!IsTileType(tile, MP_TUNNELBRIDGE)) continue;
+		const TransportType transport = GetTunnelBridgeTransportType(tile);
+		if (transport == TRANSPORT_WATER) continue;
+
+		if (IsBridgeTile(tile)) {
+			const TileIndex other = GetOtherBridgeEnd(tile);
+			/* Un pont a deux rampes : n'émettre que depuis la plus petite. */
+			if (tile > other) continue;
+			if (!first) out.push_back(',');
+			first = false;
+			out += fmt::format(
+				"{{\"id\":{},\"kind\":\"bridge\",\"company\":{},\"transport\":\"{}\","
+				"\"material\":\"{}\",\"from\":{{\"x\":{},\"y\":{}}},\"to\":{{\"x\":{},\"y\":{}}},"
+				"\"length\":{},\"deckHeight\":{}}}",
+				tile.base(), ProtocolOwner(GetTileOwner(tile)),
+				transport == TRANSPORT_ROAD ? "road" : "rail",
+				BridgeMaterialName(GetBridgeType(tile)),
+				TileX(tile), TileY(tile), TileX(other), TileY(other),
+				GetTunnelBridgeLength(tile, other) + 2, GetBridgeHeight(tile));
+		} else {
+			const TileIndex other = GetOtherTunnelEnd(tile);
+			if (tile > other) continue;
+			if (!first) out.push_back(',');
+			first = false;
+			out += fmt::format(
+				"{{\"id\":{},\"kind\":\"tunnel\",\"company\":{},\"transport\":\"{}\","
+				"\"from\":{{\"x\":{},\"y\":{}}},\"to\":{{\"x\":{},\"y\":{}}},"
+				"\"length\":{},\"portalHeight\":{}}}",
+				tile.base(), ProtocolOwner(GetTileOwner(tile)),
+				transport == TRANSPORT_ROAD ? "road" : "rail",
+				TileX(tile), TileY(tile), TileX(other), TileY(other),
+				GetTunnelBridgeLength(tile, other) + 2, GetTileZ(tile));
+		}
+	}
+	out.push_back(']');
+
 	/* --- Véhicules --------------------------------------------------------- */
 	out += ",\"vehicles\":[";
 	first = true;
@@ -2361,6 +2425,17 @@ static const CommandErrorText COMMAND_ERROR_TEXTS[] = {
 	{STR_ERROR_CAN_T_STOP_START_TRAIN,            "CANNOT_START_STOP",     "Démarrage ou arrêt du train refusé."},
 	{STR_ERROR_CAN_T_STOP_START_ROAD_VEHICLE,     "CANNOT_START_STOP",     "Démarrage ou arrêt du véhicule refusé."},
 	{STR_ERROR_DEPOT_WRONG_DEPOT_TYPE,            "WRONG_DEPOT_TYPE",      "Ce dépôt n'accepte pas ce type de véhicule."},
+	{STR_ERROR_BRIDGE_TOO_LONG,                   "BRIDGE_TOO_LONG",       "Portée du pont trop longue pour ce matériau ou ce réglage."},
+	{STR_ERROR_BRIDGE_THROUGH_MAP_BORDER,         "BRIDGE_THROUGH_MAP_BORDER", "Un pont ne peut pas traverser le bord de la carte."},
+	{STR_ERROR_BRIDGEHEADS_NOT_SAME_HEIGHT,       "BRIDGEHEADS_NOT_SAME_HEIGHT", "Les deux culées du pont doivent être à la même hauteur."},
+	{STR_ERROR_BRIDGE_TOO_LOW_FOR_TERRAIN,        "BRIDGE_TOO_LOW_FOR_TERRAIN", "Le tablier est trop bas pour le relief traversé."},
+	{STR_ERROR_BRIDGE_TOO_HIGH_FOR_TERRAIN,       "BRIDGE_TOO_HIGH_FOR_TERRAIN", "Le tablier est trop haut au-dessus du relief."},
+	{STR_ERROR_MUST_DEMOLISH_BRIDGE_FIRST,        "MUST_DEMOLISH_BRIDGE_FIRST", "Un pont existant doit être démoli avant cette construction."},
+	{STR_ERROR_TUNNEL_TOO_LONG,                   "TUNNEL_TOO_LONG",       "Tunnel trop long pour ce réglage de partie."},
+	{STR_ERROR_TUNNEL_THROUGH_MAP_BORDER,         "TUNNEL_THROUGH_MAP_BORDER", "Un tunnel ne peut pas traverser le bord de la carte."},
+	{STR_ERROR_ANOTHER_TUNNEL_IN_THE_WAY,         "ANOTHER_TUNNEL_IN_THE_WAY", "Un autre tunnel croise ce tracé."},
+	{STR_ERROR_SITE_UNSUITABLE_FOR_TUNNEL,        "SITE_UNSUITABLE_FOR_TUNNEL", "Emplacement inadapté : un portail doit être sur une pente régulière."},
+	{STR_ERROR_START_AND_END_MUST_BE_IN,          "INVALID_PARAMETER",     "Les deux extrémités doivent être alignées sur X ou Y."},
 };
 
 /** Message OpenTTD (anglais) d'un échec, pour le diagnostic. */
@@ -2380,6 +2455,7 @@ struct CommandReply {
 	std::string message;
 	std::string detail;
 	Money cost = 0;
+	Money maintenance = 0;
 	int tiles = 0;
 	int orders = 0;
 	VehicleID vehicle = VehicleID::Invalid();
@@ -2401,6 +2477,9 @@ void AppendReplyJson(std::string &out, const CommandReply &reply)
 		AppendJsonString(out, reply.detail);
 	}
 	if (reply.ok) out += fmt::format(",\"cost\":{}", reply.cost);
+	if (reply.ok && reply.maintenance > 0) {
+		out += fmt::format(",\"maintenance\":{}", reply.maintenance);
+	}
 	if (reply.tiles > 0) out += fmt::format(",\"tiles\":{}", reply.tiles);
 	if (reply.orders > 0) out += fmt::format(",\"orders\":{}", reply.orders);
 	if (reply.vehicle != VehicleID::Invalid()) {
@@ -3308,6 +3387,232 @@ bool BuildConvertRail(CompanyID company, const JsonValue &root, CommandReply &re
 	return Succeed(reply, fmt::format("{} tuile(s) convertie(s) en {}.", tiles.size(), RailTypeName(rail_type)));
 }
 
+/** Familles de ponts exposées par l'UI, alignées sur le protocole #154. */
+std::vector<BridgeType> BridgeMaterialCandidates(const std::string &material)
+{
+	if (material.empty()) {
+		std::vector<BridgeType> all;
+		for (BridgeType type = 0; type < MAX_BRIDGES; type++) all.push_back(type);
+		return all;
+	}
+	if (material == "wood" || material == "bois") return {0};
+	if (material == "concrete" || material == "beton" || material == "béton") return {1};
+	if (material == "steel" || material == "acier" || material == "girder") return {2, 9};
+	if (material == "suspension" || material == "suspendu") return {4, 5, 3};
+	if (material == "cantilever") return {6, 8, 7};
+	if (material == "tubular" || material == "tubulaire") return {10, 11, 12};
+	return {};
+}
+
+/**
+ * Choisit la spec de pont demandée, en respectant l'année et la portée comme
+ * `CheckBridgeAvailability`. `options.bridge` (index brut) est prioritaire.
+ */
+std::optional<BridgeType> SelectBridgeType(const JsonValue *options, uint bridge_len)
+{
+	const int raw_index = OptionInt(options, "bridge", -1);
+	if (raw_index >= 0) {
+		if (static_cast<uint>(raw_index) >= MAX_BRIDGES) return std::nullopt;
+		const BridgeType type = static_cast<BridgeType>(raw_index);
+		if (CheckBridgeAvailability(type, bridge_len).Failed()) return std::nullopt;
+		return type;
+	}
+	const std::string material = LowerAscii(OptionString(options, "material", ""));
+	const std::vector<BridgeType> candidates = BridgeMaterialCandidates(material);
+	if (candidates.empty()) return std::nullopt;
+	for (const BridgeType type : candidates) {
+		if (CheckBridgeAvailability(type, bridge_len).Succeeded()) return type;
+	}
+	return std::nullopt;
+}
+
+bool BuildBridge(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	if (!has_to) {
+		return FailWith(reply, "INVALID_PARAMETER", "Un pont exige deux culées (« from » et « to »).");
+	}
+	const JsonValue *options = root.Find("options");
+	const std::string kind = LowerAscii(OptionString(options, "kind", OptionString(options, "transport", "rail")));
+	const bool rail = kind == "rail" || kind == "train" || kind == "ferroviaire";
+	const bool road = kind == "road" || kind == "route" || kind == "routier" ||
+			kind == "bus" || kind == "truck" || kind == "camion";
+	if (!rail && !road) {
+		return FailWith(reply, "INVALID_PARAMETER", "« options.kind » doit valoir rail ou road.");
+	}
+
+	uint8_t road_rail_type = 0;
+	RailType rail_type = INVALID_RAILTYPE;
+	RoadType road_type = INVALID_ROADTYPE;
+	if (rail) {
+		rail_type = SelectRailType(company);
+		const int requested = OptionInt(options, "rail_type", -1);
+		if (requested >= 0) {
+			if (static_cast<uint>(requested) >= RAILTYPE_END || !HasRailTypeAvail(company, static_cast<RailType>(requested))) {
+				return FailWith(reply, "NO_RAIL_TYPE", "Type de rail demandé indisponible pour cette entreprise.");
+			}
+			rail_type = static_cast<RailType>(requested);
+		}
+		if (rail_type == INVALID_RAILTYPE) {
+			return FailWith(reply, "NO_RAIL_TYPE", "Aucun type de voie disponible pour cette entreprise.");
+		}
+		road_rail_type = static_cast<uint8_t>(rail_type);
+	} else {
+		road_type = SelectRoadType(company);
+		const int requested = OptionInt(options, "road_type", -1);
+		if (requested >= 0) {
+			if (static_cast<uint>(requested) >= ROADTYPE_END || !HasRoadTypeAvail(company, static_cast<RoadType>(requested))) {
+				return FailWith(reply, "NO_ROAD_TYPE", "Type de route demandé indisponible pour cette entreprise.");
+			}
+			road_type = static_cast<RoadType>(requested);
+		}
+		if (road_type == INVALID_ROADTYPE) {
+			return FailWith(reply, "NO_ROAD_TYPE", "Aucun type de route disponible pour cette entreprise.");
+		}
+		road_rail_type = static_cast<uint8_t>(road_type);
+	}
+
+	const TileIndex start = TileXY(from_x, from_y);
+	const TileIndex end = TileXY(to_x, to_y);
+	if (start == end) {
+		return FailWith(reply, "INVALID_PARAMETER", "Un pont relie deux tuiles distinctes.");
+	}
+	if (from_x != to_x && from_y != to_y) {
+		return FailWith(reply, "INVALID_PARAMETER", "Un pont doit être aligné sur X ou Y.");
+	}
+
+	const uint bridge_len = GetTunnelBridgeLength(start, end);
+	const std::string material = LowerAscii(OptionString(options, "material", ""));
+	if (!material.empty() && OptionInt(options, "bridge", -1) < 0 &&
+			BridgeMaterialCandidates(material).empty()) {
+		return FailWith(reply, "INVALID_PARAMETER",
+				"« options.material » inconnu (wood, concrete, steel, suspension, cantilever, tubular).");
+	}
+	const std::optional<BridgeType> bridge_type = SelectBridgeType(options, bridge_len);
+	if (!bridge_type) {
+		return FailWith(reply, "BRIDGE_TOO_LONG",
+				fmt::format("Aucun pont disponible pour une portée de {} tuiles à cette date.", bridge_len));
+	}
+
+	const TransportType transport = rail ? TRANSPORT_RAIL : TRANSPORT_ROAD;
+	const CommandCost test = RunCompanyCommand<CMD_BUILD_BRIDGE>(
+			company, end, true, end, start, transport, *bridge_type, road_rail_type);
+	if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Construction de pont refusée.");
+	const CommandCost result = RunCompanyCommand<CMD_BUILD_BRIDGE>(
+			company, end, false, end, start, transport, *bridge_type, road_rail_type);
+	if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction de pont refusée.");
+
+	const uint32_t track_bits = (bridge_len + 2);
+	reply.cost = result.GetCost();
+	reply.tiles = static_cast<int>(bridge_len + 2);
+	reply.maintenance = rail
+			? RailMaintenanceCost(rail_type, track_bits, track_bits)
+			: RoadMaintenanceCost(road_type, track_bits * 2, track_bits * 2);
+	return Succeed(reply, fmt::format("Pont construit sur {} tuiles.", bridge_len + 2));
+}
+
+bool BuildTunnel(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	int from_x, from_y, to_x, to_y;
+	bool has_to = false;
+	if (!ReadFromTo(root, from_x, from_y, to_x, to_y, has_to)) {
+		return FailWith(reply, "INVALID_PARAMETER", "Coordonnées « from »/« to » invalides ou hors carte.");
+	}
+	if (!has_to) {
+		return FailWith(reply, "INVALID_PARAMETER", "Un tunnel exige deux portails (« from » et « to »).");
+	}
+	const JsonValue *options = root.Find("options");
+	const std::string kind = LowerAscii(OptionString(options, "kind", OptionString(options, "transport", "rail")));
+	const bool rail = kind == "rail" || kind == "train" || kind == "ferroviaire";
+	const bool road = kind == "road" || kind == "route" || kind == "routier" ||
+			kind == "bus" || kind == "truck" || kind == "camion";
+	if (!rail && !road) {
+		return FailWith(reply, "INVALID_PARAMETER", "« options.kind » doit valoir rail ou road.");
+	}
+
+	RailType rail_type = INVALID_RAILTYPE;
+	RoadType road_type = INVALID_ROADTYPE;
+	uint8_t road_rail_type = 0;
+	if (rail) {
+		rail_type = SelectRailType(company);
+		const int requested = OptionInt(options, "rail_type", -1);
+		if (requested >= 0) {
+			if (static_cast<uint>(requested) >= RAILTYPE_END || !HasRailTypeAvail(company, static_cast<RailType>(requested))) {
+				return FailWith(reply, "NO_RAIL_TYPE", "Type de rail demandé indisponible pour cette entreprise.");
+			}
+			rail_type = static_cast<RailType>(requested);
+		}
+		if (rail_type == INVALID_RAILTYPE) {
+			return FailWith(reply, "NO_RAIL_TYPE", "Aucun type de voie disponible pour cette entreprise.");
+		}
+		road_rail_type = static_cast<uint8_t>(rail_type);
+	} else {
+		road_type = SelectRoadType(company);
+		const int requested = OptionInt(options, "road_type", -1);
+		if (requested >= 0) {
+			if (static_cast<uint>(requested) >= ROADTYPE_END || !HasRoadTypeAvail(company, static_cast<RoadType>(requested))) {
+				return FailWith(reply, "NO_ROAD_TYPE", "Type de route demandé indisponible pour cette entreprise.");
+			}
+			road_type = static_cast<RoadType>(requested);
+		}
+		if (road_type == INVALID_ROADTYPE) {
+			return FailWith(reply, "NO_ROAD_TYPE", "Aucun type de route disponible pour cette entreprise.");
+		}
+		road_rail_type = static_cast<uint8_t>(road_type);
+	}
+
+	if (from_x != to_x && from_y != to_y) {
+		return FailWith(reply, "INVALID_PARAMETER", "Un tunnel doit être aligné sur X ou Y.");
+	}
+	const TileIndex from_tile = TileXY(from_x, from_y);
+	const TileIndex to_tile = TileXY(to_x, to_y);
+	if (from_tile == to_tile) {
+		return FailWith(reply, "INVALID_PARAMETER", "Un tunnel relie deux tuiles distinctes.");
+	}
+
+	const TransportType transport = rail ? TRANSPORT_RAIL : TRANSPORT_ROAD;
+	/* OpenTTD déduit le sens du tunnel depuis la pente du portail de départ.
+	 * On essaie donc les deux extrémités et on ne retient que celle qui
+	 * ressort exactement sur l'autre tuile demandée. */
+	std::optional<CommandCost> failure;
+	TileIndex start_tile = INVALID_TILE;
+	for (const TileIndex candidate : {from_tile, to_tile}) {
+		const TileIndex expected = candidate == from_tile ? to_tile : from_tile;
+		const CommandCost estimate = RunCompanyCommand<CMD_BUILD_TUNNEL>(
+				company, candidate, true, candidate, transport, road_rail_type);
+		if (estimate.Failed()) {
+			if (!failure.has_value()) failure = estimate;
+			continue;
+		}
+		if (_build_tunnel_endtile != expected) continue;
+		start_tile = candidate;
+		break;
+	}
+	if (start_tile == INVALID_TILE) {
+		if (failure.has_value()) {
+			return FailFromCommand(reply, *failure, "COMMAND_FAILED", "Construction de tunnel refusée.");
+		}
+		return FailWith(reply, "SITE_UNSUITABLE_FOR_TUNNEL",
+				"Les deux portails doivent être sur des pentes opposées, à la même hauteur.");
+	}
+
+	const CommandCost result = RunCompanyCommand<CMD_BUILD_TUNNEL>(
+			company, start_tile, false, start_tile, transport, road_rail_type);
+	if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Construction de tunnel refusée.");
+	const TileIndex end_tile = _build_tunnel_endtile;
+	const uint tunnel_len = GetTunnelBridgeLength(start_tile, end_tile) + 2;
+	reply.cost = result.GetCost();
+	reply.tiles = static_cast<int>(tunnel_len);
+	reply.maintenance = rail
+			? RailMaintenanceCost(rail_type, tunnel_len, tunnel_len)
+			: RoadMaintenanceCost(road_type, tunnel_len * 2, tunnel_len * 2);
+	return Succeed(reply, fmt::format("Tunnel construit sur {} tuiles.", tunnel_len));
+}
+
 bool BuildClear(CompanyID company, const JsonValue &root, CommandReply &reply)
 {
 	int from_x, from_y, to_x, to_y;
@@ -3641,10 +3946,8 @@ bool DispatchBuild(CompanyID company, const JsonValue &root, CommandReply &reply
 	if (tool == "lock" || tool == "ecluse" || tool == "écluse") return BuildLock(company, root, reply);
 	if (tool == "aqueduct" || tool == "aqueduc" || tool == "aqueducs") return BuildAqueduct(company, root, reply);
 	if (tool == "crossing" || tool == "level_crossing" || tool == "passage_a_niveau") return BuildCrossing(company, root, reply);
-	if (tool == "bridge" || tool == "tunnel" || tool == "pont") {
-		return FailWith(reply, "NOT_SUPPORTED",
-				"Les ponts et tunnels ne sont pas supportés par le pont pour l'instant (#11).");
-	}
+	if (tool == "bridge" || tool == "pont" || tool == "ponts") return BuildBridge(company, root, reply);
+	if (tool == "tunnel" || tool == "tunnels") return BuildTunnel(company, root, reply);
 	return FailWith(reply, "UNKNOWN_TOOL", fmt::format("Outil de construction inconnu « {} ».", tool));
 }
 

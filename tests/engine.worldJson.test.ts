@@ -251,6 +251,61 @@ describe('mapping JSON → WorldSnapshot', () => {
     });
   });
 
+  it('mappe les ponts et tunnels optionnels et ignore les types inconnus', () => {
+    const world = parseWorldJson(
+      engineJson({
+        structures: [
+          {
+            id: 4,
+            kind: 'bridge',
+            company: 1,
+            transport: 'rail',
+            material: 'suspension',
+            from: { x: 3, y: 8 },
+            to: { x: 14, y: 8 },
+            length: 12,
+            deckHeight: 9,
+          },
+          {
+            id: 5,
+            kind: 'tunnel',
+            company: 0,
+            transport: 'road',
+            from: { x: 20, y: 3 },
+            to: { x: 28, y: 3 },
+            length: 9,
+            portalHeight: 4,
+          },
+          { id: 6, kind: 'aqueduct' },
+        ],
+      }),
+    );
+    expect(world.structures).toEqual([
+      {
+        id: 4,
+        kind: 'bridge',
+        company: 1,
+        transport: 'rail',
+        material: 'suspension',
+        from: { x: 3, y: 8 },
+        to: { x: 14, y: 8 },
+        length: 12,
+        deckHeight: 9,
+      },
+      {
+        id: 5,
+        kind: 'tunnel',
+        company: 0,
+        transport: 'road',
+        from: { x: 20, y: 3 },
+        to: { x: 28, y: 3 },
+        length: 9,
+        portalHeight: 4,
+      },
+    ]);
+    expect(parseWorldJson(engineJson()).structures).toEqual([]);
+  });
+
   it('ignore les véhicules sans type de rendu et les événements inconnus', () => {
     const world = parseWorldJson(
       engineJson({
