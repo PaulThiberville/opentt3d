@@ -13,7 +13,22 @@ import type { VehiclePickTarget } from './VehicleLayer';
 
 export type PickResult =
   | { kind: 'vehicle'; id: number; point: THREE.Vector3; distance: number }
-  | { kind: 'building'; townId: number; point: THREE.Vector3; distance: number }
+  | {
+      kind: 'building';
+      townId: number;
+      x: number;
+      y: number;
+      point: THREE.Vector3;
+      distance: number;
+    }
+  | {
+      kind: 'station';
+      stationId: number;
+      x: number;
+      y: number;
+      point: THREE.Vector3;
+      distance: number;
+    }
   | { kind: 'tile'; x: number; y: number; point: THREE.Vector3; distance: number };
 
 export interface PickSources {
@@ -100,9 +115,26 @@ export class Picking {
       const first = hits[0];
       if (first && first.instanceId !== undefined) {
         const target = buildingTargets.find((candidate) => candidate.mesh === first.object);
-        const townId = target?.townForInstance(first.instanceId) ?? null;
-        if (townId !== null) {
-          return { kind: 'building', townId, point: first.point.clone(), distance: first.distance };
+        const info = target?.infoForInstance(first.instanceId) ?? null;
+        if (info?.kind === 'building') {
+          return {
+            kind: 'building',
+            townId: info.townId,
+            x: info.x,
+            y: info.y,
+            point: first.point.clone(),
+            distance: first.distance,
+          };
+        }
+        if (info?.kind === 'station') {
+          return {
+            kind: 'station',
+            stationId: info.stationId,
+            x: info.x,
+            y: info.y,
+            point: first.point.clone(),
+            distance: first.distance,
+          };
         }
       }
     }
@@ -152,8 +184,8 @@ export class Picking {
     }
     this.vehicleRing.visible = false;
     this.tileOutline.visible = true;
-    const tileX = result.kind === 'tile' ? result.x : Math.floor(result.point.x);
-    const tileY = result.kind === 'tile' ? result.y : Math.floor(result.point.z);
+    const tileX = result.x;
+    const tileY = result.y;
     const ground = this.heightAt(tileX + 0.5, tileY + 0.5);
     const outset = 0.06;
     const x0 = tileX + outset;

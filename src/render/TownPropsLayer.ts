@@ -527,20 +527,24 @@ function makePlacement(
   rng: Prng,
   scaleBase: number,
 ): PropPlacement {
-  // Un prop de rue se cale vers la chaussée ; les autres restent au centre de
-  // la tuile avec un léger jitter déterministe.
-  const offset = kind === 'lamp' || kind === 'sign' || kind === 'busStop' ? 0.3 : 0;
-  const jitterX = kind === 'plaza' ? 0 : (rng.float(0, 1) - 0.5) * 0.2;
-  const jitterZ = kind === 'plaza' ? 0 : (rng.float(0, 1) - 0.5) * 0.2;
-  const x = tile.x + 0.5 + jitterX + tile.roadX * offset;
-  const z = tile.y + 0.5 + jitterZ + tile.roadY * offset;
-  const ground = groundForTile(map, tile, x, z);
-  const tint = propPalette(town, tile, rng);
+  // Un lampadaire ou un panneau se cale vers la chaussée ; l'arrêt de bus est
+  // un petit édicule et reste centré sur sa tuile. Les autres props reçoivent
+  // un léger jitter déterministe, toujours ramené dans l'empreinte.
+  const streetFurniture = kind === 'lamp' || kind === 'sign';
+  const fixedOnTile = kind === 'plaza' || kind === 'busStop';
+  const offset = streetFurniture ? 0.3 : 0;
+  const jitterX = fixedOnTile ? 0 : (rng.float(0, 1) - 0.5) * 0.2;
+  const jitterZ = fixedOnTile ? 0 : (rng.float(0, 1) - 0.5) * 0.2;
   // Les lampadaires et panneaux regardent la route.
-  const yaw =
-    kind === 'lamp' || kind === 'sign' || kind === 'busStop'
-      ? Math.atan2(tile.roadX, tile.roadY) + Math.PI / 2
-      : rng.int(0, 3) * (Math.PI / 2) + (kind === 'plaza' ? 0 : rng.float(-0.12, 0.12));
+  const yaw = streetFurniture
+    ? Math.atan2(tile.roadX, tile.roadY) + Math.PI / 2
+    : rng.int(0, 3) * (Math.PI / 2) + (kind === 'plaza' ? 0 : rng.float(-0.12, 0.12));
+  const tint = propPalette(town, tile, rng);
+  const scale = (kind === 'plaza' ? 1 : rng.float(0.9, 1.08)) * scaleBase;
+  const extent = rotatedPropExtent(kind, yaw, scale);
+  const x = clampToTile(tile.x + 0.5 + jitterX + tile.roadX * offset, tile.x, extent.x);
+  const z = clampToTile(tile.y + 0.5 + jitterZ + tile.roadY * offset, tile.y, extent.z);
+  const ground = groundForTile(map, tile, x, z);
   return {
     townId: town.id,
     kind,
@@ -548,11 +552,56 @@ function makePlacement(
     z,
     ground,
     yaw,
-    scale: (kind === 'plaza' ? 1 : rng.float(0.9, 1.08)) * scaleBase,
+    scale,
     tintR: tint[0],
     tintG: tint[1],
     tintB: tint[2],
   };
+}
+
+const PROP_EXTENT_CACHE = new Map<TownPropKind, { x: number; z: number }>();
+
+/**
+ * Demi-empreinte locale d'un prop (au détail maximal, donc majorante), pour
+ * garantir qu'aucun meuble ne déborde de sa tuile après rotation.
+ */
+function propHalfExtent(kind: TownPropKind): { x: number; z: number } {
+  const cached = PROP_EXTENT_CACHE.get(kind);
+  if (cached) return cached;
+  const geometry = createTownPropGeometry(kind, 2);
+  geometry.computeBoundingBox();
+  const box = geometry.boundingBox;
+  const extent = {
+    x: Math.max(Math.abs(box?.min.x ?? 0), Math.abs(box?.max.x ?? 0)),
+    z: Math.max(Math.abs(box?.min.z ?? 0), Math.abs(box?.max.z ?? 0)),
+  };
+  geometry.dispose();
+  PROP_EXTENT_CACHE.set(kind, extent);
+  return extent;
+}
+
+/** Empreinte d'un prop tourné, projetée sur les axes de la tuile. */
+function rotatedPropExtent(
+  kind: TownPropKind,
+  yaw: number,
+  scale: number,
+): { x: number; z: number } {
+  const half = propHalfExtent(kind);
+  const cos = Math.abs(Math.cos(yaw));
+  const sin = Math.abs(Math.sin(yaw));
+  return {
+    x: (half.x * cos + half.z * sin) * scale,
+    z: (half.x * sin + half.z * cos) * scale,
+  };
+}
+
+/** Garde le centre d'un prop à distance de l'arête de sa tuile. */
+function clampToTile(value: number, tile: number, halfExtent: number): number {
+  const margin = 0.005;
+  const low = tile + halfExtent + margin;
+  const high = tile + 1 - halfExtent - margin;
+  if (low > high) return tile + 0.5;
+  return Math.max(low, Math.min(high, value));
 }
 
 /**

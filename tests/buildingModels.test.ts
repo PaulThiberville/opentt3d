@@ -44,6 +44,25 @@ describe('modèles de bâtiments', () => {
     }
   });
 
+  it('centre la boîte englobante de chaque modèle sur sa tuile', () => {
+    const models: [string, THREE.BufferGeometry][] = [];
+    for (const archetype of BUILDING_ARCHETYPES) {
+      models.push([archetype, createBuildingGeometry(archetype, 0, 2)]);
+    }
+    models.push(['hall', createStationHallGeometry(2)]);
+    models.push(['platform', createStationPlatformGeometry(2)]);
+    models.push(['distant', createDistantBuildingGeometry()]);
+    for (const [label, geometry] of models) {
+      const box = bounds(geometry);
+      expect((box.min.x + box.max.x) / 2, label).toBeCloseTo(0, 6);
+      expect((box.min.z + box.max.z) / 2, label).toBeCloseTo(0, 6);
+      expect(box.min.y, label).toBeGreaterThanOrEqual(-1e-6);
+      expect(box.max.x - box.min.x, label).toBeLessThanOrEqual(1);
+      expect(box.max.z - box.min.z, label).toBeLessThanOrEqual(1);
+      geometry.dispose();
+    }
+  });
+
   it('reste sous 2 000 triangles par archétype, détails compris', () => {
     for (const archetype of BUILDING_ARCHETYPES) {
       for (let variant = 0; variant < BUILDING_VARIANTS; variant += 1) {

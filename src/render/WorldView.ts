@@ -378,8 +378,10 @@ export class WorldView {
       ? result.kind === 'vehicle'
         ? `v${result.id}`
         : result.kind === 'building'
-          ? `b${result.townId}`
-          : `t${result.x},${result.y}`
+          ? `b${result.townId}:${result.x},${result.y}`
+          : result.kind === 'station'
+            ? `s${result.stationId}:${result.x},${result.y}`
+            : `t${result.x},${result.y}`
       : null;
     if (key !== this.lastHoverKey) {
       this.lastHoverKey = key;
@@ -394,10 +396,12 @@ export class WorldView {
       return {
         kind: 'building',
         townId: result.townId,
-        x: Math.floor(result.point.x),
-        y: Math.floor(result.point.z),
+        x: result.x,
+        y: result.y,
       };
     }
+    // Une gare est résolue par sa tuile : `gameSession` retrouve l'id de la
+    // gare depuis le snapshot, comme pour un clic sur le terrain.
     return { kind: 'tile', x: result.x, y: result.y };
   }
 

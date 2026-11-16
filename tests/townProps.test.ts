@@ -105,6 +105,38 @@ describe('TownPropsLayer : semis déterministe', () => {
     expect(placements.some((placement) => placement.kind === 'lamp')).toBe(true);
   });
 
+  it('garde chaque prop dans sa tuile et centre les arrêts de bus', () => {
+    const { map, town } = makeTownMap();
+    const placements = generateTownProps(town, map, 80);
+    expect(placements.length).toBeGreaterThan(8);
+    for (const placement of placements) {
+      const tileX = Math.floor(placement.x);
+      const tileY = Math.floor(placement.z);
+      const kind = map.kind[tileY * map.width + tileX] ?? 0;
+      // Les lampadaires de voirie se posent au coin d'une tuile route : leur
+      // pied reste sur la tuile, la tête peut surplomber la chaussée.
+      if (isRoadKind(kind)) continue;
+      const geometry = createTownPropGeometry(placement.kind, 2);
+      geometry.computeBoundingBox();
+      const box = geometry.boundingBox ?? new THREE.Box3();
+      const halfX = Math.max(Math.abs(box.min.x), Math.abs(box.max.x));
+      const halfZ = Math.max(Math.abs(box.min.z), Math.abs(box.max.z));
+      const cos = Math.abs(Math.cos(placement.yaw));
+      const sin = Math.abs(Math.sin(placement.yaw));
+      const extentX = (halfX * cos + halfZ * sin) * placement.scale;
+      const extentZ = (halfX * sin + halfZ * cos) * placement.scale;
+      expect(placement.x - extentX).toBeGreaterThanOrEqual(tileX - 1e-6);
+      expect(placement.x + extentX).toBeLessThanOrEqual(tileX + 1 + 1e-6);
+      expect(placement.z - extentZ).toBeGreaterThanOrEqual(tileY - 1e-6);
+      expect(placement.z + extentZ).toBeLessThanOrEqual(tileY + 1 + 1e-6);
+      if (placement.kind === 'busStop') {
+        expect(placement.x).toBeCloseTo(tileX + 0.5, 6);
+        expect(placement.z).toBeCloseTo(tileY + 0.5, 6);
+      }
+      geometry.dispose();
+    }
+  });
+
   it('est déterministe et respecte la limite demandée', () => {
     const { map, town } = makeTownMap();
     const first = generateTownProps(town, map, 24);
