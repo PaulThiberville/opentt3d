@@ -59,6 +59,17 @@ describe('VehicleLayer : uploads conditionnels', () => {
     layer.dispose();
   });
 
+  it('détecte un changement de famille même à modèle visuel identique', () => {
+    const layer = new VehicleLayer();
+    const vehicles = [vehicle()];
+    layer.update(vehicles);
+    const matrices = layer.matrixUploads;
+    vehicles[0]!.kind = 'train';
+    layer.update(vehicles);
+    expect(layer.matrixUploads).toBeGreaterThan(matrices);
+    layer.dispose();
+  });
+
   it('libère tous les meshes au dispose', () => {
     const layer = new VehicleLayer();
     layer.update([vehicle(), vehicle({ id: 2, model: 'train' })]);
