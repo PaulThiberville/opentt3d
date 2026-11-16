@@ -30,6 +30,7 @@ import {
   type SaveRecord,
   type SaveSlot,
 } from './saveFormat';
+import { t } from './i18n';
 
 export type SaveStoreErrorCode = 'quota' | 'too-large' | 'invalid' | 'storage' | 'not-found';
 
@@ -108,7 +109,7 @@ export class SaveStore {
       try {
         await this.backend.delete(id);
       } catch (error) {
-        throw toStoreError(error, 'supprimer la sauvegarde');
+        throw toStoreError(error, t('save.error.delete'));
       }
     });
   }
@@ -142,7 +143,7 @@ export class SaveStore {
     try {
       inspection = inspectSaveBytes(bytes);
     } catch (error) {
-      throw toStoreError(error, 'importer la sauvegarde');
+      throw toStoreError(error, t('save.error.import'));
     }
     const fallback = fileStem(fileName) || 'Sauvegarde importée';
     const name = sanitizeSaveName(inspection.name ?? fallback, fallback);
@@ -180,28 +181,28 @@ export class SaveStore {
   ): Promise<SaveSlot> {
     const bytes = input.bytes;
     if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
-      throw new SaveStoreError('invalid', 'Sauvegarde vide : rien à enregistrer.');
+      throw new SaveStoreError('invalid', t('save.error.storeEmpty'));
     }
     if (bytes.length > this.maxBytes) {
       throw new SaveStoreError(
         'too-large',
-        `Sauvegarde trop volumineuse (maximum ${Math.round(this.maxBytes / (1024 * 1024))} Mio).`,
+        t('save.error.storeTooLarge', {
+          max: Math.round(this.maxBytes / (1024 * 1024)),
+        }),
       );
     }
     const detected = detectSaveFormat(bytes);
     if (!detected) {
-      throw new SaveStoreError(
-        'invalid',
-        'Contenu de sauvegarde non reconnu : conteneur OpenTT3D ou JSON mock attendu.',
-      );
+      throw new SaveStoreError('invalid', t('save.error.storeUnknown'));
     }
     const expectedFormat: SaveFormat = input.engine === 'wasm' ? 'ot3s' : 'mock-json';
     if (detected !== expectedFormat) {
       throw new SaveStoreError(
         'invalid',
-        `Sauvegarde ${detected === 'ot3s' ? 'WASM' : 'mock'} incompatible avec le moteur ${
-          input.engine === 'wasm' ? 'WASM' : 'mock'
-        }.`,
+        t('save.error.storeIncompatible', {
+          detected: detected === 'ot3s' ? 'WASM' : 'mock',
+          engine: input.engine === 'wasm' ? 'WASM' : 'mock',
+        }),
       );
     }
 
@@ -237,7 +238,7 @@ export class SaveStore {
     try {
       await this.backend.put({ ...slot, bytes });
     } catch (error) {
-      throw toStoreError(error, 'enregistrer la sauvegarde');
+      throw toStoreError(error, t('save.error.save'));
     }
     return slot;
   }
@@ -246,10 +247,7 @@ export class SaveStore {
     const estimate = await this.estimate();
     if (!estimate || estimate.quota <= 0) return;
     if (estimate.usage + size > estimate.quota) {
-      throw new SaveStoreError(
-        'quota',
-        'Espace de stockage insuffisant : supprimez des sauvegardes puis réessayez.',
-      );
+      throw new SaveStoreError('quota', t('save.error.quota'));
     }
   }
 
@@ -404,7 +402,7 @@ export class IndexedDbSaveBackend implements SaveStorageBackend {
         }
       };
       request.onsuccess = () => resolve(new IndexedDbSaveBackend(request.result));
-      request.onerror = () => reject(request.error ?? new Error('Ouverture d’IndexedDB refusée.'));
+      request.onerror = () => reject(request.error ?? new Error(t('save.error.idbOpen')));
       request.onblocked = () =>
         reject(new Error('IndexedDB est bloqué par un autre onglet de OpenTT3D.'));
     });
@@ -463,15 +461,15 @@ export class IndexedDbSaveBackend implements SaveStorageBackend {
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error('Requête IndexedDB refusée.'));
+    request.onerror = () => reject(request.error ?? new Error(t('save.error.idbRequest')));
   });
 }
 
 function transactionDone(tx: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error('Transaction IndexedDB refusée.'));
-    tx.onabort = () => reject(tx.error ?? new Error('Transaction IndexedDB annulée.'));
+    tx.onerror = () => reject(tx.error ?? new Error(t('save.error.idbTransaction')));
+    tx.onabort = () => reject(tx.error ?? new Error(t('save.error.idbAbort')));
   });
 }
 
@@ -585,11 +583,7 @@ export function isQuotaError(error: unknown): boolean {
 function toStoreError(error: unknown, action: string): SaveStoreError {
   if (error instanceof SaveStoreError) return error;
   if (isQuotaError(error)) {
-    return new SaveStoreError(
-      'quota',
-      'Espace de stockage insuffisant : supprimez des sauvegardes puis réessayez.',
-      { cause: error },
-    );
+    return new SaveStoreError('quota', t('save.error.quota'), { cause: error });
   }
   if (
     typeof error === 'object' &&
@@ -615,13 +609,15 @@ function toStoreError(error: unknown, action: string): SaveStoreError {
     }
   }
   const detail = error instanceof Error ? error.message : String(error);
-  return new SaveStoreError('storage', `Impossible de ${action} : ${detail}`, { cause: error });
+  return new SaveStoreError('storage', t('save.error.action', { action, detail }), {
+    cause: error,
+  });
 }
 
 /** Message prêt pour l'UI, quel que soit le type d'erreur. */
 export function describeSaveError(error: unknown): string {
   if (error instanceof SaveStoreError || error instanceof Error) return error.message;
-  return `Erreur de sauvegarde inattendue : ${String(error)}`;
+  return t('save.error.unexpected', { detail: String(error) });
 }
 
 /* ------------------------------------------------------------------------- */
@@ -654,9 +650,9 @@ export async function readSaveFile(file: File): Promise<Uint8Array> {
   if (file.size > MAX_SAVE_BYTES) {
     throw new SaveStoreError(
       'too-large',
-      `Fichier trop volumineux (maximum ${Math.round(MAX_SAVE_BYTES / (1024 * 1024))} Mio).`,
+      t('save.error.fileTooLarge', { max: Math.round(MAX_SAVE_BYTES / (1024 * 1024)) }),
     );
   }
-  if (file.size === 0) throw new SaveStoreError('invalid', 'Fichier vide.');
+  if (file.size === 0) throw new SaveStoreError('invalid', t('save.error.fileEmpty'));
   return new Uint8Array(await file.arrayBuffer());
 }

@@ -5150,6 +5150,16 @@ select.input {
   padding: 4px 2px;
 }
 
+.slot-add .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.slot-add .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
 .lobby-self {
   padding: 12px;
   border: 1px solid var(--hud-border);
@@ -5957,5 +5967,224 @@ body.photo-mode #scene {
   .hud-bankruptcy {
     top: 72px;
     max-width: calc(100vw - 24px);
+  }
+}
+
+/* ==========================================================================
+   Mobile et tactile (#170) — HUD compact, panneaux plein écran, cibles 44 px
+   ========================================================================== */
+
+/* Les écrans de menu et les dialogues occupent la surface utile sur mobile :
+   pas de marge perdue, défilement vertical natif et encoches respectées. */
+@media (max-width: 720px) {
+  .screen.panel-screen,
+  .screen.loading-screen,
+  .screen.join-screen,
+  .screen.pause-screen,
+  .screen.game-over-screen,
+  .screen.about-screen {
+    align-items: stretch;
+    padding: max(10px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right))
+      max(10px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+    overscroll-behavior: contain;
+  }
+
+  .panel-screen > .panel,
+  .loading-screen > .loading-card,
+  .join-screen > .panel,
+  .pause-screen > .panel,
+  .game-over-screen > .panel,
+  .about-screen > .panel {
+    width: 100%;
+    max-width: none;
+    min-height: 100%;
+    margin: 0;
+    border-radius: 14px;
+  }
+
+  .screen {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+  }
+
+  /* Barre d'outils : une seule rangée défilable horizontalement, sans
+     rogner le premier ni le dernier outil. Le wrap reste actif en paysage
+     très étroit via `flex-wrap` sur grand écran. */
+  .hud-toolbar {
+    left: max(6px, env(safe-area-inset-left));
+    right: max(6px, env(safe-area-inset-right));
+    bottom: max(6px, env(safe-area-inset-bottom));
+    width: auto;
+    max-width: none;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    scroll-snap-type: x proximity;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .hud-toolbar::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  .hud-tool {
+    min-width: 48px;
+    min-height: 48px;
+    scroll-snap-align: center;
+  }
+
+  .hud-selection,
+  .hud-depot,
+  .hud-vehicle,
+  .hud-place {
+    left: max(6px, env(safe-area-inset-left));
+    right: max(6px, env(safe-area-inset-right));
+    bottom: calc(64px + env(safe-area-inset-bottom));
+    width: auto;
+    max-height: max(40vh, calc(100dvh - 180px));
+    overscroll-behavior: contain;
+  }
+
+  .hud-help,
+  .hud-news-panel {
+    top: calc(58px + env(safe-area-inset-top));
+    left: max(6px, env(safe-area-inset-left));
+    right: max(6px, env(safe-area-inset-right));
+    width: auto;
+    max-height: calc(100dvh - 150px);
+  }
+
+  /* Les panneaux de la barre haute ne débordent jamais horizontalement. */
+  .hud-bar {
+    max-width: 100vw;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+  }
+
+  .hud-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .hud-stat,
+  .hud-company,
+  .hud-money {
+    min-width: 0;
+  }
+
+  .hud-value,
+  .hud-money-value,
+  .panel-title,
+  .panel-subtitle,
+  .field-hint {
+    overflow-wrap: anywhere;
+  }
+}
+
+/* Cibles tactiles : 44 px minimum partout où un doigt peut cliquer. */
+@media (pointer: coarse) {
+  .btn,
+  .hud-button,
+  .hud-tool,
+  .hud-report-button,
+  .hud-speed-group button,
+  .segmented .segment,
+  .chat-form .btn,
+  .slot-controls .input,
+  .late-join-request-actions .btn,
+  .late-join-toggle,
+  .copy-button,
+  .input,
+  select.input,
+  textarea.input {
+    min-height: 44px;
+  }
+
+  .hud-selection-close,
+  .hud-news-close,
+  .hud-news-mark,
+  .hud-report-close,
+  .hud-panel-close {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .hud-button,
+  .hud-tool,
+  .hud-speed-group button {
+    min-width: 44px;
+  }
+
+  input[type='checkbox'],
+  input[type='radio'] {
+    width: 24px;
+    height: 24px;
+  }
+
+  .segmented .segment {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-block: 10px;
+  }
+}
+
+/* Anti-débordement générique : les libellés longs, URLs d'invitation et
+   pseudos réseau se coupent au lieu de pousser les panneaux hors écran. */
+.panel,
+.loading-card,
+.multiplayer-card,
+.lobby-column,
+.late-join-panel,
+.late-join-share,
+.hud-selection,
+.hud-depot,
+.hud-vehicle,
+.hud-place {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.lobby-invite-input,
+.late-join-share .input,
+.lobby-code-value,
+.late-join-room,
+.chat-text,
+.late-join-request-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.lobby-invite,
+.late-join-share,
+.field-row,
+.segmented,
+.form {
+  min-width: 0;
+}
+
+/* Un écran très bas (paysage mobile) garde la barre d'outils utilisable sans
+   manger toute la scène : elle redevient une rangée compacte défilable. */
+@media (max-height: 480px) {
+  .hud-toolbar {
+    bottom: max(4px, env(safe-area-inset-bottom));
+    padding: 3px;
+  }
+
+  .hud-tool {
+    min-height: 44px;
+    padding: 4px 6px;
+  }
+
+  .hud-selection,
+  .hud-depot,
+  .hud-vehicle,
+  .hud-place {
+    bottom: calc(56px + env(safe-area-inset-bottom));
+    max-height: calc(100dvh - 120px);
   }
 }

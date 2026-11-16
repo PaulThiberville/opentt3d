@@ -64,7 +64,7 @@ export function readNetworkParams(search: string): NetworkParams {
       invite: null,
       roomId: null,
       relays: [],
-      warning: 'Paramètres d’URL illisibles.',
+      warning: t('net.params.unreadable'),
     };
   }
 
@@ -73,13 +73,13 @@ export function readNetworkParams(search: string): NetworkParams {
   let warning: string | null = null;
   if (rawNet === 'local') kind = 'local';
   else if (rawNet !== '' && rawNet !== 'trystero') {
-    warning = `Mode réseau inconnu « ${rawNet} » : Trystero est utilisé.`;
+    warning = t('net.params.unknownMode', { mode: rawNet });
   }
 
   const rawRelays = params.get('relays');
   const relays = parseRelayUrls(rawRelays ?? '');
   if (rawRelays && relays.length === 0) {
-    warning = `${warning ? `${warning} ` : ''}Relais ignorés : des URLs wss:// sont attendues.`;
+    warning = `${warning ? `${warning} ` : ''}${t('net.params.relaysIgnored')}`;
   }
 
   if (params.has('room') || params.has('host')) {
@@ -92,7 +92,7 @@ export function readNetworkParams(search: string): NetworkParams {
         invite: null,
         roomId,
         relays,
-        warning: warning ?? 'Lien incomplet : l’identifiant de l’hôte manque.',
+        warning: warning ?? t('net.params.incomplete'),
       };
     }
     return {
@@ -100,7 +100,7 @@ export function readNetworkParams(search: string): NetworkParams {
       invite: null,
       roomId: null,
       relays,
-      warning: warning ?? 'Lien d’invitation invalide.',
+      warning: warning ?? t('net.params.invalid'),
     };
   }
 
@@ -271,14 +271,16 @@ export function mapStartInfoToGameOptions(
     // même configuration sur tous les pairs sans modifier le contrat UI.
     size = 512;
     warnings.push(
-      `Carte ${info.settings.mapSize}×${info.settings.mapSize} ramenée à 512×512 ` +
-        `pour cette version${wasm ? ' (moteur WASM)' : ' (mode mock)'}.`,
+      t('net.params.mapClamped', {
+        size: info.settings.mapSize,
+        mode: t(wasm ? 'net.params.modeWasm' : 'net.params.modeMock'),
+      }),
     );
   }
 
   const aiCount = info.players.filter((player) => player.ai !== null).length;
   if (!wasm && aiCount > 3) {
-    warnings.push('Le mock limite la partie à trois entreprises IA.');
+    warnings.push(t('net.params.mockAI'));
   }
   const companies = companyProfilesFromStart(info);
 
@@ -321,10 +323,11 @@ export function planNetworkEngine(
     return {
       mode,
       build: info.engineBuild,
-      error:
-        `Moteur incompatible : le salon annonce « ${info.engineBuild || 'inconnu'} » ` +
-        `mais ce client attend « ${expected} » (mode ${mode}). ` +
-        'Tous les joueurs doivent utiliser la même version de l’application et le même moteur.',
+      error: t('net.params.engineMismatch', {
+        actual: info.engineBuild || t('net.params.unknownBuild'),
+        expected,
+        mode,
+      }),
     };
   }
   return { mode, build: expected, error: null };
@@ -337,22 +340,35 @@ export const MAP_SIZE_LABELS: Record<LobbySettings['mapSize'], string> = {
   2048: '2048×2048',
 };
 
-export const ENGINE_LABELS: Record<LobbyEngine, string> = {
-  mock: 'Mock (simulé)',
-  wasm: 'WASM (OpenTTD réel)',
+export function engineLabel(engine: LobbyEngine): string {
+  return t(engine === 'wasm' ? 'lobby.engine.wasm' : 'lobby.engine.mock');
+}
+
+export function climateLabel(climate: LobbySettings['climate']): string {
+  return t(CLIMATE_KEYS[climate]);
+}
+
+export function difficultyLabel(difficulty: LobbySettings['difficulty']): string {
+  return t(DIFFICULTY_KEYS[difficulty]);
+}
+
+const CLIMATE_KEYS: Record<
+  LobbySettings['climate'],
+  'climate.temperate' | 'climate.subarctic' | 'climate.subtropical' | 'climate.toyland'
+> = {
+  temperate: 'climate.temperate',
+  arctic: 'climate.subarctic',
+  tropical: 'climate.subtropical',
+  toyland: 'climate.toyland',
 };
 
-export const CLIMATE_LABELS: Record<LobbySettings['climate'], string> = {
-  temperate: 'Tempéré',
-  arctic: 'Arctique',
-  tropical: 'Tropical',
-  toyland: 'Jouet',
-};
-
-export const DIFFICULTY_LABELS: Record<LobbySettings['difficulty'], string> = {
-  easy: 'Facile',
-  normal: 'Normale',
-  hard: 'Difficile',
+const DIFFICULTY_KEYS: Record<
+  LobbySettings['difficulty'],
+  'difficulty.easy' | 'difficulty.normal' | 'difficulty.hard'
+> = {
+  easy: 'difficulty.easy',
+  normal: 'difficulty.normal',
+  hard: 'difficulty.hard',
 };
 
 /** L'hôte peut-il démarrer ? Renvoie aussi les joueurs attendus. */
@@ -544,7 +560,7 @@ export interface GameSpeedNotice {
 /** En réseau la vitesse est fixée par l'hôte : l'UI garde le contrôle local. */
 export function networkControlsLocked(): GameSpeedNotice {
   return {
-    text: 'En réseau, la pause et la vitesse sont verrouillées pour garder tous les pairs synchronisés.',
+    text: t('net.controlsLocked'),
     speed: 1,
   };
 }
@@ -627,7 +643,7 @@ export function detachableTransport(transport: Transport): DetachableTransport {
 export function installStartedGate(
   transport: Transport,
   allowedPeers: Iterable<string>,
-  reason = 'La partie a déjà démarré.',
+  reason = t('lobby.reason.started'),
 ): () => void {
   const allowed = new Set(allowedPeers);
   const reject = (peerId: string): void => {
