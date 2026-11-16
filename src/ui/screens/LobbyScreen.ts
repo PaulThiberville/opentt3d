@@ -19,12 +19,13 @@ import type {
 import { LOBBY_COLOURS, LOBBY_ENGINES } from '../../net/lobby-types';
 import { el, fieldLabel } from '../dom';
 import { formatMoney } from '../format';
+import { t, tn } from '../i18n';
 import {
-  CLIMATE_LABELS,
-  DIFFICULTY_LABELS,
-  ENGINE_LABELS,
   MAP_SIZE_LABELS,
   buildRoomInvite,
+  climateLabel,
+  difficultyLabel,
+  engineLabel,
   lobbyStartReadiness,
   type NetworkKind,
 } from '../netlobby';
@@ -107,18 +108,21 @@ export class LobbyScreen extends BaseScreen {
     const heading = el('div', { className: 'lobby-head-main' });
     this.roleBadge = el('span', {
       className: 'slot-tag',
-      text: options.lobby.isHost ? 'Hôte' : 'Invité',
+      text: options.lobby.isHost ? t('lobby.role.host') : t('lobby.role.guest'),
     });
-    this.title = el('h1', { className: 'panel-title', text: 'Salon' });
+    this.title = el('h1', { className: 'panel-title', text: t('lobby.title') });
     this.codeValue = el('span', { className: 'lobby-code-value', text: '····' });
     const code = el('div', { className: 'lobby-code' });
-    code.append(el('span', { className: 'field-label', text: 'Code du salon' }), this.codeValue);
-    this.summary = el('p', { className: 'panel-subtitle', text: 'Connexion au salon…' });
+    code.append(
+      el('span', { className: 'field-label', text: t('lobby.codeLabel') }),
+      this.codeValue,
+    );
+    this.summary = el('p', { className: 'panel-subtitle', text: t('lobby.connecting') });
     heading.append(el('div', { className: 'lobby-eyebrow' }), this.title, this.summary);
     heading
       .querySelector('.lobby-eyebrow')
       ?.append(
-        el('span', { className: 'panel-eyebrow', text: 'Salon multijoueur' }),
+        el('span', { className: 'panel-eyebrow', text: t('lobby.eyebrow') }),
         this.roleBadge,
       );
     header.append(heading, code);
@@ -133,14 +137,14 @@ export class LobbyScreen extends BaseScreen {
     const left = el('div', { className: 'lobby-column' });
     this.slots = el('div', {
       className: 'slot-list',
-      attrs: { role: 'list', 'aria-label': 'Joueurs du salon' },
+      attrs: { role: 'list', 'aria-label': t('lobby.playersAria') },
     });
     this.selfPanel = el('div', { className: 'lobby-self' });
     this.settingsBox = el('div', { className: 'lobby-settings' });
     this.startHint = el('p', { className: 'field-hint', text: '' });
     this.readyButton = el('button', {
       className: 'btn btn-primary',
-      text: 'Je suis prêt',
+      text: t('lobby.ready'),
       attrs: { type: 'button' },
     });
     this.readyButton.addEventListener('click', () => {
@@ -149,14 +153,14 @@ export class LobbyScreen extends BaseScreen {
     });
     this.startButton = el('button', {
       className: 'btn btn-primary',
-      text: 'Démarrer la partie',
+      text: t('lobby.start'),
       attrs: { type: 'button' },
     });
     this.startButton.addEventListener('click', () => this.options.lobby.start());
     const actions = el('div', { className: 'panel-actions lobby-actions' });
     this.leaveButton = el('button', {
       className: 'btn btn-ghost',
-      text: 'Quitter le salon',
+      text: t('lobby.leave'),
       attrs: { type: 'button' },
     });
     this.leaveButton.addEventListener('click', () => this.showLeaveConfirm());
@@ -165,14 +169,14 @@ export class LobbyScreen extends BaseScreen {
 
     const right = el('div', { className: 'lobby-column' });
     const invite = el('div', { className: 'lobby-invite' });
-    const inviteLabel = fieldLabel('Lien d’invitation', 'lobby-invite');
+    const inviteLabel = fieldLabel(t('lobby.inviteLabel'), 'lobby-invite');
     this.inviteInput = el('input', {
       className: 'input lobby-invite-input',
       attrs: { id: 'lobby-invite', type: 'text', readonly: 'readonly', spellcheck: 'false' },
     });
     this.copyButton = el('button', {
       className: 'btn btn-ghost',
-      text: 'Copier',
+      text: t('lobby.copy'),
       attrs: { type: 'button' },
     });
     this.copyButton.addEventListener('click', () => void this.copyInvite());
@@ -188,15 +192,15 @@ export class LobbyScreen extends BaseScreen {
       this.copyStatus,
       el('p', {
         className: 'field-hint',
-        text: 'Toute personne avec ce lien rejoint directement ce salon.',
+        text: t('lobby.inviteHint'),
       }),
     );
 
     const chat = el('div', { className: 'lobby-chat' });
-    chat.append(el('h2', { className: 'lobby-section-title', text: 'Chat du salon' }));
+    chat.append(el('h2', { className: 'lobby-section-title', text: t('lobby.chat.title') }));
     this.chatList = el('div', {
       className: 'chat-list',
-      attrs: { role: 'log', 'aria-live': 'polite', 'aria-label': 'Messages du salon' },
+      attrs: { role: 'log', 'aria-live': 'polite', 'aria-label': t('lobby.chat.aria') },
     });
     this.chatInput = el('input', {
       className: 'input',
@@ -205,13 +209,17 @@ export class LobbyScreen extends BaseScreen {
         type: 'text',
         maxlength: '300',
         autocomplete: 'off',
-        placeholder: 'Votre message…',
+        placeholder: t('lobby.chat.placeholder'),
       },
     });
     this.chatForm = el('form', { className: 'chat-form' });
     this.chatForm.append(
       this.chatInput,
-      el('button', { className: 'btn btn-primary', text: 'Envoyer', attrs: { type: 'submit' } }),
+      el('button', {
+        className: 'btn btn-primary',
+        text: t('lobby.chat.send'),
+        attrs: { type: 'submit' },
+      }),
     );
     this.chatForm.addEventListener('submit', (event) => {
       event.preventDefault();
@@ -225,22 +233,22 @@ export class LobbyScreen extends BaseScreen {
 
     this.confirmLeave = el('div', {
       className: 'confirm lobby-leave-confirm',
-      attrs: { role: 'alertdialog', 'aria-label': 'Confirmer la sortie du salon' },
+      attrs: { role: 'alertdialog', 'aria-label': t('lobby.confirm.aria') },
     });
     const confirmText = el('p', {
       className: 'confirm-text',
-      text: 'Quitter ce salon ? Vous pourrez rejoindre une autre partie depuis le menu.',
+      text: t('lobby.confirm.text'),
     });
     const confirmActions = el('div', { className: 'confirm-actions' });
     const cancel = el('button', {
       className: 'btn btn-ghost',
-      text: 'Rester',
+      text: t('lobby.confirm.stay'),
       attrs: { type: 'button' },
     });
     cancel.addEventListener('click', () => this.hideLeaveConfirm());
     const quit = el('button', {
       className: 'btn btn-danger',
-      text: 'Quitter le salon',
+      text: t('lobby.leave'),
       attrs: { type: 'button' },
     });
     quit.addEventListener('click', () => this.options.onLeave());
@@ -268,7 +276,7 @@ export class LobbyScreen extends BaseScreen {
 
   private required<T extends HTMLElement>(id: string): T {
     const node = this.element.querySelector<T>(`#${id}`);
-    if (!node) throw new Error(`Élément #${id} introuvable dans l’écran salon`);
+    if (!node) throw new Error(t('lobby.error.missing', { id }));
     return node;
   }
 
@@ -292,7 +300,7 @@ export class LobbyScreen extends BaseScreen {
 
   private buildSelfPanel(): void {
     this.selfPanel.replaceChildren();
-    const head = el('h2', { className: 'lobby-section-title', text: 'Votre place' });
+    const head = el('h2', { className: 'lobby-section-title', text: t('lobby.self.title') });
     const grid = el('div', { className: 'lobby-self-grid' });
 
     const nameField = el('div', { className: 'field' });
@@ -305,7 +313,7 @@ export class LobbyScreen extends BaseScreen {
         autocomplete: 'nickname',
       },
     });
-    nameField.append(fieldLabel('Nom', 'lobby-self-name'), this.selfName);
+    nameField.append(fieldLabel(t('lobby.field.name'), 'lobby-self-name'), this.selfName);
 
     const companyField = el('div', { className: 'field' });
     this.selfCompany = el('input', {
@@ -315,10 +323,13 @@ export class LobbyScreen extends BaseScreen {
         type: 'text',
         maxlength: '32',
         autocomplete: 'organization',
-        placeholder: 'Nom de l’entreprise',
+        placeholder: t('lobby.company.placeholder'),
       },
     });
-    companyField.append(fieldLabel('Entreprise', 'lobby-self-company'), this.selfCompany);
+    companyField.append(
+      fieldLabel(t('lobby.field.company'), 'lobby-self-company'),
+      this.selfCompany,
+    );
 
     const colourField = el('div', { className: 'field' });
     this.selfColour = el('select', {
@@ -327,10 +338,13 @@ export class LobbyScreen extends BaseScreen {
     });
     for (let colour = 0; colour < LOBBY_COLOURS; colour++) {
       this.selfColour.append(
-        el('option', { text: `Couleur ${colour + 1}`, attrs: { value: `${colour}` } }),
+        el('option', {
+          text: t('lobby.colour.option', { index: colour + 1 }),
+          attrs: { value: `${colour}` },
+        }),
       );
     }
-    colourField.append(fieldLabel('Couleur', 'lobby-self-colour'), this.selfColour);
+    colourField.append(fieldLabel(t('lobby.field.colour'), 'lobby-self-colour'), this.selfColour);
 
     grid.append(nameField, companyField, colourField);
     this.selfPanel.append(head, grid);
@@ -340,9 +354,9 @@ export class LobbyScreen extends BaseScreen {
   private applyState(state: LobbyState): void {
     if (this.disposed) return;
     this.state = state;
-    this.title.textContent = state.name || 'Salon';
+    this.title.textContent = state.name || t('lobby.title');
     this.codeValue.textContent = state.roomId.toUpperCase();
-    this.roleBadge.textContent = this.lobby.isHost ? 'Hôte' : 'Invité';
+    this.roleBadge.textContent = this.lobby.isHost ? t('lobby.role.host') : t('lobby.role.guest');
     this.roleBadge.classList.toggle('is-host', this.lobby.isHost);
     this.summary.textContent = this.describeState(state);
     this.inviteInput.value =
@@ -364,14 +378,14 @@ export class LobbyScreen extends BaseScreen {
   }
 
   private describeState(state: LobbyState): string {
-    if (state.closed) return 'Salon fermé.';
-    if (state.started) return 'La partie a démarré.';
+    if (state.closed) return t('lobby.state.closed');
+    if (state.started) return t('lobby.state.started');
     const humans = state.slots.filter((slot) => slot.ai === null).length;
     const ai = state.slots.length - humans;
     const pieces = [
-      `${humans} joueur${humans > 1 ? 's' : ''}`,
-      ai > 0 ? `${ai} IA` : null,
-      `${state.slots.length}/${state.maxPlayers} places`,
+      tn(humans, 'lobby.summary.humans.one', 'lobby.summary.humans.other'),
+      ai > 0 ? t('lobby.summary.ai', { count: ai }) : null,
+      t('lobby.summary.places', { count: state.slots.length, max: state.maxPlayers }),
     ].filter((value): value is string => value !== null);
     return pieces.join(' · ');
   }
@@ -382,9 +396,7 @@ export class LobbyScreen extends BaseScreen {
     this.slots.replaceChildren();
 
     if (this.state.slots.length === 0) {
-      this.slots.append(
-        el('p', { className: 'field-hint', text: 'En attente de l’état du salon…' }),
-      );
+      this.slots.append(el('p', { className: 'field-hint', text: t('lobby.awaiting') }));
     }
 
     this.state.slots.forEach((slot, index) => {
@@ -399,17 +411,19 @@ export class LobbyScreen extends BaseScreen {
         el('span', { className: 'slot-name', text: slot.name }),
         el('span', {
           className: 'slot-company',
-          text: slot.companyName || 'Entreprise à nommer',
+          text: slot.companyName || t('lobby.company.unnamed'),
         }),
       );
       row.append(swatch, identity);
 
       const tags = el('div', { className: 'slot-tags' });
-      if (slot.isHost) tags.append(tag('Hôte', 'is-host'));
-      if (slot.ai) tags.append(tag(`IA ${DIFFICULTY_LABELS[slot.ai]}`, 'is-ai'));
-      if (slot.id === this.lobby.selfId) tags.append(tag('Vous', 'is-self'));
-      if (slot.ai === null && (slot.isHost || slot.ready)) tags.append(tag('Prêt', 'is-ready'));
-      if (!slot.connected) tags.append(tag('Hors ligne', 'is-offline'));
+      if (slot.isHost) tags.append(tag(t('lobby.tag.host'), 'is-host'));
+      if (slot.ai)
+        tags.append(tag(t('lobby.tag.ai', { difficulty: difficultyLabel(slot.ai) }), 'is-ai'));
+      if (slot.id === this.lobby.selfId) tags.append(tag(t('lobby.tag.self'), 'is-self'));
+      if (slot.ai === null && (slot.isHost || slot.ready))
+        tags.append(tag(t('lobby.tag.ready'), 'is-ready'));
+      if (!slot.connected) tags.append(tag(t('lobby.tag.offline'), 'is-offline'));
       row.append(tags);
 
       if (this.lobby.isHost) {
@@ -417,7 +431,7 @@ export class LobbyScreen extends BaseScreen {
         const colour = el('select', {
           className: 'input input-compact',
           attrs: {
-            'aria-label': `Couleur de ${slot.name}`,
+            'aria-label': t('lobby.slot.colourAria', { name: slot.name }),
             'data-focus-key': `slot-colour-${index}`,
           },
         });
@@ -433,7 +447,7 @@ export class LobbyScreen extends BaseScreen {
         if (!slot.isHost) {
           const remove = el('button', {
             className: 'btn btn-ghost btn-compact',
-            text: slot.ai ? 'Retirer' : 'Exclure',
+            text: slot.ai ? t('lobby.slot.remove') : t('lobby.slot.exclude'),
             attrs: { type: 'button', 'data-focus-key': `slot-remove-${index}` },
           });
           remove.addEventListener('click', () => this.lobby.removeSlot(index));
@@ -449,16 +463,19 @@ export class LobbyScreen extends BaseScreen {
       const addRow = el('div', { className: 'slot-add' });
       const difficulty = el('select', {
         className: 'input input-compact',
-        attrs: { 'aria-label': 'Difficulté de l’IA à ajouter' },
+        attrs: { 'aria-label': t('lobby.ai.difficultyAria') },
       });
       for (const value of DIFFICULTIES) {
-        const option = el('option', { text: `IA ${DIFFICULTY_LABELS[value]}`, attrs: { value } });
+        const option = el('option', {
+          text: t('lobby.tag.ai', { difficulty: difficultyLabel(value) }),
+          attrs: { value },
+        });
         option.selected = value === 'normal';
         difficulty.append(option);
       }
       const add = el('button', {
         className: 'btn btn-ghost btn-compact',
-        text: 'Ajouter une IA',
+        text: t('lobby.ai.add'),
         attrs: { type: 'button' },
       });
       add.addEventListener('click', () =>
@@ -476,44 +493,44 @@ export class LobbyScreen extends BaseScreen {
   private renderSettings(): void {
     this.settingsBox.replaceChildren();
     const settings = this.state.settings;
-    const head = el('h2', { className: 'lobby-section-title', text: 'Réglages de la partie' });
+    const head = el('h2', { className: 'lobby-section-title', text: t('lobby.settings.title') });
     this.settingsBox.append(head);
 
     if (this.lobby.isHost && !this.state.started && !this.state.closed) {
       const grid = el('div', { className: 'lobby-settings-grid' });
       grid.append(
         this.settingSelect(
-          'Moteur',
-          LOBBY_ENGINES.map((value) => ({ value, label: ENGINE_LABELS[value] })),
+          t('lobby.setting.engine'),
+          LOBBY_ENGINES.map((value) => ({ value, label: engineLabel(value) })),
           settings.engine,
           (value) => this.lobby.setSettings({ engine: value as LobbyEngine }),
         ),
         this.settingSelect(
-          'Taille',
+          t('lobby.setting.size'),
           MAP_SIZES.map((size) => ({ value: `${size}`, label: MAP_SIZE_LABELS[size] })),
           `${settings.mapSize}`,
           (value) => this.lobby.setSettings({ mapSize: Number(value) as MapSize }),
         ),
         this.settingSelect(
-          'Climat',
-          CLIMATES.map((value) => ({ value, label: CLIMATE_LABELS[value] })),
+          t('lobby.setting.climate'),
+          CLIMATES.map((value) => ({ value, label: climateLabel(value) })),
           settings.climate,
           (value) => this.lobby.setSettings({ climate: value as Climate }),
         ),
         this.settingSelect(
-          'Difficulté',
-          DIFFICULTIES.map((value) => ({ value, label: DIFFICULTY_LABELS[value] })),
+          t('lobby.setting.difficulty'),
+          DIFFICULTIES.map((value) => ({ value, label: difficultyLabel(value) })),
           settings.difficulty,
           (value) => this.lobby.setSettings({ difficulty: value as AIDifficulty }),
         ),
         this.settingSelect(
-          'Joueurs max.',
+          t('lobby.setting.maxPlayers'),
           MAX_PLAYERS.map((value) => ({ value: `${value}`, label: `${value}` })),
           `${settings.maxPlayers}`,
           (value) => this.lobby.setSettings({ maxPlayers: Number(value) }),
         ),
         this.settingSelect(
-          'Capital',
+          t('lobby.setting.capital'),
           [50000, 100000, 250000, 500000].map((value) => ({
             value: `${value}`,
             label: formatMoney(value),
@@ -528,15 +545,23 @@ export class LobbyScreen extends BaseScreen {
 
     const badges = el('div', { className: 'menu-badges' });
     badges.append(
-      el('span', { className: 'badge', text: ENGINE_LABELS[settings.engine] }),
-      el('span', { className: 'badge', text: `Carte ${MAP_SIZE_LABELS[settings.mapSize]}` }),
-      el('span', { className: 'badge', text: CLIMATE_LABELS[settings.climate] }),
+      el('span', { className: 'badge', text: engineLabel(settings.engine) }),
       el('span', {
         className: 'badge',
-        text: `Difficulté ${DIFFICULTY_LABELS[settings.difficulty]}`,
+        text: t('lobby.badge.map', { size: MAP_SIZE_LABELS[settings.mapSize] }),
+      }),
+      el('span', { className: 'badge', text: climateLabel(settings.climate) }),
+      el('span', {
+        className: 'badge',
+        text: t('lobby.badge.difficulty', {
+          difficulty: difficultyLabel(settings.difficulty),
+        }),
       }),
       el('span', { className: 'badge', text: formatMoney(settings.startingMoney) }),
-      el('span', { className: 'badge', text: `${settings.maxPlayers} places` }),
+      el('span', {
+        className: 'badge',
+        text: t('lobby.badge.places', { count: settings.maxPlayers }),
+      }),
     );
     this.settingsBox.append(badges);
   }
@@ -580,7 +605,7 @@ export class LobbyScreen extends BaseScreen {
     const readiness = lobbyStartReadiness(this.state);
     const isClient = !this.lobby.isHost;
     this.readyButton.hidden = !isClient;
-    this.readyButton.textContent = self?.ready ? 'Annuler « prêt »' : 'Je suis prêt';
+    this.readyButton.textContent = self?.ready ? t('lobby.readyCancel') : t('lobby.ready');
     this.readyButton.classList.toggle('is-primary', !self?.ready);
     this.readyButton.classList.toggle('btn-ghost', Boolean(self?.ready));
     this.readyButton.disabled = this.state.closed || this.state.started;
@@ -591,21 +616,19 @@ export class LobbyScreen extends BaseScreen {
   }
 
   private startHintText(readiness: ReturnType<typeof lobbyStartReadiness>): string {
-    if (this.state.closed) return 'Le salon est fermé.';
-    if (this.state.started) return 'La partie a démarré.';
+    if (this.state.closed) return t('lobby.startHint.closed');
+    if (this.state.started) return t('lobby.startHint.started');
     if (this.state.slots.length < 2) {
-      return 'Il faut au moins deux participants (IA incluse) pour démarrer.';
+      return t('lobby.startHint.minPlayers');
     }
     if (readiness.waiting.length > 0) {
-      return `En attente de : ${readiness.waiting.join(', ')}.`;
+      return t('lobby.startHint.waiting', { names: readiness.waiting.join(', ') });
     }
     if (!this.lobby.isHost) {
       const self = this.selfSlot();
-      return self?.ready
-        ? 'Prêt : l’hôte peut démarrer la partie.'
-        : 'Marquez-vous prêt pour permettre le démarrage.';
+      return self?.ready ? t('lobby.startHint.readyClient') : t('lobby.startHint.notReadyClient');
     }
-    return 'Tout le monde est prêt : vous pouvez démarrer.';
+    return t('lobby.startHint.allReady');
   }
 
   private appendChat(name: string, text: string): void {
@@ -621,16 +644,16 @@ export class LobbyScreen extends BaseScreen {
   private async copyInvite(): Promise<void> {
     const value = this.inviteInput.value;
     if (!value) {
-      this.copyStatus.textContent = 'Lien pas encore disponible.';
+      this.copyStatus.textContent = t('lobby.copy.unavailable');
       return;
     }
     try {
       await navigator.clipboard.writeText(value);
-      this.copyStatus.textContent = 'Lien copié dans le presse-papiers.';
+      this.copyStatus.textContent = t('lobby.copy.copied');
     } catch {
       this.inviteInput.focus();
       this.inviteInput.select();
-      this.copyStatus.textContent = 'Lien sélectionné : copiez-le avec Ctrl+C / Cmd+C.';
+      this.copyStatus.textContent = t('lobby.copy.manual');
     }
   }
 

@@ -10,6 +10,7 @@ import type { Directory, LobbyInfo } from '../../net/directory';
 import type { AIDifficulty } from '../../net/lobby-types';
 import { el, fieldLabel } from '../dom';
 import { parseSeed, randomSeed } from '../gameOptions';
+import { t } from '../i18n';
 import { MAP_SIZE_LABELS, parseJoinTarget, type JoinTarget, type NetworkKind } from '../netlobby';
 import { BaseScreen } from './BaseScreen';
 
@@ -36,9 +37,9 @@ export interface MultiplayerScreenOptions {
 const ROOM_SIZES: (256 | 512)[] = [256, 512];
 
 function statusLabel(info: LobbyInfo): string {
-  if (info.status === 'full') return 'Complet';
-  if (info.status === 'started') return 'En cours';
-  return `${info.players}/${info.max} joueurs`;
+  if (info.status === 'full') return t('mp.status.full');
+  if (info.status === 'started') return t('mp.status.started');
+  return t('mp.status.players', { players: info.players, max: info.max });
 }
 
 export class MultiplayerScreen extends BaseScreen {
@@ -66,23 +67,20 @@ export class MultiplayerScreen extends BaseScreen {
 
     const panel = el('div', { className: 'panel panel-wide' });
     const header = el('div', { className: 'panel-header' });
-    const modeBadge =
-      options.kind === 'local'
-        ? 'Mode local · BroadcastChannel, deux onglets'
-        : 'Trystero · WebRTC via relais Nostr';
+    const modeBadge = options.kind === 'local' ? t('mp.mode.local') : t('mp.mode.trystero');
     header.append(
-      el('span', { className: 'panel-eyebrow', text: 'Multijoueur' }),
-      el('h1', { className: 'panel-title', text: 'Jouer en réseau' }),
+      el('span', { className: 'panel-eyebrow', text: t('mp.eyebrow') }),
+      el('h1', { className: 'panel-title', text: t('mp.title') }),
       el('p', {
         className: 'panel-subtitle',
-        text: 'Pas de serveur de jeu : l’hôte séquence les ticks et chaque pair exécute la même partie. Choisissez un salon existant ou ouvrez le vôtre.',
+        text: t('mp.subtitle'),
       }),
       el('div', { className: 'menu-badges' }),
     );
     const badges = header.querySelector('.menu-badges');
     badges?.append(
       el('span', { className: 'badge', text: modeBadge }),
-      el('span', { className: 'badge', text: 'Lockstep déterministe' }),
+      el('span', { className: 'badge', text: t('mp.badge.lockstep') }),
     );
 
     if (options.notice) {
@@ -109,7 +107,7 @@ export class MultiplayerScreen extends BaseScreen {
     this.lobbyEmpty = this.required<HTMLParagraphElement>('mp-lobbies-empty');
     this.refreshButton = this.required<HTMLButtonElement>('mp-refresh');
 
-    this.lobbyNameInput.value = `Partie de ${options.initialName}`;
+    this.lobbyNameInput.value = t('mp.lobby.defaultName', { name: options.initialName });
     this.playerNameInput.value = options.initialName;
     this.joinNameInput.value = options.initialName;
     this.seedInput.value = String(randomSeed());
@@ -129,7 +127,7 @@ export class MultiplayerScreen extends BaseScreen {
 
   private required<T extends HTMLElement>(id: string): T {
     const node = this.element.querySelector<T>(`#${id}`);
-    if (!node) throw new Error(`Élément #${id} introuvable dans l’écran multijoueur`);
+    if (!node) throw new Error(t('mp.error.missing', { id }));
     return node;
   }
 
@@ -142,12 +140,12 @@ export class MultiplayerScreen extends BaseScreen {
     heading.append(
       el('h2', {
         className: 'multiplayer-card-title',
-        text: 'Créer un salon',
+        text: t('mp.create.title'),
         attrs: { id: 'mp-create-title' },
       }),
       el('p', {
         className: 'field-hint',
-        text: 'Le code du salon et le lien d’invitation sont générés au démarrage.',
+        text: t('mp.create.hint'),
       }),
     );
 
@@ -157,7 +155,7 @@ export class MultiplayerScreen extends BaseScreen {
     });
     const lobbyField = el('div', { className: 'field field-full' });
     lobbyField.append(
-      fieldLabel('Nom du salon', 'mp-lobby-name'),
+      fieldLabel(t('mp.field.lobbyName'), 'mp-lobby-name'),
       el('input', {
         className: 'input',
         attrs: {
@@ -173,7 +171,7 @@ export class MultiplayerScreen extends BaseScreen {
 
     const playerField = el('div', { className: 'field field-full' });
     playerField.append(
-      fieldLabel('Votre nom', 'mp-player-name'),
+      fieldLabel(t('mp.field.playerName'), 'mp-player-name'),
       el('input', {
         className: 'input',
         attrs: {
@@ -187,22 +185,29 @@ export class MultiplayerScreen extends BaseScreen {
     );
 
     const visibility = el('fieldset', { className: 'field field-full' });
-    visibility.append(el('legend', { className: 'field-label', text: 'Visibilité' }));
+    visibility.append(el('legend', { className: 'field-label', text: t('mp.field.visibility') }));
     const visibilitySegments = el('div', { className: 'segmented' });
     visibilitySegments.append(
-      this.radioSegment('mp-public', 'mp-visibility', 'public', 'Publique', true) ?? el('span'),
-      this.radioSegment('mp-private', 'mp-visibility', 'private', 'Privée', false) ?? el('span'),
+      this.radioSegment('mp-public', 'mp-visibility', 'public', t('mp.visibility.public'), true) ??
+        el('span'),
+      this.radioSegment(
+        'mp-private',
+        'mp-visibility',
+        'private',
+        t('mp.visibility.private'),
+        false,
+      ) ?? el('span'),
     );
     visibility.append(
       visibilitySegments,
       el('p', {
         className: 'field-hint',
-        text: 'Une partie publique apparaît dans l’annuaire ; une partie privée se rejoint par lien.',
+        text: t('mp.hint.visibility'),
       }),
     );
 
     const sizes = el('fieldset', { className: 'field field-full' });
-    sizes.append(el('legend', { className: 'field-label', text: 'Taille de carte' }));
+    sizes.append(el('legend', { className: 'field-label', text: t('mp.field.mapSize') }));
     const sizeSegments = el('div', { className: 'segmented' });
     for (const size of ROOM_SIZES) {
       const label = el('label', { className: 'segment' });
@@ -221,7 +226,7 @@ export class MultiplayerScreen extends BaseScreen {
       sizeSegments,
       el('p', {
         className: 'field-hint',
-        text: 'Le mock plafonne à 512×512 ; les grandes cartes attendent le WASM réseau.',
+        text: t('mp.hint.mapSize'),
       }),
     );
 
@@ -240,15 +245,15 @@ export class MultiplayerScreen extends BaseScreen {
     });
     const randomButton = el('button', {
       className: 'btn btn-ghost',
-      text: 'Aléatoire',
-      attrs: { type: 'button', title: 'Tirer une nouvelle graine' },
+      text: t('mp.random'),
+      attrs: { type: 'button', title: t('mp.randomTitle') },
     });
     randomButton.addEventListener('click', () => {
       seedInput.value = String(randomSeed());
       seedInput.focus();
     });
     seedRow.append(seedInput, randomButton);
-    seedField.append(fieldLabel('Graine', 'mp-seed'), seedRow);
+    seedField.append(fieldLabel(t('mp.field.seed'), 'mp-seed'), seedRow);
 
     const difficultyField = el('div', { className: 'field' });
     const difficultySelect = el('select', {
@@ -256,15 +261,15 @@ export class MultiplayerScreen extends BaseScreen {
       attrs: { id: 'mp-difficulty', name: 'difficulty' },
     });
     for (const entry of [
-      { value: 'easy', label: 'Facile' },
-      { value: 'normal', label: 'Normale' },
-      { value: 'hard', label: 'Difficile' },
+      { value: 'easy', label: t('difficulty.easy') },
+      { value: 'normal', label: t('difficulty.normal') },
+      { value: 'hard', label: t('difficulty.hard') },
     ]) {
       const option = el('option', { text: entry.label, attrs: { value: entry.value } });
       option.selected = entry.value === 'normal';
       difficultySelect.append(option);
     }
-    difficultyField.append(fieldLabel('Difficulté', 'mp-difficulty'), difficultySelect);
+    difficultyField.append(fieldLabel(t('mp.field.difficulty'), 'mp-difficulty'), difficultySelect);
 
     this.createError = el('p', {
       className: 'field-error',
@@ -284,7 +289,7 @@ export class MultiplayerScreen extends BaseScreen {
     const actions = el('div', { className: 'panel-actions panel-actions-column' });
     const create = el('button', {
       className: 'btn btn-primary',
-      text: 'Créer le salon',
+      text: t('mp.create.submit'),
       attrs: { type: 'submit' },
     });
     actions.append(create);
@@ -324,12 +329,12 @@ export class MultiplayerScreen extends BaseScreen {
     heading.append(
       el('h2', {
         className: 'multiplayer-card-title',
-        text: 'Rejoindre un salon',
+        text: t('mp.join.title'),
         attrs: { id: 'mp-join-title' },
       }),
       el('p', {
         className: 'field-hint',
-        text: 'Collez un code (ex. m3k7-9qfx) ou un lien d’invitation complet.',
+        text: t('mp.join.hint'),
       }),
     );
 
@@ -339,7 +344,7 @@ export class MultiplayerScreen extends BaseScreen {
     });
     const nameField = el('div', { className: 'field field-full' });
     nameField.append(
-      fieldLabel('Votre nom', 'mp-join-name'),
+      fieldLabel(t('mp.field.playerName'), 'mp-join-name'),
       el('input', {
         className: 'input',
         attrs: {
@@ -353,7 +358,7 @@ export class MultiplayerScreen extends BaseScreen {
     );
     const joinField = el('div', { className: 'field field-full' });
     joinField.append(
-      fieldLabel('Code ou lien', 'mp-join'),
+      fieldLabel(t('mp.field.codeOrLink'), 'mp-join'),
       el('input', {
         className: 'input',
         attrs: {
@@ -362,7 +367,7 @@ export class MultiplayerScreen extends BaseScreen {
           type: 'text',
           autocomplete: 'off',
           spellcheck: 'false',
-          placeholder: 'm3k7-9qfx ou https://…/?room=…&host=…',
+          placeholder: t('mp.join.placeholder'),
         },
       }),
     );
@@ -376,18 +381,18 @@ export class MultiplayerScreen extends BaseScreen {
     joinActions.append(
       el('button', {
         className: 'btn btn-primary',
-        text: 'Rejoindre',
+        text: t('mp.join.submit'),
         attrs: { type: 'submit' },
       }),
     );
     form.append(joinActions);
 
     const listHead = el('div', { className: 'lobby-list-head' });
-    listHead.append(el('h3', { className: 'multiplayer-card-title', text: 'Parties publiques' }));
+    listHead.append(el('h3', { className: 'multiplayer-card-title', text: t('mp.public.title') }));
     this.refreshButton = el('button', {
       className: 'btn btn-ghost btn-compact',
-      text: 'Rafraîchir',
-      attrs: { id: 'mp-refresh', type: 'button', 'aria-label': 'Rafraîchir la liste des parties' },
+      text: t('mp.refresh'),
+      attrs: { id: 'mp-refresh', type: 'button', 'aria-label': t('mp.refreshAria') },
     });
     listHead.append(this.refreshButton);
 
@@ -397,7 +402,7 @@ export class MultiplayerScreen extends BaseScreen {
     });
     this.lobbyEmpty = el('p', {
       className: 'field-hint',
-      text: 'Aucune partie publique pour le moment. Créez la vôtre !',
+      text: t('mp.empty'),
       attrs: { id: 'mp-lobbies-empty' },
     });
 
@@ -409,7 +414,7 @@ export class MultiplayerScreen extends BaseScreen {
     const footer = el('div', { className: 'multiplayer-footer' });
     const back = el('button', {
       className: 'btn btn-ghost',
-      text: 'Retour au menu',
+      text: t('common.backToMenu'),
       attrs: { type: 'button' },
     });
     back.addEventListener('click', () => this.options.onBack());
@@ -417,7 +422,7 @@ export class MultiplayerScreen extends BaseScreen {
       back,
       el('p', {
         className: 'screen-note',
-        text: 'Astuce : en mode local, ouvrez un second onglet avec le lien d’invitation pour simuler deux joueurs.',
+        text: t('mp.footer.tip'),
       }),
     );
     return footer;
@@ -448,23 +453,23 @@ export class MultiplayerScreen extends BaseScreen {
     const playerName = this.playerNameInput.value.trim();
     const seed = parseSeed(this.seedInput.value);
     if (lobbyName.length === 0) {
-      this.showCreateError('Donnez un nom au salon.');
+      this.showCreateError(t('mp.error.lobbyName'));
       this.lobbyNameInput.focus();
       return;
     }
     if (playerName.length === 0) {
-      this.showCreateError('Indiquez votre nom de joueur.');
+      this.showCreateError(t('mp.error.playerName'));
       this.playerNameInput.focus();
       return;
     }
     if (seed === null) {
-      this.showCreateError('La graine doit être un nombre entier ou hexadécimal.');
+      this.showCreateError(t('mp.error.seed'));
       this.seedInput.focus();
       return;
     }
     const size = Number(this.sizeInputs.find((input) => input.checked)?.value ?? 256);
     if (size !== 256 && size !== 512) {
-      this.showCreateError('Choisissez une taille de carte valide.');
+      this.showCreateError(t('mp.error.size'));
       return;
     }
     const rawDifficulty = this.difficultySelect.value;
@@ -484,14 +489,14 @@ export class MultiplayerScreen extends BaseScreen {
     this.joinError.hidden = true;
     const playerName = this.joinNameInput.value.trim();
     if (playerName.length === 0) {
-      this.joinError.textContent = 'Indiquez votre nom de joueur.';
+      this.joinError.textContent = t('mp.join.error.name');
       this.joinError.hidden = false;
       this.joinNameInput.focus();
       return;
     }
     const target = parseJoinTarget(this.joinInput.value);
     if (!target) {
-      this.joinError.textContent = 'Code ou lien invalide. Exemple : m3k7-9qfx.';
+      this.joinError.textContent = t('mp.join.error.code');
       this.joinError.hidden = false;
       this.joinInput.focus();
       return;
@@ -515,8 +520,11 @@ export class MultiplayerScreen extends BaseScreen {
         attrs: {
           type: 'button',
           role: 'listitem',
-          title: `Rejoindre ${info.name}`,
-          'aria-label': `Rejoindre ${info.name}, ${statusLabel(info)}`,
+          title: t('mp.lobby.joinTitle', { name: info.name }),
+          'aria-label': t('mp.lobby.joinAria', {
+            name: info.name,
+            status: statusLabel(info),
+          }),
         },
       });
       const main = el('span', { className: 'lobby-row-main' });
@@ -524,7 +532,7 @@ export class MultiplayerScreen extends BaseScreen {
         el('span', { className: 'lobby-row-name', text: info.name }),
         el('span', {
           className: 'lobby-row-meta',
-          text: `${statusLabel(info)} · partie publique`,
+          text: t('mp.lobby.meta', { status: statusLabel(info) }),
         }),
       );
       row.append(

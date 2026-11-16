@@ -41,6 +41,7 @@ import {
   type NewGameOptions,
 } from './ui/gameOptions';
 import { createLocalDirectory } from './ui/localDirectory';
+import { t } from './ui/i18n';
 import {
   LateJoinClient,
   LateJoinError,
@@ -364,13 +365,9 @@ function showMainMenu(): void {
       onLoad: () => showSaveScreen('menu'),
       onSettings: () => showSettings('menu'),
       onAbout: () => showAbout(),
-      unavailableReason: webglAvailable
-        ? null
-        : 'WebGL est indisponible dans ce navigateur. Activez l’accélération matérielle puis rechargez la page.',
+      unavailableReason: webglAvailable ? null : t('menu.unavailable.webgl'),
       multiplayerNote:
-        networkKind === 'local'
-          ? 'Mode local · deux onglets BroadcastChannel'
-          : 'Salon P2P · Trystero / relais Nostr',
+        networkKind === 'local' ? t('menu.multiplayer.localNote') : t('menu.multiplayer.relayNote'),
       liveSimulation: webglAvailable && !prefersReducedMotion,
     }),
   );
@@ -573,7 +570,7 @@ function enterLateJoin(
   const payload = offer.payload;
   if (!payload) {
     transport.leave();
-    showMultiplayer({ join: target.roomId, notice: 'L’hôte n’a pas annoncé sa configuration.' });
+    showMultiplayer({ join: target.roomId, notice: t('mp.notice.hostConfig') });
     return;
   }
   const compatibility = checkLateJoinCompatibility(payload);
@@ -587,7 +584,7 @@ function enterLateJoin(
     transport.leave();
     showMultiplayer({
       join: target.roomId,
-      notice: 'Réponse de join incohérente : l’hôte annoncé ne correspond pas au pair.',
+      notice: t('mp.notice.inconsistent'),
     });
     return;
   }
@@ -601,7 +598,7 @@ function enterLateJoin(
       lateClient?.cancel();
       lateClient = null;
       transport.leave();
-      showMultiplayer({ join: target.roomId, notice: 'Join annulé.' });
+      showMultiplayer({ join: target.roomId, notice: t('mp.notice.cancelled') });
     },
     onBack: () => showMainMenu(),
   });
@@ -762,9 +759,9 @@ async function startGame(options: NewGameOptions, engine: EngineMode = engineMod
     const message = describeUnknownError(error);
     if (error instanceof EngineLoadError) {
       const hint = error.hint ? ` ${error.hint}` : '';
-      loading.setError('Moteur WASM indisponible', `${message}${hint}`);
+      loading.setError(t('loading.error.wasm'), `${message}${hint}`);
     } else {
-      loading.setError('Impossible de démarrer la partie', message);
+      loading.setError(t('join.error.start'), message);
     }
   }
 }
@@ -1012,7 +1009,7 @@ async function startJoinedGame(prepared: LateJoinPrepared, screen: JoinScreen): 
       showMainMenu();
       return;
     }
-    screen.setError('Impossible de démarrer la partie rejointe', describeUnknownError(error));
+    screen.setError(t('join.error.startJoined'), describeUnknownError(error));
   }
 }
 
@@ -1126,7 +1123,7 @@ function showNetworkLost(reason: string): void {
   screens.show(
     'disconnected',
     new DisconnectedScreen({
-      title: 'Hôte perdu',
+      title: t('disconnected.title.hostLost'),
       reason,
       onMenu: () => showMainMenu(),
     }),

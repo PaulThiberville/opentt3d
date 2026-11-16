@@ -7,6 +7,7 @@
  */
 
 import { button, el } from './dom';
+import { t } from './i18n';
 import type { LateJoinHost } from './lateJoinHost';
 import {
   describeHostJoin,
@@ -59,16 +60,19 @@ export class LateJoinPanel {
       className: 'late-join-panel',
       attrs: {
         role: 'region',
-        'aria-label': 'Retardataires et réseau',
+        'aria-label': t('late.regionAria'),
       },
     });
     const header = el('div', { className: 'late-join-head' });
     const heading = el('div', { className: 'late-join-heading' });
     heading.append(
-      el('h2', { className: 'late-join-title', text: 'Retardataires' }),
-      el('span', { className: 'late-join-room', text: `Salon ${options.roomId.toUpperCase()}` }),
+      el('h2', { className: 'late-join-title', text: t('late.title') }),
+      el('span', {
+        className: 'late-join-room',
+        text: t('late.room', { code: options.roomId.toUpperCase() }),
+      }),
     );
-    this.toggleButton = button('Réduire', {
+    this.toggleButton = button(t('late.collapse'), {
       variant: 'ghost',
       className: 'btn-compact late-join-toggle',
       onClick: () => this.toggleCollapsed(),
@@ -93,16 +97,16 @@ export class LateJoinPanel {
       this.autoInput,
       el('span', {
         className: 'late-join-auto-text',
-        text: 'Ouvrir automatiquement aux retardataires',
+        text: t('late.auto'),
       }),
     );
     const autoHint = el('p', {
       className: 'field-hint',
-      text: 'Chaque nouveau joueur est admis après vérification du hash ; la partie se met en pause pendant le transfert.',
+      text: t('late.autoHint'),
       attrs: { id: 'late-join-auto-hint' },
     });
 
-    this.primary = button('Ouvrir aux retardataires', {
+    this.primary = button(t('late.open'), {
       variant: 'primary',
       className: 'btn-compact',
       onClick: () => this.onPrimary(),
@@ -111,7 +115,7 @@ export class LateJoinPanel {
     this.pendingBox = el('div', { className: 'late-join-pending' });
     this.pendingEmpty = el('p', {
       className: 'late-join-empty',
-      text: 'Aucune demande. Un joueur qui ouvre le lien verra « Rejoindre la partie en cours ».',
+      text: t('late.empty'),
     });
     this.pendingBox.append(this.pendingEmpty);
     this.playersBox = el('div', { className: 'late-join-players' });
@@ -124,11 +128,11 @@ export class LateJoinPanel {
         type: 'text',
         readonly: 'readonly',
         spellcheck: 'false',
-        'aria-label': 'Lien d’invitation à la partie en cours',
+        'aria-label': t('late.inviteAria'),
       },
     });
     this.inviteInput.value = options.inviteLink;
-    this.copyButton = button('Copier', {
+    this.copyButton = button(t('late.copy'), {
       variant: 'ghost',
       className: 'btn-compact',
       onClick: () => void this.copyInvite(),
@@ -141,7 +145,7 @@ export class LateJoinPanel {
     share.append(this.inviteInput, this.copyButton);
 
     this.body = el('div', { className: 'late-join-body' });
-    const playersTitle = el('p', { className: 'late-join-section-title', text: 'Joueurs' });
+    const playersTitle = el('p', { className: 'late-join-section-title', text: t('late.players') });
     playersTitle.append(this.playersLabel);
     this.body.append(
       this.status,
@@ -149,7 +153,7 @@ export class LateJoinPanel {
       autoRow,
       autoHint,
       this.primary,
-      el('p', { className: 'late-join-section-title', text: 'Demandes' }),
+      el('p', { className: 'late-join-section-title', text: t('late.requests') }),
       this.pendingBox,
       playersTitle,
       this.playersBox,
@@ -179,7 +183,7 @@ export class LateJoinPanel {
   private toggleCollapsed(): void {
     this.collapsed = !this.collapsed;
     this.element.classList.toggle('is-collapsed', this.collapsed);
-    this.toggleButton.textContent = this.collapsed ? 'Ouvrir' : 'Réduire';
+    this.toggleButton.textContent = this.collapsed ? t('late.expand') : t('late.collapse');
   }
 
   private onPrimary(): void {
@@ -224,11 +228,13 @@ export class LateJoinPanel {
         el('span', { className: 'late-join-request-name', text: request.name }),
         el('span', {
           className: 'late-join-request-peer',
-          text: request.ready ? `prêt · ${shortPeer(request.peerId)}` : shortPeer(request.peerId),
+          text: request.ready
+            ? t('late.ready', { peer: shortPeer(request.peerId) })
+            : shortPeer(request.peerId),
         }),
       );
       const actions = el('div', { className: 'late-join-request-actions' });
-      const authorize = button('Autoriser', {
+      const authorize = button(t('late.authorize'), {
         variant: 'primary',
         className: 'btn-compact',
         onClick: () => {
@@ -237,7 +243,7 @@ export class LateJoinPanel {
         },
       });
       authorize.disabled = !request.ready;
-      const refuse = button('Refuser', {
+      const refuse = button(t('late.refuse'), {
         variant: 'ghost',
         className: 'btn-compact',
         onClick: () => {
@@ -270,11 +276,11 @@ export class LateJoinPanel {
     if (!value) return;
     try {
       await navigator.clipboard.writeText(value);
-      this.copyStatus.textContent = 'Lien copié : un nouvel onglet peut rejoindre la partie.';
+      this.copyStatus.textContent = t('late.copied');
     } catch {
       this.inviteInput.focus();
       this.inviteInput.select();
-      this.copyStatus.textContent = 'Lien sélectionné : copiez-le avec Ctrl+C / Cmd+C.';
+      this.copyStatus.textContent = t('late.copyManual');
     }
   }
 }

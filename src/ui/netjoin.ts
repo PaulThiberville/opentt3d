@@ -20,6 +20,7 @@ import type { JoinProgress, JoinWindowStatus } from '../net/session';
 import type { JoinRejectReason } from '../net/types';
 import { isJoinRejectReason } from '../net/types';
 import type { Transport } from '../net/transport';
+import { t, tn } from './i18n';
 import { freeCompanyForPayload } from './netlobby';
 
 /** Version du petit protocole de découverte, indépendante du lockstep. */
@@ -144,11 +145,10 @@ export function checkLateJoinCompatibility(
   expectedBuild = engineBuildId(payload.settings.engine),
 ): string | null {
   if (payload.engineBuild !== expectedBuild) {
-    return (
-      `Moteur incompatible : la partie utilise « ${payload.engineBuild || 'inconnu'} » ` +
-      `mais ce client attend « ${expectedBuild} ». ` +
-      'Tous les joueurs doivent ouvrir la même version de l’application.'
-    );
+    return t('join.incompatible', {
+      actual: payload.engineBuild || '?',
+      expected: expectedBuild,
+    });
   }
   return null;
 }
@@ -187,19 +187,19 @@ export function joinRejectMessage(reason: JoinRejectReason, detail?: string): st
   if (detail && detail.trim()) return detail.trim();
   switch (reason) {
     case 'full':
-      return 'La partie est complète : aucune place de joueur n’est disponible.';
+      return t('join.reject.full');
     case 'version':
-      return 'Version incompatible : le moteur ou le protocole diffère de ceux de l’hôte.';
+      return t('join.reject.version');
     case 'started':
-      return 'La partie a déjà démarré et l’hôte n’a pas ouvert de fenêtre de join.';
+      return t('join.reject.started');
     case 'closed':
-      return 'La fenêtre de join est fermée. Demandez à l’hôte de l’ouvrir à nouveau.';
+      return t('join.reject.closed');
     case 'invalid-save':
-      return 'La sauvegarde reçue est invalide ou ne correspond pas à l’état de l’hôte.';
+      return t('join.reject.invalidSave');
     case 'timeout':
-      return 'Le délai de join est dépassé. Vérifiez la connexion puis réessayez.';
+      return t('join.reject.timeout');
     default:
-      return 'Impossible de rejoindre la partie en cours.';
+      return t('join.reject.default');
   }
 }
 
@@ -241,55 +241,61 @@ export function describeLateJoinState(state: LateJoinUiState): JoinDescription {
     case 'initializing': {
       const engine = Math.max(0, Math.min(1, state.engineProgress ?? 0));
       return {
-        title: 'Préparation du moteur',
-        message: state.message || 'Initialisation du moteur pour charger la sauvegarde…',
+        title: t('join.stage.initializing.title'),
+        message: state.message || t('join.stage.initializing.message'),
         tone: 'info',
         progress: 0.05 + engine * 0.25,
       };
     }
     case 'waiting':
       return {
-        title: 'En attente de l’hôte',
-        message: state.message || 'L’hôte doit autoriser votre arrivée dans la partie.',
+        title: t('join.stage.waiting.title'),
+        message: state.message || t('join.stage.waiting.message'),
         tone: 'warn',
         progress: 0.3,
       };
     case 'requesting':
       return {
-        title: 'Connexion à la partie',
-        message: state.message || 'Demande de join envoyée à l’hôte…',
+        title: t('join.stage.requesting.title'),
+        message: state.message || t('join.stage.requesting.message'),
         tone: 'info',
         progress: 0.35,
       };
     case 'transfer':
       return {
-        title: 'Réception de la sauvegarde',
+        title: t('join.stage.transfer.title'),
         message:
           state.message ||
-          `Blocs ${state.received}/${state.total || '?'} (${Math.round(ratio * 100)} %)`,
+          t('join.stage.transfer.message', {
+            received: state.received,
+            total: state.total || '?',
+            percent: Math.round(ratio * 100),
+          }),
         tone: 'info',
         progress: 0.35 + ratio * 0.5,
       };
     case 'joined':
       return {
-        title: 'Partie rejointe',
+        title: t('join.stage.joined.title'),
         message:
           state.message ||
-          `État chargé au tick ${state.tick ?? 0}, hash vérifié. Reprise des ticks…`,
+          t('join.stage.joined.message', {
+            tick: state.tick ?? 0,
+          }),
         tone: 'ok',
         progress: 0.9,
       };
     case 'rejected':
       return {
-        title: 'Join impossible',
-        message: state.message || 'Impossible de rejoindre la partie en cours.',
+        title: t('join.stage.rejected.title'),
+        message: state.message || t('join.stage.rejected.message'),
         tone: 'error',
         progress: 1,
       };
     default:
       return {
-        title: 'Rejoindre la partie',
-        message: state.message || 'Recherche de la partie en cours…',
+        title: t('join.stage.idle.title'),
+        message: state.message || t('join.stage.idle.message'),
         tone: 'info',
         progress: 0.02,
       };
@@ -313,26 +319,29 @@ export function lateJoinStateFromSession(
   };
   switch (progress.phase) {
     case 'requesting':
-      return { ...base, stage: 'requesting', message: 'Demande de join envoyée à l’hôte…' };
+      return { ...base, stage: 'requesting', message: t('join.msg.requesting') };
     case 'transfer':
       return {
         ...base,
         stage: 'transfer',
-        message: `Réception de la sauvegarde : ${progress.received}/${progress.total || '?'} blocs.`,
+        message: t('join.msg.transfer', {
+          received: progress.received,
+          total: progress.total || '?',
+        }),
       };
     case 'joined':
       return {
         ...base,
         stage: 'joined',
         tone: 'ok',
-        message: `Partie rejointe au tick ${progress.tick ?? 0} : hash vérifié, reprise des ticks.`,
+        message: t('join.msg.joined', { tick: progress.tick ?? 0 }),
       };
     case 'rejected':
       return {
         ...base,
         stage: 'rejected',
         tone: 'error',
-        message: previous?.message || 'Join refusé par l’hôte.',
+        message: previous?.message || t('join.msg.rejected'),
       };
     default:
       return base;
@@ -393,76 +402,68 @@ export function describeHostJoin(view: HostJoinView, now = Date.now()): HostJoin
       tone: view.outcome.ok ? 'ok' : 'error',
       active,
       pendingCount,
-      primaryLabel: view.autoAdmit ? 'Fermer aux retardataires' : 'Ouvrir aux retardataires',
-      hint: view.outcome.ok
-        ? 'La liste des joueurs est à jour, la simulation a repris.'
-        : 'La demande a été refusée sans interrompre la partie. Vous pouvez réessayer.',
+      primaryLabel: view.autoAdmit ? t('late.close') : t('late.open'),
+      hint: view.outcome.ok ? t('late.outcome.ok') : t('late.outcome.error'),
     };
   }
   if (transfer) {
     return {
-      text: `Envoi de la sauvegarde (${transfer.sent}/${transfer.total} blocs) — confirmation en attente…`,
+      text: t('late.transfer', { sent: transfer.sent, total: transfer.total }),
       tone: 'wait',
       active: true,
       pendingCount,
-      primaryLabel: 'Annuler le transfert',
-      hint: 'La simulation est en pause le temps que le retardataire charge et vérifie le hash.',
+      primaryLabel: t('late.cancelTransfer'),
+      hint: t('late.transferHint'),
     };
   }
   if (serializing) {
     return {
-      text: 'Sérialisation de l’état de la partie…',
+      text: t('late.serializing'),
       tone: 'wait',
       active: true,
       pendingCount,
-      primaryLabel: 'Annuler le transfert',
-      hint: 'La simulation est brièvement en pause pour produire une sauvegarde exacte.',
+      primaryLabel: t('late.cancelTransfer'),
+      hint: t('late.serializingHint'),
     };
   }
   if (reserved) {
     return {
-      text: 'Place réservée : attente de la demande de join du pair…',
+      text: t('late.reserved'),
       tone: 'wait',
       active: true,
       pendingCount,
-      primaryLabel: 'Annuler la fenêtre',
-      hint: 'Le pair dispose de quelques secondes pour charger la sauvegarde.',
+      primaryLabel: t('late.cancelWindow'),
+      hint: t('late.reservedHint'),
     };
   }
   if (pendingCount > 0) {
     const first = view.pending[0];
-    const label = first ? `${first.name} (${age(first.requestedAt)})` : 'un joueur';
+    const label = first ? `${first.name} (${age(first.requestedAt)})` : t('late.unknownPlayer');
     return {
       text: view.autoAdmit
-        ? `Admission automatique : ${label}…`
-        : `${pendingCount} demande${pendingCount > 1 ? 's' : ''} en attente : ${label}.`,
+        ? t('late.pendingAuto', { name: label })
+        : tn(pendingCount, 'late.pending.one', 'late.pending.other', { name: label }),
       tone: view.autoAdmit ? 'wait' : 'info',
       active: false,
       pendingCount,
-      primaryLabel: view.autoAdmit ? 'Fermer aux retardataires' : 'Ouvrir aux retardataires',
-      hint: view.autoAdmit
-        ? 'Chaque joueur qui demande à rejoindre est admis automatiquement.'
-        : 'Choisissez « Autoriser » à côté du joueur, ou activez l’admission automatique.',
+      primaryLabel: view.autoAdmit ? t('late.close') : t('late.open'),
+      hint: view.autoAdmit ? t('late.pendingHintAuto') : t('late.pendingHintManual'),
     };
   }
   return {
-    text: view.autoAdmit
-      ? 'Ouvert aux retardataires : en attente d’un joueur…'
-      : 'Aucune demande de join pour l’instant.',
+    text: view.autoAdmit ? t('late.idleAuto') : t('late.idle'),
     tone: view.autoAdmit ? 'wait' : 'info',
     active: false,
     pendingCount: 0,
-    primaryLabel: view.autoAdmit ? 'Fermer aux retardataires' : 'Ouvrir aux retardataires',
-    hint: view.autoAdmit
-      ? 'Les nouveaux joueurs entrent sans validation, après vérification du hash.'
-      : 'Un joueur qui ouvre le code du salon verra « Rejoindre la partie en cours ».',
+    primaryLabel: view.autoAdmit ? t('late.close') : t('late.open'),
+    hint: view.autoAdmit ? t('late.idleHintAuto') : t('late.idleHint'),
   };
 }
 
 /** Compteur de joueurs humains/IA affiché dans le panneau hôte. */
 export function playerCountLabel(view: Pick<HostJoinView, 'players'>): string {
   const count = view.players.length;
-  return `${count} joueur${count > 1 ? 's' : ''} dans la partie`;
+  return tn(count, 'late.playerCount.one', 'late.playerCount.other');
 }
 
 /** Un pair découvert doit-il être proposé à l'hôte ? */
