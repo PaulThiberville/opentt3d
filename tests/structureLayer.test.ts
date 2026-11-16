@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as THREE from 'three';
 import { COMPANY_NONE, TILE_KIND_INDEX, type MapSnapshot } from '../src/engine/protocol';
 import { StructureLayer, inferStructures } from '../src/render/StructureLayer';
 
@@ -100,6 +101,48 @@ describe('StructureLayer', () => {
       to: { x: 8, y: 9 },
       length: 6,
     });
+  });
+
+  it('étend un pont hérité jusqu’aux culées et dessine des rampes continues', () => {
+    const map = makeMap(24, 16);
+    for (let x = 5; x <= 8; x += 1) {
+      const index = x + 5 * map.width;
+      map.kind[index] = TILE_KIND_INDEX.bridge;
+      map.flags[index] = (1 << 4) | 1;
+      map.heightMap[index] = 0;
+    }
+    for (const x of [3, 10]) {
+      map.kind[x + 5 * map.width] = TILE_KIND_INDEX.road;
+    }
+    const inferred = inferStructures(map);
+    expect(inferred).toHaveLength(1);
+    expect(inferred[0]).toMatchObject({
+      kind: 'bridge',
+      from: { x: 4, y: 5 },
+      to: { x: 9, y: 5 },
+      transport: 'road',
+      length: 6,
+      deckHeight: 6,
+    });
+
+    const layer = new StructureLayer();
+    try {
+      layer.setStructures([], map);
+      const base = layer.group.children.find((child) => child.name === 'structure-base');
+      if (!(base instanceof THREE.Mesh)) throw new Error('géométrie de base attendue');
+      const positions = base.geometry.getAttribute('position');
+      let minX = Number.POSITIVE_INFINITY;
+      let maxX = Number.NEGATIVE_INFINITY;
+      for (let i = 0; i < positions.count; i += 1) {
+        minX = Math.min(minX, positions.getX(i));
+        maxX = Math.max(maxX, positions.getX(i));
+      }
+      // Les rampes dépassent les culées : le tablier ne finit pas en falaise.
+      expect(minX).toBeLessThan(4);
+      expect(maxX).toBeGreaterThan(10);
+    } finally {
+      layer.dispose();
+    }
   });
 
   it('ignore les composantes en L et libère toute la géométrie', () => {
