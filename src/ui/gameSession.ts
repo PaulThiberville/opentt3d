@@ -105,6 +105,7 @@ import {
 } from './networkRunner';
 import { describeSelection } from './selection';
 import { describeBankruptcyAlert, describeFinanceView } from './financeView';
+import { TouchCameraGestures } from './touchGestures';
 import {
   bankruptcyWarning,
   financeCommand,
@@ -292,6 +293,7 @@ export class GameSession {
   private game: Game | null = null;
   private renderer: Renderer | null = null;
   private world: WorldView | null = null;
+  private touchGestures: TouchCameraGestures | null = null;
   private hud: Hud | null = null;
   private buildController: BuildController | null = null;
   private buildTool: BuildToolId | null = null;
@@ -524,6 +526,11 @@ export class GameSession {
     });
     this.attachEvents(game);
     this.attachListeners();
+    this.touchGestures = new TouchCameraGestures({
+      element: this.canvas,
+      camera: this.world.getCameraController(),
+    });
+    this.touchGestures.attach();
     this.createEngineBadge();
     this.createSaveChip();
     this.photoMode = this.createPhotoMode();
@@ -2636,6 +2643,8 @@ export class GameSession {
     this.introHint = null;
     this.photoMode?.dispose();
     this.photoMode = null;
+    this.touchGestures?.detach();
+    this.touchGestures = null;
     this.renderer?.stop();
     this.audio?.dispose();
     this.audio = null;
