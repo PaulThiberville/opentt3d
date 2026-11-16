@@ -456,14 +456,30 @@ describe('TerrainLayer', () => {
     layer.dispose();
   });
 
-  it('ne couvre que les tuiles d’eau avec le maillage d’eau', () => {
+  it('recouvre l’eau et une seule couronne de berge, sans déborder', () => {
     const map = makeMap(64, 64, true);
     const layer = new TerrainLayer();
     layer.setMap(map);
+    const isWater = (x: number, y: number): boolean =>
+      map.kind[y * map.width + x] === TILE_KIND_INDEX.water;
     let waterTiles = 0;
+    let ringTiles = 0;
     for (let y = 0; y < map.height; y += 1) {
       for (let x = 0; x < map.width; x += 1) {
-        if (map.kind[y * map.width + x] === TILE_KIND_INDEX.water) waterTiles += 1;
+        if (isWater(x, y)) {
+          waterTiles += 1;
+          continue;
+        }
+        let nearWater = false;
+        for (let dy = -1; dy <= 1 && !nearWater; dy += 1) {
+          for (let dx = -1; dx <= 1 && !nearWater; dx += 1) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= map.width || ny >= map.height) continue;
+            if (isWater(nx, ny)) nearWater = true;
+          }
+        }
+        if (nearWater) ringTiles += 1;
       }
     }
     let waterTriangles = 0;
@@ -471,7 +487,7 @@ describe('TerrainLayer', () => {
       const positions = water.geometry.getAttribute('position');
       waterTriangles += positions.count / 3;
       for (let index = 0; index < positions.count; index += 3) {
-        // Centroïde du triangle : doit rester dans une tuile d'eau.
+        // Centroïde du triangle : tuile d'eau ou berge immédiatement voisine.
         let cx = 0;
         let cz = 0;
         for (let corner = 0; corner < 3; corner += 1) {
@@ -480,10 +496,20 @@ describe('TerrainLayer', () => {
         }
         const tileX = Math.min(map.width - 1, Math.floor(cx));
         const tileY = Math.min(map.height - 1, Math.floor(cz));
-        expect(map.kind[tileY * map.width + tileX]).toBe(TILE_KIND_INDEX.water);
+        let nearWater = isWater(tileX, tileY);
+        for (let dy = -1; dy <= 1 && !nearWater; dy += 1) {
+          for (let dx = -1; dx <= 1 && !nearWater; dx += 1) {
+            const nx = tileX + dx;
+            const ny = tileY + dy;
+            if (nx < 0 || ny < 0 || nx >= map.width || ny >= map.height) continue;
+            if (isWater(nx, ny)) nearWater = true;
+          }
+        }
+        expect(nearWater).toBe(true);
       }
     }
-    expect(waterTriangles).toBe(waterTiles * 2);
+    expect(ringTiles).toBeGreaterThan(0);
+    expect(waterTriangles).toBe((waterTiles + ringTiles) * 2);
     layer.dispose();
   });
 
@@ -609,5 +635,79 @@ describe('budgets de terrain', () => {
     expect(budget.triangles).toBe(70 * 40 * 2);
     // 3 chunks de 32, 1 de 6 en X ; 1 chunk de 32 et 1 de 8 en Y.
     expect(budget.vertices).toBe(33 * 33 * 2 + 7 * 33 + 33 * 9 * 2 + 7 * 9);
+  });
+});
+
+describe('TerrainLayer : parois de rive (#205)', () => {
+  function wallMeshes(layer: TerrainLayer): Mesh[] {
+    return layer.group.children.filter(
+      (child): child is Mesh => child instanceof THREE.Mesh && child.name.startsWith('shore-wall-'),
+    );
+  }
+
+  function makeLockStep(): MapSnapshot {
+    const width = 24;
+    const height = 24;
+    const size = width * height;
+    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.grass);
+    const heightMap = new Uint8Array(size).fill(2);
+    for (let y = 8; y < 16; y += 1) {
+      kind[y * width + 8] = TILE_KIND_INDEX.water;
+      heightMap[y * width + 8] = 0;
+      kind[y * width + 9] = TILE_KIND_INDEX.lock;
+      heightMap[y * width + 9] = 4;
+      kind[y * width + 10] = TILE_KIND_INDEX.water;
+      heightMap[y * width + 10] = 4;
+    }
+    return {
+      width,
+      height,
+      kind,
+      heightMap,
+      owner: new Uint8Array(size).fill(255),
+      slope: new Uint8Array(size),
+      flags: new Uint8Array(size),
+      trackBits: new Uint8Array(size),
+    };
+  }
+
+  it('ferme la marche d’une écluse par une paroi verticale', () => {
+    const layer = new TerrainLayer();
+    layer.setMap(makeLockStep());
+    const walls = wallMeshes(layer);
+    expect(walls.length).toBeGreaterThan(0);
+    let min = Infinity;
+    let max = -Infinity;
+    for (const wall of walls) {
+      const positions = wall.geometry.getAttribute('position');
+      for (let index = 0; index < positions.count; index += 1) {
+        min = Math.min(min, positions.getY(index));
+        max = Math.max(max, positions.getY(index));
+      }
+      const material = wall.material as THREE.Material;
+      expect(material.transparent).toBe(false);
+      expect(wall.renderOrder).toBeLessThan(2);
+    }
+    // La paroi relie le bief bas au bief haut : plus de vide sombre.
+    expect(min).toBeLessThanOrEqual(waterSurfaceHeight(0) + 1e-6);
+    expect(max).toBeGreaterThanOrEqual(waterSurfaceHeight(4) + WATER_WAVE_AMPLITUDE - 1e-6);
+    layer.dispose();
+  });
+
+  it('ne crée aucune paroi sur une côte ou un canal au même niveau', () => {
+    const layer = new TerrainLayer();
+    layer.setMap(makeMap(64, 64, true));
+    expect(wallMeshes(layer)).toHaveLength(0);
+    layer.dispose();
+  });
+
+  it('libère les parois avec le reste du chunk', () => {
+    const layer = new TerrainLayer();
+    layer.setMap(makeLockStep());
+    expect(wallMeshes(layer).length).toBeGreaterThan(0);
+    layer.dispose();
+    expect(
+      layer.group.children.filter((child) => child.name.startsWith('shore-wall-')),
+    ).toHaveLength(0);
   });
 });
