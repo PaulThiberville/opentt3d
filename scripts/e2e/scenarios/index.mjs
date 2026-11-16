@@ -7,6 +7,7 @@ import { lateJoin } from './late-join.mjs';
 import { netLocal } from './net-local.mjs';
 import { photoMode } from './photo.mjs';
 import { reports } from './reports.mjs';
+import { roadSlope } from './roadSlope.mjs';
 import { saveLoad } from './save-load.mjs';
 import { signals } from './signals.mjs';
 import { soloMock } from './solo.mjs';
@@ -17,6 +18,7 @@ export const scenarios = [
   signals,
   reports,
   photoMode,
+  roadSlope,
   saveLoad,
   netLocal,
   lateJoin,

@@ -8,7 +8,11 @@ import {
   trackGroundHeight,
   roadTileLayout,
   roadMarkingPaths,
+  ROAD_LIFT,
+  SIDEWALK_LIFT,
+  MARK_LIFT,
 } from '../src/render/TrackLayer';
+import { buildRoadSurface } from '../src/render/roadSurface';
 import {
   TRACK_CONNECT,
   TRACK_CORNER,
@@ -662,6 +666,293 @@ describe('géométrie des carrefours routiers (#181)', () => {
       // Avant #181 : ~45 triangles/tuile en détail, ~14 en base. La chaussée
       // pleine tuile supprime les places et bras redondants.
       expect(layer.triangleCount / tiles).toBeLessThan(32);
+    } finally {
+      layer.dispose();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #202 — pas de dévers : la chaussée est horizontale dans sa largeur et ne
+// s'incline que dans le sens de la longueur. Les hauteurs sont continues aux
+// jonctions, et les véhicules restent posés sur l'axe médian.
+// ---------------------------------------------------------------------------
+
+/** Carte à très forte pente transversale (2 niveaux par rangée) et longitudinale. */
+function slopedMap(shape: 'straight' | 'cross'): MapSnapshot {
+  const map = makeMap(16, 16);
+  for (let y = 0; y < map.height; y += 1) {
+    for (let x = 0; x < map.width; x += 1) {
+      map.heightMap[y * map.width + x] = Math.min(15, 2 + y * 2 + Math.floor(x / 2));
+    }
+  }
+  if (shape === 'straight') {
+    for (let x = 2; x <= 13; x += 1) road(map, x, 4);
+  } else {
+    road(map, 4, 4);
+    for (let x = 2; x <= 6; x += 1) road(map, x, 4);
+    for (let y = 2; y <= 6; y += 1) road(map, 4, y);
+  }
+  return map;
+}
+
+/**
+ * Marche d'un niveau le long d'une route : c'est le dévers minimal qu'un
+ * terrain OpenTTD puisse produire (un seul rang surélevé). L'écart de coins
+ * en travers vaut alors 0,25 unité monde.
+ */
+function steppedMap(shape: 'straight' | 'cross'): MapSnapshot {
+  const map = makeMap(16, 16);
+  map.heightMap.fill(4);
+  if (shape === 'straight') {
+    for (let x = 2; x <= 13; x += 1) {
+      road(map, x, 4);
+      map.heightMap[3 * map.width + x] = 5;
+    }
+  } else {
+    road(map, 4, 4);
+    for (let x = 2; x <= 6; x += 1) road(map, x, 4);
+    for (let y = 2; y <= 6; y += 1) road(map, 4, y);
+    for (let y = 1; y <= 7; y += 1) map.heightMap[y * map.width + 3] = 5;
+  }
+  return map;
+}
+
+describe('chaussée sans dévers (#202)', () => {
+  it('garde les deux bords de la largeur à la même hauteur, quelle que soit la pente', () => {
+    const map = slopedMap('straight');
+    const plan = planAt(map, 5, 4);
+    expect(plan).not.toBeNull();
+    if (!plan) return;
+    const surface = buildRoadSurface(map, plan);
+    expect(surface.mode).toBe('straight');
+    expect(surface.axis).toBe('x');
+
+    // Pente transversale réelle : les deux bords du terrain diffèrent de plus
+    // d'une demi-unité monde, et pourtant la chaussée reste plate.
+    const groundNorth = sampleHeightWorld(map, 5.5, 4);
+    const groundSouth = sampleHeightWorld(map, 5.5, 5);
+    expect(Math.abs(groundNorth - groundSouth)).toBeGreaterThan(0.5);
+
+    for (let step = 0; step <= 10; step += 1) {
+      const x = 5 + step / 10;
+      const north = surface.heightAt(x, 4 + 0.08);
+      const south = surface.heightAt(x, 4 + 0.92);
+      expect(north).toBeCloseTo(south, 12);
+    }
+
+    // La pente longitudinale, elle, suit bien le terrain entre les deux bords.
+    const west = surface.heightAt(5, 4.5);
+    const east = surface.heightAt(6, 4.5);
+    expect(east).not.toBeCloseTo(west, 6);
+    expect(east - west).toBeCloseTo(
+      sampleHeightWorld(map, 6, 4.5) - sampleHeightWorld(map, 5, 4.5),
+      9,
+    );
+  });
+
+  it('garde les véhicules posés sur la chaussée et le sol hors de la dalle', () => {
+    const map = steppedMap('straight');
+    for (let tileX = 2; tileX <= 13; tileX += 1) {
+      const plan = planAt(map, tileX, 4);
+      expect(plan).not.toBeNull();
+      if (!plan) continue;
+      const surface = buildRoadSurface(map, plan);
+      for (const offset of [0.05, 0.25, 0.5, 0.75, 0.95]) {
+        const x = tileX + offset;
+        // Les moteurs posent les véhicules à `sampleHeightWorld + 0.08`. La
+        // chaussée est calée sous le bord haut : l'écart reste faible (les
+        // roues mordent la dalle de quelques centimètres au plus).
+        const roadTop = surface.heightAt(x, 4.5) + ROAD_LIFT;
+        const vehicleBase = sampleHeightWorld(map, x, 4.5) + 0.08;
+        expect(roadTop - vehicleBase).toBeGreaterThanOrEqual(-0.01);
+        expect(roadTop - vehicleBase).toBeLessThan(0.055);
+
+        // Hors de la fine bande amont reprise par le trottoir, le terrain ne
+        // traverse plus la chaussée (aucun trou dans le revêtement).
+        for (const z of [4.14, 4.3, 4.5, 4.7, 4.86]) {
+          expect(roadTop).toBeGreaterThanOrEqual(sampleHeightWorld(map, x, z) - 1e-9);
+        }
+      }
+    }
+
+    // Une route nord-sud suit la même règle sur son axe x = tuile + 0,5.
+    const vertical = steppedMap('cross');
+    const plan = planAt(vertical, 4, 5);
+    expect(plan?.axis).toBe('y');
+    if (!plan) return;
+    const surface = buildRoadSurface(vertical, plan);
+    for (const offset of [0.1, 0.5, 0.9]) {
+      expect(surface.heightAt(4.1, 5 + offset)).toBeCloseTo(surface.heightAt(4.9, 5 + offset), 12);
+      const roadTop = surface.heightAt(4.5, 5 + offset) + ROAD_LIFT;
+      const vehicleBase = sampleHeightWorld(vertical, 4.5, 5 + offset) + 0.08;
+      expect(roadTop - vehicleBase).toBeGreaterThanOrEqual(-0.01);
+      expect(roadTop - vehicleBase).toBeLessThan(0.055);
+    }
+  });
+
+  it('raccorde exactement les tuiles voisines, y compris aux carrefours', () => {
+    const map = slopedMap('straight');
+    for (let tileX = 2; tileX < 13; tileX += 1) {
+      const left = planAt(map, tileX, 4);
+      const right = planAt(map, tileX + 1, 4);
+      expect(left).not.toBeNull();
+      expect(right).not.toBeNull();
+      if (!left || !right) continue;
+      const leftSurface = buildRoadSurface(map, left);
+      const rightSurface = buildRoadSurface(map, right);
+      for (const z of [4.1, 4.5, 4.9]) {
+        expect(leftSurface.heightAt(tileX + 1, z)).toBeCloseTo(
+          rightSurface.heightAt(tileX + 1, z),
+          12,
+        );
+      }
+    }
+
+    const cross = slopedMap('cross');
+    const junction = planAt(cross, 4, 4);
+    expect(junction?.shape).toBe('cross');
+    if (!junction) return;
+    const surface = buildRoadSurface(cross, junction);
+    expect(surface.mode).toBe('junction');
+
+    // Chaque bord connecté est plat et raccordé à la tuile droite voisine.
+    const arms: Array<{
+      bit: number;
+      boundary: [number, number];
+      samples: Array<[number, number]>;
+      neighbour: [number, number];
+    }> = [
+      {
+        bit: TRACK_CONNECT.west,
+        boundary: [4, 4.5],
+        samples: [
+          [4, 4.15],
+          [4, 4.5],
+          [4, 4.85],
+        ],
+        neighbour: [3, 4],
+      },
+      {
+        bit: TRACK_CONNECT.east,
+        boundary: [5, 4.5],
+        samples: [
+          [5, 4.15],
+          [5, 4.5],
+          [5, 4.85],
+        ],
+        neighbour: [5, 4],
+      },
+      {
+        bit: TRACK_CONNECT.north,
+        boundary: [4.5, 4],
+        samples: [
+          [4.15, 4],
+          [4.5, 4],
+          [4.85, 4],
+        ],
+        neighbour: [4, 3],
+      },
+      {
+        bit: TRACK_CONNECT.south,
+        boundary: [4.5, 5],
+        samples: [
+          [4.15, 5],
+          [4.5, 5],
+          [4.85, 5],
+        ],
+        neighbour: [4, 5],
+      },
+    ];
+
+    for (const arm of arms) {
+      const edge = surface.sideHeight(arm.bit);
+      for (const [x, z] of arm.samples) {
+        expect(surface.heightAt(x, z)).toBeCloseTo(edge, 12);
+      }
+      const other = planAt(cross, arm.neighbour[0], arm.neighbour[1]);
+      expect(other).not.toBeNull();
+      if (!other) continue;
+      const otherSurface = buildRoadSurface(cross, other);
+      const [bx, bz] = arm.boundary;
+      expect(surface.heightAt(bx, bz)).toBeCloseTo(otherSurface.heightAt(bx, bz), 12);
+    }
+
+    // Au centre du carrefour, la chaussée coïncide avec le sol des véhicules.
+    expect(surface.heightAt(4.5, 4.5)).toBeCloseTo(sampleHeightWorld(cross, 4.5, 4.5), 9);
+  });
+
+  it('couvre le carrefour sans trou et sans facette visible de dessus', () => {
+    const map = slopedMap('cross');
+    const layer = new TrackLayer();
+    layer.setMap(map);
+    layer.setQuality('high');
+    try {
+      const triangles = chunkTriangles(layer, 'track-detail');
+      const plan = planAt(map, 4, 4);
+      expect(plan?.shape).toBe('cross');
+      if (!plan) return;
+      const surface = buildRoadSurface(map, plan);
+      for (const fx of [0.15, 0.35, 0.65, 0.85]) {
+        for (const fz of [0.15, 0.35, 0.65, 0.85]) {
+          const x = 4 + fx;
+          const z = 4 + fz;
+          const expected = surface.heightAt(x, z) + ROAD_LIFT;
+          const heights = surfaceHeights(triangles, x, z);
+          expect(
+            heights.some((height) => Math.abs(height - expected) < 1e-3),
+            `carrefour ${fx},${fz}`,
+          ).toBe(true);
+        }
+      }
+    } finally {
+      layer.dispose();
+    }
+  });
+
+  it('aligne trottoirs et marquages sur le profil de la chaussée', () => {
+    const map = slopedMap('straight');
+    const plan = planAt(map, 5, 4);
+    expect(plan).not.toBeNull();
+    if (!plan) return;
+    const surface = buildRoadSurface(map, plan);
+
+    const layer = new TrackLayer();
+    layer.setMap(map);
+    layer.setQuality('high');
+    try {
+      const triangles = chunkTriangles(layer, 'track-detail');
+
+      // Le trottoir nord est plat dans sa largeur et suit la pente
+      // longitudinale : deux points de même abscisse ont la même hauteur.
+      const sidewalkA = surface.heightAt(5.5, 4.03) + SIDEWALK_LIFT;
+      const sidewalkB = surface.heightAt(5.5, 4.08) + SIDEWALK_LIFT;
+      expect(sidewalkA).toBeCloseTo(sidewalkB, 12);
+      for (const [x, z] of [
+        [5.5, 4.03],
+        [5.5, 4.08],
+      ] as const) {
+        const expected = surface.heightAt(x, z) + SIDEWALK_LIFT;
+        expect(
+          surfaceHeights(triangles, x, z).some((height) => Math.abs(height - expected) < 1e-3),
+          `trottoir ${x},${z}`,
+        ).toBe(true);
+      }
+
+      // Un tiret de marquage est posé exactement au-dessus du profil.
+      const path = roadMarkingPaths(plan)[0];
+      expect(path).toBeDefined();
+      if (!path) return;
+      const first = path[0];
+      const last = path[path.length - 1];
+      if (!first || !last) return;
+      const x = (first.x + last.x) / 2;
+      const z = (first.z + last.z) / 2;
+      const expected = surface.heightAt(x, z) + MARK_LIFT;
+      expect(
+        surfaceHeights(triangles, x, z).some((height) => Math.abs(height - expected) < 1e-3),
+        `marquage ${x},${z}`,
+      ).toBe(true);
     } finally {
       layer.dispose();
     }
