@@ -101,6 +101,59 @@ describe('mapping JSON → WorldSnapshot', () => {
     expect(world.depots).toEqual([]);
   });
 
+  it('mappe le niveau IA et les désastres (#168/#172)', () => {
+    const world = parseWorldJson(
+      engineJson({
+        companies: [
+          {
+            id: 2,
+            name: 'Ligne du Lac',
+            isAI: true,
+            aiLevel: 3,
+            vehicles: 4,
+            stations: 2,
+          },
+          { id: 0, name: 'Humaine' },
+        ],
+        disasters: [
+          {
+            id: 5,
+            kind: 'fire',
+            x: 12.5,
+            y: 8.5,
+            company: 2,
+            industry: 3,
+            severity: 2,
+            startedTick: 90,
+            remainingDays: 4,
+          },
+          { id: 6, kind: 'inconnu', vehicle: 7, severity: 9 },
+        ],
+        events: [
+          { type: 'disaster_started', disaster: 5, kind: 'fire', tick: 90 },
+          { type: 'disaster_ended', disaster: 5, tick: 120 },
+        ],
+      }),
+    );
+
+    expect(world.companies[0]).toMatchObject({ isAI: true, aiLevel: 3 });
+    expect(world.companies[1]?.aiLevel).toBeUndefined();
+    expect(world.disasters).toHaveLength(2);
+    expect(world.disasters?.[0]).toMatchObject({
+      id: 5,
+      kind: 'fire',
+      company: 2,
+      industry: 3,
+      severity: 2,
+      remainingDays: 4,
+    });
+    expect(world.disasters?.[1]).toMatchObject({ kind: 'fire', severity: 3 });
+    expect(world.events).toEqual([
+      { type: 'disaster_started', disaster: 5, kind: 'fire', tick: 90 },
+      { type: 'disaster_ended', disaster: 5, tick: 120 },
+    ]);
+  });
+
   it('mappe les entités du pont', () => {
     const world = parseWorldJson(
       engineJson({

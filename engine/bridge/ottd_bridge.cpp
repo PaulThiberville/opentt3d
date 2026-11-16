@@ -36,6 +36,7 @@
 #include "depot_base.h"
 #include "depot_map.h"
 #include "depot_type.h"
+#include "disaster_vehicle.h"
 #include "direction_func.h"
 #include "direction_type.h"
 #include "elrail_func.h"
@@ -1560,6 +1561,28 @@ uint32_t CountProtocolDepots()
 	return count;
 }
 
+/**
+ * Expose les véhicules de désastre d'OpenTTD (#172) avec un type stable du
+ * protocole. Les ombres, rotors et sous-marins n'ont pas d'équivalent visuel
+ * dans le rendu OpenTT3D et sont ignorés ; les aéronefs et UFO deviennent des
+ * « aircraft_crash ». Les vrais incendies restent simulés par le mock, OpenTTD
+ * ne modélisant que des catastrophes scénarisées.
+ */
+const char *DisasterKindName(DisasterSubType subtype)
+{
+	switch (subtype) {
+		case ST_ZEPPELINER:
+		case ST_SMALL_UFO:
+		case ST_BIG_UFO:
+		case ST_BIG_UFO_DESTROYER:
+		case ST_AIRPLANE:
+		case ST_HELICOPTER:
+			return "aircraft_crash";
+		default:
+			return nullptr;
+	}
+}
+
 /** Sérialise les entités et l'économie dans `out` (JSON, sans la carte). */
 void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 {
@@ -1628,14 +1651,15 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 	AppendJsonString(out, LandscapeName(_settings_game.game_creation.landscape));
 	out += fmt::format(
 		",\"startYear\":{},\"difficulty\":{},\"aiCompanies\":{},\"towns\":{},\"industries\":{},"
-		"\"seed\":{},\"mapSize\":{},\"gameName\":",
+		"\"seed\":{},\"mapSize\":{},\"disasters\":{},\"gameName\":",
 		_settings_game.game_creation.starting_year.base(),
 		active.difficulty.value_or(-1),
 		active.ai_companies.value_or(0),
 		active.towns.value_or(-1),
 		active.industries.value_or(-1),
 		_settings_game.game_creation.generation_seed,
-		Map::SizeX() == Map::SizeY() ? Map::SizeX() : 0);
+		Map::SizeX() == Map::SizeY() ? Map::SizeX() : 0,
+		_settings_game.difficulty.disasters ? "true" : "false");
 	AppendJsonString(out, active.game_name.value_or(""));
 	out += "}";
 
@@ -1665,10 +1689,15 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 		AppendJsonString(out, CompanyName(c));
 		out += ",\"president\":";
 		AppendJsonString(out, PresidentName(c));
+		/* Niveau IA 1..3 (#168) : dérivé de la vitesse des concurrents.
+		 * OpenTTD pilote toutes les IA avec le même script, la difficulté
+		 * module donc leur rythme commun. */
+		const int competitor_speed = _settings_game.difficulty.competitor_speed;
+		const int ai_level = std::max(1, std::min(3, 1 + (competitor_speed >= 4 ? 2 : competitor_speed >= 3 ? 1 : 0)));
 		out += fmt::format(
 			",\"colour\":{},\"money\":{},\"loan\":{},\"maxLoan\":{},\"value\":{},\"income\":{},\"expenses\":{},"
 			"\"vehicles\":{},\"stations\":{},\"isAI\":{},\"isLocal\":{},\"bankrupt\":{},"
-			"\"monthsOfBankruptcy\":{}}}",
+			"\"monthsOfBankruptcy\":{},\"aiLevel\":{}}}",
 			static_cast<unsigned>(c->colour),
 			static_cast<int64_t>(c->money),
 			static_cast<int64_t>(c->current_loan),
@@ -1680,7 +1709,8 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 			c->is_ai ? "true" : "false",
 			c->index == _local_company ? "true" : "false",
 			c->months_of_bankruptcy > 0 ? "true" : "false",
-			static_cast<unsigned>(c->months_of_bankruptcy));
+			static_cast<unsigned>(c->months_of_bankruptcy),
+			c->is_ai ? ai_level : 0);
 	}
 	out.push_back(']');
 
@@ -1971,6 +2001,23 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 			SubsidySourceKind(subsidy->src), SubsidySourceKind(subsidy->dst),
 			static_cast<unsigned>(subsidy->remaining),
 			Company::IsValidID(subsidy->awarded) ? subsidy->awarded.base() : -1);
+	}
+	out += "],";
+	/* --- Désastres actifs (#172) ------------------------------------------ */
+	out += "\"disasters\":[";
+	bool first_disaster = true;
+	for (const DisasterVehicle *v : DisasterVehicle::Iterate()) {
+		const char *kind = DisasterKindName(static_cast<DisasterSubType>(v->subtype));
+		if (kind == nullptr || v->tile == INVALID_TILE) continue;
+		if (!first_disaster) out.push_back(',');
+		first_disaster = false;
+		const uint8_t owner = TileOwnerByte(v->tile);
+		out += fmt::format(
+			"{{\"id\":{},\"kind\":\"{}\",\"x\":{:.2f},\"y\":{:.2f},\"company\":{},"
+			"\"severity\":{},\"startedTick\":{},\"remainingDays\":1}}",
+			v->index.base(), kind,
+			TileX(v->tile) + 0.5, TileY(v->tile) + 0.5,
+			static_cast<unsigned>(owner), v->subtype == ST_BIG_UFO ? 3 : 2, tick);
 	}
 	out += "],";
 	out += "\"news\":[],\"events\":[]}";

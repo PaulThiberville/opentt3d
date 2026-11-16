@@ -542,6 +542,8 @@ export class ReportsPanel {
       t('finance.ranking.rank'),
       t('finance.ranking.company'),
       t('finance.ranking.value'),
+      t('finance.ranking.network'),
+      t('finance.ranking.result'),
       t('finance.ranking.share'),
     ]) {
       headRow.append(el('th', { text: label, attrs: { scope: 'col' } }));
@@ -554,6 +556,8 @@ export class ReportsPanel {
         el('td', { text: String(row.rank) }),
         el('td', { className: 'hud-report-company' }),
         el('td', { className: 'hud-report-number', text: row.valueLabel }),
+        el('td', { className: 'hud-report-network', text: row.networkLabel }),
+        el('td', { className: 'hud-report-number', text: row.resultLabel }),
         el('td', { className: 'hud-report-share' }),
       );
       const companyCell = tr.children[1];
@@ -566,6 +570,14 @@ export class ReportsPanel {
             el('span', { className: 'hud-report-badge', text: t('finance.ranking.local') }),
           );
         }
+        if (row.isAI) {
+          companyCell.append(
+            el('span', {
+              className: 'hud-report-badge is-ai',
+              text: t('finance.ranking.aiLevel', { level: row.aiLevel ?? 1 }),
+            }),
+          );
+        }
         if (row.bankrupt) {
           companyCell.append(
             el('span', {
@@ -575,7 +587,7 @@ export class ReportsPanel {
           );
         }
       }
-      const shareCell = tr.children[3];
+      const shareCell = tr.children[5];
       if (shareCell instanceof HTMLElement) {
         shareCell.append(
           createBarMeter(row.share ?? 0, 100, {
@@ -607,10 +619,16 @@ export class ReportsPanel {
       statCard(t('stats.summary.transported'), view.totalTransportedLabel),
       statCard(t('stats.summary.towns'), formatInt(view.townCount)),
       statCard(t('stats.summary.population'), view.totalPopulationLabel),
+      statCard(
+        t('stats.summary.disasters'),
+        view.activeDisasterCountLabel,
+        view.activeDisasterCount > 0 ? 'bad' : undefined,
+      ),
     );
     panel.append(stats);
     if (view.alerts.length > 0) panel.append(this.renderAlerts(view.alerts, 'stats'));
     panel.append(this.renderMarket(view));
+    panel.append(this.renderDisasters(view));
     panel.append(this.renderIndustries(view));
     panel.append(this.renderTowns(view));
     panel.append(el('p', { className: 'hud-report-hint', text: view.hint }));
@@ -644,6 +662,14 @@ export class ReportsPanel {
           el('span', { className: 'hud-report-badge', text: t('finance.ranking.local') }),
         );
       }
+      if (row.isAI) {
+        identity.append(
+          el('span', {
+            className: 'hud-report-badge is-ai',
+            text: t('finance.ranking.aiLevel', { level: row.aiLevel ?? 1 }),
+          }),
+        );
+      }
       head.append(
         identity,
         el('span', { className: 'hud-report-bar-value', text: row.shareLabel }),
@@ -655,6 +681,46 @@ export class ReportsPanel {
           tone: row.isLocal ? 'good' : 'neutral',
         }),
       );
+      list.append(item);
+    }
+    section.append(list);
+    return section;
+  }
+
+  private renderDisasters(view: StatsPanelView): HTMLElement {
+    const section = el('section', {
+      className: 'hud-report-section',
+      attrs: { 'aria-labelledby': 'hud-report-disasters-title' },
+    });
+    section.append(sectionHeading('hud-report-disasters-title', t('stats.disasters.title')));
+    if (view.disasters.length === 0) {
+      section.append(emptyLine(t('stats.disasters.empty')));
+      return section;
+    }
+    const list = el('ul', {
+      className: 'hud-report-data-list',
+      attrs: { 'aria-label': t('stats.disasters.title') },
+    });
+    for (const row of view.disasters) {
+      const item = el('li', { className: 'hud-report-data-row is-disaster' });
+      const text = el('div', { className: 'hud-report-data-text' });
+      text.append(
+        el('strong', { text: row.kindLabel }),
+        el('span', { className: 'hud-report-data-detail', text: row.location }),
+        el('span', { className: 'hud-report-data-detail', text: row.detail }),
+        ...(row.companyLabel
+          ? [el('span', { className: 'hud-report-data-detail', text: row.companyLabel })]
+          : []),
+      );
+      const numbers = el('div', { className: 'hud-report-data-numbers' });
+      numbers.append(
+        createBarMeter(Math.min(100, row.severity * 33.34), 100, {
+          label: `${row.kindLabel} : ${row.detail}`,
+          tone: 'bad',
+        }),
+        el('span', { className: 'hud-report-share-value', text: row.remainingLabel }),
+      );
+      item.append(text, numbers);
       list.append(item);
     }
     section.append(list);

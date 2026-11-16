@@ -78,6 +78,7 @@ export interface Ot3sOptions {
   difficulty?: number;
   aiCompanies?: number;
   climate?: number;
+  disasters?: boolean;
   payload?: Uint8Array;
 }
 
@@ -102,14 +103,20 @@ export function ot3sSaveBytes(options: Ot3sOptions = {}): Uint8Array {
   view.setUint32(28, 0, true);
 
   const metadata = 32;
-  const flags = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 6);
+  const flags =
+    (1 << 0) |
+    (1 << 1) |
+    (1 << 2) |
+    (1 << 3) |
+    (1 << 6) |
+    (options.disasters === undefined ? 0 : 1 << 7);
   bytes[metadata] = flags;
   bytes[metadata + 1] = options.climate ?? 0;
   view.setUint32(metadata + 4, options.startYear ?? 1950, true);
   view.setUint32(metadata + 8, options.difficulty ?? 1, true);
   view.setUint32(metadata + 12, options.aiCompanies ?? 1, true);
   view.setUint32(metadata + 24, options.mapSize ?? 128, true);
-  bytes[metadata + 28] = 0;
+  bytes[metadata + 28] = options.disasters === true ? 1 : 0;
   view.setUint32(metadata + 32, name.length, true);
   bytes.set(name, metadata + 36);
   view.setUint32(metadata + 36 + name.length, 0, true);

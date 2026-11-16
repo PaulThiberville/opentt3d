@@ -19,6 +19,7 @@ import {
   TRACK_BIT_CROSSING_RAIL,
   type CompanySnapshot,
   type DepotSnapshot,
+  type DisasterKind,
   type EconomySnapshot,
   type EngineCommand,
   type EngineDriver,
@@ -208,6 +209,12 @@ interface MockCompany {
   vehicleCount: number;
   stationCount: number;
   interestPaid: number;
+  /** Niveau de l'IA 1..3 (#168), absent/inutile pour une entreprise humaine. */
+  aiLevel?: number;
+  /** Jour de simulation du prochain chantier IA (#168). */
+  aiNextBuildDay?: number;
+  /** Paires de villes déjà reliées par cette IA, sous la forme « a:b ». */
+  aiLinks?: string[];
 }
 
 interface MockTown {
@@ -284,6 +291,21 @@ interface MockNews {
   text: string;
 }
 
+/** Désastre actif du mock (#172). */
+interface MockDisaster {
+  id: number;
+  kind: DisasterKind;
+  x: number;
+  y: number;
+  company: number;
+  vehicle?: number;
+  town?: number;
+  industry?: number;
+  severity: number;
+  startedTick: number;
+  remainingDays: number;
+}
+
 /**
  * Pont ou tunnel construit par le mock. `underlay` mémorise les types de
  * tuiles d'origine pour restaurer exactement l'eau ou l'herbe à la démolition.
@@ -323,6 +345,14 @@ interface MockWorld {
   interestRate: number;
   /** Pas de prêt/remboursement (#165). */
   loanInterval: number;
+
+  /** Catastrophes activées (#172) ; désactivées par défaut. */
+  disastersEnabled: boolean;
+  disasters: MockDisaster[];
+  /** Prochain jour de simulation où un désastre peut apparaître. */
+  nextDisasterDay: number;
+  /** Compteur d'identifiants de désastres, stable en sauvegarde. */
+  nextDisasterId: number;
 
   kind: Uint8Array;
   heightMap: Uint8Array;
@@ -409,6 +439,11 @@ interface SerializedWorld {
   })[];
   subsidies?: MockSubsidy[];
   news: MockNews[];
+  /** Désastres (#172) ; absents des sauvegardes antérieures. */
+  disastersEnabled?: boolean;
+  disasters?: MockDisaster[];
+  nextDisasterDay?: number;
+  nextDisasterId?: number;
 }
 
 const TOWN_NAMES = ['Valmont', 'Riveclaire', 'Saint-Aubin', 'Bellecombe', 'Miraval', 'Peyrolles'];
@@ -874,6 +909,8 @@ class WorldBuilder {
   readonly structures: MockStructure[] = [];
   readonly vehicles: MockVehicle[] = [];
   readonly subsidies: MockSubsidy[] = [];
+  /** Option #172 : les désastres sont désactivés par défaut. */
+  readonly disastersEnabled: boolean;
 
   constructor(options: NewGameOptions, seed: number) {
     this.seed = seed;
@@ -882,6 +919,7 @@ class WorldBuilder {
     this.startYear = clampInt(options.startYear ?? 1950, 1, 9999);
     this.difficulty = Math.min(3, Math.max(0, Math.round(options.difficulty ?? 1)));
     this.economy = difficultyPreset(this.difficulty);
+    this.disastersEnabled = options.disasters === true;
     this.rng = new Prng(seed ^ 0x51ed270b);
     const size = this.width * this.height;
     this.kind = new Uint8Array(size);
@@ -944,35 +982,60 @@ class WorldBuilder {
           vehicleCount: 0,
           stationCount: 0,
           interestPaid: 0,
+          aiLevel: clampInt(
+            1 + i + (this.difficulty >= 3 ? 2 : this.difficulty >= 2 ? 1 : 0),
+            1,
+            3,
+          ),
+          aiNextBuildDay:
+            2 +
+            (3 -
+              clampInt(1 + i + (this.difficulty >= 3 ? 2 : this.difficulty >= 2 ? 1 : 0), 1, 3)) *
+              3 +
+            id,
+          aiLinks: [],
         });
       }
     } else {
-      this.companies.push(
-        {
-          id: 0,
-          name: 'Transports du Nord',
-          president: 'A. Martin',
-          colour: COMPANY_COLOURS[0],
-          money: 2_400_000,
-          loan: this.economy.startLoan,
-          maxLoan: this.economy.maxLoan,
-          value: 2_400_000 + this.economy.startLoan,
-          income: 0,
-          expenses: 0,
-          isAI: false,
-          isLocal: true,
-          bankrupt: false,
-          monthsOfBankruptcy: 0,
-          deliveredToday: 0,
-          vehicleCount: 0,
-          stationCount: 0,
-          interestPaid: 0,
-        },
-        {
-          id: 1,
-          name: 'Ligne du Lac',
-          president: 'IA · C. Dubois',
-          colour: COMPANY_COLOURS[1],
+      this.companies.push({
+        id: 0,
+        name: 'Transports du Nord',
+        president: 'A. Martin',
+        colour: COMPANY_COLOURS[0],
+        money: 2_400_000,
+        loan: this.economy.startLoan,
+        maxLoan: this.economy.maxLoan,
+        value: 2_400_000 + this.economy.startLoan,
+        income: 0,
+        expenses: 0,
+        isAI: false,
+        isLocal: true,
+        bankrupt: false,
+        monthsOfBankruptcy: 0,
+        deliveredToday: 0,
+        vehicleCount: 0,
+        stationCount: 0,
+        interestPaid: 0,
+      });
+
+      /* Solo sans profils explicites : le nombre d'IA demandé s'applique aussi.
+       * Sans option (`aiCompanies` absent), on conserve l'IA de démonstration
+       * historique pour ne pas casser les parties et captures existantes. */
+      const aiNames = ['Ligne du Lac', 'Express Côtier', 'Route des Cimes'];
+      const aiPresidents = ['IA · C. Dubois', 'IA · M. Lefèvre', 'IA · S. Bernard'];
+      const aiCount = clampInt(options.aiCompanies ?? 1, 0, aiNames.length);
+      for (let i = 0; i < aiCount; i += 1) {
+        const id = this.companies.length;
+        const level = clampInt(
+          1 + i + (this.difficulty >= 3 ? 2 : this.difficulty >= 2 ? 1 : 0),
+          1,
+          3,
+        );
+        this.companies.push({
+          id,
+          name: aiNames[i] ?? `IA ${i + 1}`,
+          president: aiPresidents[i] ?? `IA · Joueur ${i + 1}`,
+          colour: COMPANY_COLOURS[i + 1] ?? (i + 1) % 16,
           money: 1_850_000,
           loan: Math.round(this.economy.startLoan * 0.65),
           maxLoan: Math.round(this.economy.maxLoan * 0.8),
@@ -987,8 +1050,11 @@ class WorldBuilder {
           vehicleCount: 0,
           stationCount: 0,
           interestPaid: 0,
-        },
-      );
+          aiLevel: level,
+          aiNextBuildDay: 2 + (3 - level) * 3 + id,
+          aiLinks: [],
+        });
+      }
     }
   }
 
@@ -1784,6 +1850,10 @@ class WorldBuilder {
       difficulty: this.difficulty,
       interestRate: this.economy.interestRate,
       loanInterval: DEFAULT_LOAN_INTERVAL,
+      disastersEnabled: this.disastersEnabled,
+      disasters: [],
+      nextDisasterDay: this.disastersEnabled ? 14 + this.difficulty * 6 : -1,
+      nextDisasterId: 0,
       kind: this.kind,
       heightMap: this.heightMap,
       owner: this.owner,
@@ -4120,6 +4190,408 @@ function addWaiting(station: MockStation, cargo: string, amount: number): void {
   else station.waiting.push({ cargo, amount: Math.min(2_000, amount) });
 }
 
+/* ------------------------------------------------------------------------- */
+/*  IA concurrentes (#168)                                                   */
+/* ------------------------------------------------------------------------- */
+
+function aiLinkKey(a: number, b: number): string {
+  return a <= b ? `${a}:${b}` : `${b}:${a}`;
+}
+
+/** Lecture sûre du type de tuile dans un monde déjà construit. */
+function worldKindAt(world: MockWorld, x: number, y: number): number {
+  if (!inBounds(world.width, world.height, x, y)) return K.void;
+  return world.kind[tileIndex(x, y, world.width)] ?? K.void;
+}
+
+/** Tuile susceptible de porter une route ou une petite gare routière. */
+function aiTileUsable(world: MockWorld, x: number, y: number): boolean {
+  if (!inBounds(world.width, world.height, x, y)) return false;
+  const kind = worldKindAt(world, x, y);
+  return kind === K.grass || kind === K.clear || kind === K.trees || kind === K.rough;
+}
+
+/**
+ * Sites candidats autour d'une ville, du côté de l'autre ville. Les tuiles de
+ * ville, d'industrie et d'eau sont écartées : l'IA n'essaie pas de démolir.
+ */
+function aiStationSites(world: MockWorld, town: MockTown, toward: MockTown): P2[] {
+  const cx = Math.floor(town.x);
+  const cy = Math.floor(town.y);
+  const dx = toward.x - town.x;
+  const dy = toward.y - town.y;
+  const sx = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) || 1 : 0;
+  const sy = sx === 0 ? Math.sign(dy) || 1 : 0;
+  const sites: P2[] = [];
+  for (let radius = 5; radius <= 14 && sites.length < 8; radius += 1) {
+    for (let lateral = -4; lateral <= 4 && sites.length < 8; lateral += 1) {
+      const x = cx + sx * radius + (sy === 0 ? 0 : lateral);
+      const y = cy + sy * radius + (sx === 0 ? 0 : lateral);
+      if (world.owner[tileIndex(x, y, world.width)] !== COMPANY_NONE) continue;
+      if (!aiTileUsable(world, x, y)) continue;
+      if (!aiTileUsable(world, x + 1, y) && !aiTileUsable(world, x - 1, y)) continue;
+      if (!aiTileUsable(world, x, y + 1) && !aiTileUsable(world, x, y - 1)) continue;
+      sites.push({ x, y });
+    }
+  }
+  return sites;
+}
+
+/** Paires de villes non encore reliées, les plus proches d'abord. */
+function aiCandidatePairs(world: MockWorld, company: MockCompany): [MockTown, MockTown][] {
+  const known = new Set(company.aiLinks ?? []);
+  const pairs: { a: MockTown; b: MockTown; distance: number }[] = [];
+  for (let i = 0; i < world.towns.length; i += 1) {
+    for (let j = i + 1; j < world.towns.length; j += 1) {
+      const a = world.towns[i];
+      const b = world.towns[j];
+      if (!a || !b || known.has(aiLinkKey(a.id, b.id))) continue;
+      const distance = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+      if (distance < 10 || distance > 72) continue;
+      pairs.push({ a, b, distance });
+    }
+  }
+  pairs.sort(
+    (left, right) =>
+      left.distance - right.distance || left.a.id - right.a.id || left.b.id - right.b.id,
+  );
+  return pairs.slice(0, 6).map((pair) => [pair.a, pair.b]);
+}
+
+/** Dépôt routier adjacent à la route, pour la gare de départ. */
+function aiBuildDepot(world: MockWorld, company: MockCompany, station: P2): MockDepot | null {
+  const before = world.depots.length;
+  const candidates: P2[] = [];
+  for (let dy = -2; dy <= 2; dy += 1) {
+    for (let dx = -2; dx <= 2; dx += 1) {
+      if (dx === 0 && dy === 0) continue;
+      const x = station.x + dx;
+      const y = station.y + dy;
+      if (!aiTileUsable(world, x, y)) continue;
+      const touchesRoad =
+        worldKindAt(world, x + 1, y) === K.road ||
+        worldKindAt(world, x - 1, y) === K.road ||
+        worldKindAt(world, x, y + 1) === K.road ||
+        worldKindAt(world, x, y - 1) === K.road;
+      if (touchesRoad) candidates.push({ x, y });
+    }
+  }
+  for (const spot of candidates) {
+    applyBuild(world, {
+      type: 'build',
+      tool: 'depot',
+      company: company.id,
+      from: spot,
+      options: { kind: 'road' },
+    });
+    if (world.depots.length > before) return world.depots[world.depots.length - 1] ?? null;
+  }
+  return null;
+}
+
+/** Achète et met en route des bus entre les deux nouvelles gares. */
+function aiBuyBuses(
+  world: MockWorld,
+  company: MockCompany,
+  depot: MockDepot,
+  stationA: MockStation,
+  stationB: MockStation,
+  level: number,
+): number {
+  const model = level >= 2 ? 'bus_intercity' : 'bus_city';
+  const count = Math.min(4, 1 + level);
+  let bought = 0;
+  for (let i = 0; i < count; i += 1) {
+    const before = new Set(world.vehicles.map((vehicle) => vehicle.id));
+    applyVehicle(world, {
+      type: 'vehicle',
+      action: 'buy',
+      company: company.id,
+      depotId: depot.id,
+      model,
+    });
+    const vehicle = [...world.vehicles].reverse().find((item) => !before.has(item.id));
+    if (!vehicle) break;
+    applyVehicle(world, {
+      type: 'vehicle',
+      action: 'order',
+      company: company.id,
+      vehicle: vehicle.id,
+      orders: [
+        { target: stationA.id, kind: 'station' },
+        { target: stationB.id, kind: 'station' },
+      ],
+    });
+    applyVehicle(world, {
+      type: 'vehicle',
+      action: 'start',
+      company: company.id,
+      vehicle: vehicle.id,
+    });
+    bought += 1;
+  }
+  return bought;
+}
+
+/** Tente une liaison routière complète entre deux villes. */
+function aiBuildLinkBetween(
+  world: MockWorld,
+  company: MockCompany,
+  a: MockTown,
+  b: MockTown,
+  level: number,
+): boolean {
+  const sitesA = aiStationSites(world, a, b);
+  const sitesB = aiStationSites(world, b, a);
+  for (const siteA of sitesA) {
+    for (const siteB of sitesB) {
+      const length = Math.abs(siteA.x - siteB.x) + Math.abs(siteA.y - siteB.y);
+      if (length < 8 || length > 64) continue;
+      const axes: ('x' | 'y')[] =
+        Math.abs(siteA.x - siteB.x) >= Math.abs(siteA.y - siteB.y) ? ['x', 'y'] : ['y', 'x'];
+      for (const axis of axes) {
+        const plan = planBuild({
+          map: mapSnapshotView(world),
+          tool: 'road',
+          from: siteA,
+          to: siteB,
+          axis,
+          company: company.id,
+          budget: company.money,
+        });
+        if (!plan.valid || plan.cost > company.money * 0.65) continue;
+
+        const beforeStations = world.stations.length;
+        applyBuild(world, {
+          type: 'build',
+          tool: 'road',
+          company: company.id,
+          from: siteA,
+          to: siteB,
+          options: { axis },
+        });
+        // La gare de départ suit le premier segment, celle d'arrivée le
+        // dernier : sur un tracé en L, leurs axes diffèrent souvent.
+        const startDirection = axis === 'x' ? 'ne' : 'nw';
+        const endDirection =
+          axis === 'x' && siteA.y !== siteB.y
+            ? 'nw'
+            : axis === 'y' && siteA.x !== siteB.x
+              ? 'ne'
+              : startDirection;
+        applyBuild(world, {
+          type: 'build',
+          tool: 'station',
+          company: company.id,
+          from: siteA,
+          options: { kind: 'road', drive_through: true, direction: startDirection },
+        });
+        applyBuild(world, {
+          type: 'build',
+          tool: 'station',
+          company: company.id,
+          from: siteB,
+          options: { kind: 'road', drive_through: true, direction: endDirection },
+        });
+        if (world.stations.length < beforeStations + 2) return false;
+        const stationB = world.stations[world.stations.length - 1];
+        const stationA = world.stations[world.stations.length - 2];
+        if (!stationA || !stationB) return false;
+        const depot = aiBuildDepot(world, company, siteA);
+        if (depot) aiBuyBuses(world, company, depot, stationA, stationB, level);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Fait construire une liaison aux entreprises IA. Chaque niveau augmente le
+ * nombre de lignes et la fréquence des chantiers ; une paire échouée n'est pas
+ * retentée indéfiniment. Le tirage vient de `world.rngState`, donc reste
+ * identique à graine égale.
+ */
+function runAiCompanies(world: MockWorld, dayIndex: number): void {
+  for (const company of world.companies) {
+    if (!company.isAI || company.bankrupt) continue;
+    const level = clampInt(company.aiLevel ?? 1, 1, 3);
+    const due = company.aiNextBuildDay ?? dayIndex;
+    if (dayIndex < due) continue;
+    const links = company.aiLinks ?? [];
+    company.aiLinks = links;
+    if (links.length >= level) {
+      company.aiNextBuildDay = dayIndex + 30;
+      continue;
+    }
+    let built = false;
+    for (const [a, b] of aiCandidatePairs(world, company)) {
+      links.push(aiLinkKey(a.id, b.id));
+      if (aiBuildLinkBetween(world, company, a, b, level)) {
+        built = true;
+        break;
+      }
+    }
+    company.aiNextBuildDay = dayIndex + (built ? 6 : 4) + (3 - level) * 2;
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Désastres optionnels (#172)                                              */
+/* ------------------------------------------------------------------------- */
+
+/** Probabilité quotidienne par difficulté : facile → expert. */
+const DISASTER_CHANCE = [0.004, 0.008, 0.014, 0.022] as const;
+
+const DISASTER_LABELS: Record<DisasterKind, string> = {
+  fire: 'Incendie',
+  road_accident: 'Accident routier',
+  train_crash: 'Déraillement',
+  aircraft_crash: 'Crash aérien',
+};
+
+function disasterChance(world: MockWorld): number {
+  return DISASTER_CHANCE[clampInt(world.difficulty, 0, 3)] ?? DISASTER_CHANCE[1];
+}
+
+/** Choisit une cible et applique les dégâts immédiats du désastre. */
+function startDisaster(world: MockWorld, rng: Prng): void {
+  const road = world.vehicles.filter(
+    (vehicle) => vehicle.kind === 'road' && vehicle.company !== COMPANY_NONE,
+  );
+  const trains = world.vehicles.filter(
+    (vehicle) => vehicle.kind === 'train' && vehicle.company !== COMPANY_NONE,
+  );
+  const aircraft = world.vehicles.filter(
+    (vehicle) => vehicle.kind === 'aircraft' && vehicle.company !== COMPANY_NONE,
+  );
+  const sources: DisasterKind[] = ['fire'];
+  if (road.length > 0) sources.push('road_accident');
+  if (trains.length > 0) sources.push('train_crash');
+  if (aircraft.length > 0) sources.push('aircraft_crash');
+  const kind = sources[rng.int(0, sources.length - 1)] ?? 'fire';
+  const severity = rng.int(1, 3);
+  const id = world.nextDisasterId;
+  world.nextDisasterId += 1;
+
+  if (kind === 'fire') {
+    const fireIndustries = world.industries.filter((industry) => industry.cargo !== '');
+    const useIndustry = fireIndustries.length > 0 && rng.chance(0.6);
+    if (useIndustry) {
+      const industry = fireIndustries[rng.int(0, fireIndustries.length - 1)];
+      if (!industry) return;
+      const before = industry.production;
+      industry.production = Math.max(24, Math.round(before * (1 - severity * 0.08)));
+      world.disasters.push({
+        id,
+        kind,
+        x: industry.x,
+        y: industry.y,
+        company: COMPANY_NONE,
+        industry: industry.id,
+        severity,
+        startedTick: world.tick,
+        remainingDays: 4 + severity * 2,
+      });
+    } else {
+      const town = world.towns[rng.int(0, world.towns.length - 1)];
+      if (!town) return;
+      town.population = Math.max(0, town.population - severity * 60);
+      world.disasters.push({
+        id,
+        kind,
+        x: town.x,
+        y: town.y,
+        company: COMPANY_NONE,
+        town: town.id,
+        severity,
+        startedTick: world.tick,
+        remainingDays: 3 + severity * 2,
+      });
+    }
+    addNews(
+      world,
+      'error',
+      `${DISASTER_LABELS[kind]} (gravité ${severity}) : les secours interviennent.`,
+    );
+  } else if (kind === 'road_accident') {
+    const vehicle = road[rng.int(0, road.length - 1)];
+    if (!vehicle) return;
+    vehicle.status = 0;
+    vehicle.waitTicks = 0;
+    vehicle.cargoAmount = Math.max(0, Math.round(vehicle.cargoAmount * 0.5));
+    world.disasters.push({
+      id,
+      kind,
+      x: vehicle.x,
+      y: vehicle.y,
+      company: vehicle.company,
+      vehicle: vehicle.id,
+      severity,
+      startedTick: world.tick,
+      remainingDays: 1 + severity,
+    });
+    addNews(
+      world,
+      'warning',
+      `${DISASTER_LABELS[kind]} (gravité ${severity}) : véhicule #${vehicle.id} immobilisé.`,
+    );
+  } else {
+    const candidates = kind === 'train_crash' ? trains : aircraft;
+    const vehicle = candidates[rng.int(0, candidates.length - 1)];
+    if (!vehicle) return;
+    const x = vehicle.x;
+    const y = vehicle.y;
+    const company = vehicle.company;
+    world.vehicles = world.vehicles.filter((item) => item.id !== vehicle.id);
+    syncVehicleCounts(world);
+    world.disasters.push({
+      id,
+      kind,
+      x,
+      y,
+      company,
+      severity,
+      startedTick: world.tick,
+      remainingDays: 2 + severity,
+    });
+    addNews(
+      world,
+      'error',
+      `${DISASTER_LABELS[kind]} (gravité ${severity}) : véhicule #${vehicle.id} détruit.`,
+    );
+  }
+
+  addEvent(world, { type: 'disaster_started', disaster: id, kind, tick: world.tick });
+}
+
+/** Incrémente les désastres actifs et libère les véhicules accidentés. */
+function updateDisasters(world: MockWorld, dayIndex: number, rng: Prng): void {
+  if (!world.disastersEnabled) return;
+  const ended: MockDisaster[] = [];
+  for (const disaster of world.disasters) {
+    disaster.remainingDays -= 1;
+    if (disaster.remainingDays > 0) continue;
+    ended.push(disaster);
+    if (disaster.kind === 'road_accident' && disaster.vehicle !== undefined) {
+      const vehicle = world.vehicles.find((item) => item.id === disaster.vehicle);
+      if (vehicle && vehicle.status === 0) {
+        vehicle.status = 1;
+        if (vehicle.orders.length > 0) rebuildRoute(world, vehicle);
+      }
+    }
+  }
+  for (const disaster of ended) {
+    addEvent(world, { type: 'disaster_ended', disaster: disaster.id, tick: world.tick });
+    addNews(world, 'info', `${DISASTER_LABELS[disaster.kind]} terminé.`);
+  }
+  world.disasters = world.disasters.filter((disaster) => disaster.remainingDays > 0);
+
+  if (dayIndex < world.nextDisasterDay) return;
+  world.nextDisasterDay = dayIndex + 1;
+  if (rng.chance(disasterChance(world))) startDisaster(world, rng);
+}
+
 /** Production industrielle : stock quotidien et évolution mensuelle. */
 function updateIndustries(world: MockWorld, rng: Prng): void {
   for (const industry of world.industries) {
@@ -4167,6 +4639,8 @@ function dailyTick(world: MockWorld): void {
   const rng = Prng.fromState(world.rngState);
   const dayIndex = (world.year * MONTHS_PER_YEAR + world.month) * DAYS_PER_MONTH + world.day;
   updateCompanyEconomy(world);
+  runAiCompanies(world, dayIndex);
+  updateDisasters(world, dayIndex, rng);
   growTowns(world, rng, dayIndex);
   growStationCargo(world, rng);
   updateIndustries(world, rng);
@@ -4307,6 +4781,10 @@ function serializeWorld(world: MockWorld): SerializedWorld {
     })),
     subsidies: world.subsidies,
     news: world.news,
+    disastersEnabled: world.disastersEnabled,
+    disasters: world.disasters,
+    nextDisasterDay: world.nextDisasterDay,
+    nextDisasterId: world.nextDisasterId,
   };
 }
 
@@ -4434,6 +4912,7 @@ export class MockEngine implements EngineDriver {
       bankrupt: company.bankrupt,
       maxLoan: company.maxLoan,
       monthsOfBankruptcy: company.monthsOfBankruptcy,
+      ...(company.isAI ? { aiLevel: clampInt(company.aiLevel ?? 1, 1, 3) } : {}),
     }));
 
     const currentMonth = monthIndex(world);
@@ -4589,6 +5068,20 @@ export class MockEngine implements EngineDriver {
     const events = world.events.slice(world.eventCursor);
     world.eventCursor = world.events.length;
 
+    const disasters = world.disasters.map((disaster) => ({
+      id: disaster.id,
+      kind: disaster.kind,
+      x: disaster.x,
+      y: disaster.y,
+      company: disaster.company,
+      ...(disaster.vehicle !== undefined ? { vehicle: disaster.vehicle } : {}),
+      ...(disaster.town !== undefined ? { town: disaster.town } : {}),
+      ...(disaster.industry !== undefined ? { industry: disaster.industry } : {}),
+      severity: disaster.severity,
+      startedTick: disaster.startedTick,
+      remainingDays: disaster.remainingDays,
+    }));
+
     return {
       meta: { protocol: PROTOCOL_VERSION, tick: world.tick, hash, sequence: world.sequence },
       economy,
@@ -4603,6 +5096,7 @@ export class MockEngine implements EngineDriver {
       vehicles,
       subsidies,
       news,
+      disasters,
       events,
     };
   }
@@ -4660,6 +5154,22 @@ export class MockEngine implements EngineDriver {
       hash.mixFloat(company.maxLoan, 1);
       hash.mixInt(company.monthsOfBankruptcy);
       hash.mixInt(company.bankrupt ? 1 : 0);
+      hash.mixInt(company.aiLevel ?? 0);
+      hash.mixInt(company.aiNextBuildDay ?? -1);
+      for (const link of company.aiLinks ?? []) hash.mixString(link);
+    }
+    hash.mixInt(world.disastersEnabled ? 1 : 0);
+    hash.mixInt(world.nextDisasterDay);
+    hash.mixInt(world.nextDisasterId);
+    for (const disaster of world.disasters) {
+      hash.mixInt(disaster.id);
+      hash.mixString(disaster.kind);
+      hash.mixFloat(disaster.x);
+      hash.mixFloat(disaster.y);
+      hash.mixInt(disaster.company);
+      hash.mixInt(disaster.vehicle ?? 255);
+      hash.mixInt(disaster.severity);
+      hash.mixInt(disaster.remainingDays);
     }
     for (const town of world.towns) {
       hash.mixInt(town.id);
@@ -4796,6 +5306,16 @@ export class MockEngine implements EngineDriver {
       difficulty: saved.difficulty ?? 1,
       interestRate: saved.interestRate ?? preset.interestRate,
       loanInterval: saved.loanInterval ?? DEFAULT_LOAN_INTERVAL,
+      disastersEnabled: saved.disastersEnabled ?? false,
+      disasters: saved.disasters ?? [],
+      nextDisasterDay:
+        saved.nextDisasterDay ??
+        (saved.disastersEnabled === true
+          ? (saved.year * MONTHS_PER_YEAR + saved.month) * DAYS_PER_MONTH + saved.day + 10
+          : -1),
+      nextDisasterId:
+        saved.nextDisasterId ??
+        (saved.disasters ?? []).reduce((max, disaster) => Math.max(max, disaster.id + 1), 0),
       kind: decodeArray(saved.kind, expected),
       heightMap: decodeArray(saved.heightMap, expected),
       owner: decodeArray(saved.owner, expected),
@@ -4814,6 +5334,19 @@ export class MockEngine implements EngineDriver {
         maxLoan: company.maxLoan ?? preset.maxLoan,
         monthsOfBankruptcy: company.monthsOfBankruptcy ?? 0,
         interestPaid: company.interestPaid ?? 0,
+        ...(company.isAI
+          ? {
+              aiLevel: clampInt(
+                company.aiLevel ?? 1 + Math.min(2, Math.max(0, company.id - 1)),
+                1,
+                3,
+              ),
+              aiNextBuildDay:
+                company.aiNextBuildDay ??
+                (saved.year * MONTHS_PER_YEAR + saved.month) * DAYS_PER_MONTH + saved.day + 5,
+              aiLinks: company.aiLinks ?? [],
+            }
+          : {}),
       })),
       towns: saved.towns.map((town) => ({
         ...town,

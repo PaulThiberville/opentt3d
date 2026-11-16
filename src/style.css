@@ -900,6 +900,13 @@ body.menu-attract .panel {
   cursor: not-allowed;
 }
 
+.input-checkbox {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--hud-accent-strong, #7fb0ff);
+  cursor: pointer;
+}
+
 select.input {
   cursor: pointer;
 }
@@ -4088,6 +4095,17 @@ select.input {
   color: var(--hud-error);
 }
 
+.hud-report-badge.is-ai {
+  background: rgba(127, 176, 255, 0.14);
+  color: #a9c9ff;
+}
+
+.hud-report-network {
+  color: var(--hud-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .hud-report-share {
   min-width: 120px;
 }
@@ -4243,6 +4261,12 @@ select.input {
   border: 1px solid var(--hud-border);
   border-radius: 9px;
   background: rgba(255, 255, 255, 0.03);
+}
+
+.hud-report-data-row.is-disaster {
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 0.55fr);
+  border-color: rgba(229, 125, 119, 0.35);
+  background: rgba(229, 125, 119, 0.07);
 }
 
 .hud-report-data-text {

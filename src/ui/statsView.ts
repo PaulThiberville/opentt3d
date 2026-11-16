@@ -8,13 +8,15 @@
  */
 
 import type { WorldSnapshot } from '../engine/protocol';
+import { COMPANY_NONE } from '../engine/protocol';
 import { ordersFromSnapshot } from '../game/vehicleRules';
 import { formatInt, formatPercent, formatRating } from './format';
 import { industryKindLabel } from './labels';
-import { t } from './i18n';
+import { t, type TranslationKey } from './i18n';
 import { companyShares } from './financeView';
 import { percentOf } from './charts';
 import type {
+  DisasterStatsRow,
   FinanceAlertView,
   IndustryStatsRow,
   MarketShareRow,
@@ -107,7 +109,46 @@ function marketRows(snapshot: WorldSnapshot): MarketShareRow[] {
     share: entry.share,
     shareLabel: entry.share === null ? '—' : formatPercent(entry.share, 1),
     isLocal: entry.company.isLocal,
+    isAI: entry.company.isAI,
+    aiLevel: entry.company.isAI ? (entry.company.aiLevel ?? null) : null,
   }));
+}
+
+function disasterRows(snapshot: WorldSnapshot): DisasterStatsRow[] {
+  return (snapshot.disasters ?? []).map((disaster) => {
+    const kindLabel = t(`disaster.kind.${disaster.kind}` as TranslationKey);
+    const remainingLabel =
+      disaster.remainingDays > 1
+        ? t('stats.disaster.remaining', { days: formatInt(disaster.remainingDays) })
+        : t('stats.disaster.remainingOne');
+    let location = `(${Math.round(disaster.x)}, ${Math.round(disaster.y)})`;
+    if (disaster.town !== undefined) {
+      const town = snapshot.towns.find((item) => item.id === disaster.town);
+      if (town) location = t('stats.disaster.town', { name: town.name });
+    } else if (disaster.industry !== undefined) {
+      const industry = snapshot.industries.find((item) => item.id === disaster.industry);
+      if (industry) location = t('stats.disaster.industry', { name: industry.name });
+    } else if (disaster.vehicle !== undefined) {
+      location = t('stats.disaster.vehicle', { id: formatInt(disaster.vehicle) });
+    }
+    const company =
+      disaster.company !== COMPANY_NONE
+        ? snapshot.companies.find((item) => item.id === disaster.company)
+        : undefined;
+    return {
+      id: disaster.id,
+      kindLabel,
+      detail: t('stats.disaster.detail', {
+        severity: disaster.severity,
+        remaining: remainingLabel,
+      }),
+      location,
+      companyLabel: company ? t('stats.disaster.company', { name: company.name }) : null,
+      severity: disaster.severity,
+      remainingDays: disaster.remainingDays,
+      remainingLabel,
+    };
+  });
 }
 
 /** Construit la vue complète du panneau Statistiques. */
@@ -115,6 +156,7 @@ export function describeStatsPanel(snapshot: WorldSnapshot | null): StatsPanelVi
   const industries = snapshot ? industryRows(snapshot) : [];
   const towns = snapshot ? townRows(snapshot) : [];
   const market = snapshot ? marketRows(snapshot) : [];
+  const disasters = snapshot ? disasterRows(snapshot) : [];
   const totalProduction = industries.reduce((sum, row) => sum + row.production, 0);
   const totalTransported = industries.reduce((sum, row) => sum + row.transported, 0);
   const totalPopulation = towns.reduce((sum, row) => sum + row.population, 0);
@@ -147,6 +189,10 @@ export function describeStatsPanel(snapshot: WorldSnapshot | null): StatsPanelVi
     towns,
     market,
     marketBasis: t('stats.market.basis'),
+    disasters,
+    activeDisasterCount: disasters.length,
+    activeDisasterCountLabel: formatInt(disasters.length),
+    disastersEnabled: null,
     alerts,
     hint: t('stats.hint'),
   };

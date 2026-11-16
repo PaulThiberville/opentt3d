@@ -49,6 +49,8 @@ import {
   type CompanySnapshot,
   type DepotKind,
   type DepotSnapshot,
+  type DisasterKind,
+  type DisasterSnapshot,
   type EconomySnapshot,
   type IndustrySnapshot,
   type OrderAction,
@@ -310,6 +312,9 @@ export function parseCompany(value: unknown): CompanySnapshot {
     ...(typeof raw.maxLoan === 'number' ? { maxLoan: Math.max(0, num(raw.maxLoan, 0)) } : {}),
     ...(typeof raw.monthsOfBankruptcy === 'number'
       ? { monthsOfBankruptcy: Math.max(0, int(raw.monthsOfBankruptcy, 0)) }
+      : {}),
+    ...(typeof raw.aiLevel === 'number' && raw.aiLevel > 0
+      ? { aiLevel: clampInt(raw.aiLevel, 1, 3, 1) }
       : {}),
   };
 }
@@ -606,6 +611,21 @@ function parseEvents(value: unknown): WorldEvent[] {
           tick,
         });
         break;
+      case 'disaster_started':
+        events.push({
+          type: 'disaster_started',
+          disaster: Math.max(0, int(entry.disaster, 0)),
+          kind: disasterKind(entry.kind),
+          tick,
+        });
+        break;
+      case 'disaster_ended':
+        events.push({
+          type: 'disaster_ended',
+          disaster: Math.max(0, int(entry.disaster, 0)),
+          tick,
+        });
+        break;
       case 'town_action':
         events.push({
           type: 'town_action',
@@ -626,6 +646,41 @@ function parseEvents(value: unknown): WorldEvent[] {
 /* ------------------------------------------------------------------------- */
 /*  Snapshot complet                                                         */
 /* ------------------------------------------------------------------------- */
+
+const DISASTER_KINDS: readonly DisasterKind[] = [
+  'fire',
+  'road_accident',
+  'train_crash',
+  'aircraft_crash',
+];
+
+function disasterKind(value: unknown): DisasterKind {
+  return DISASTER_KINDS.includes(value as DisasterKind) ? (value as DisasterKind) : 'fire';
+}
+
+function parseDisasters(value: unknown): DisasterSnapshot[] {
+  const disasters: DisasterSnapshot[] = [];
+  for (const entry of list(value)) {
+    if (!isRecord(entry)) continue;
+    const kind = disasterKind(entry.kind);
+    disasters.push({
+      id: Math.max(0, int(entry.id, disasters.length)),
+      kind,
+      x: num(entry.x, 0),
+      y: num(entry.y, 0),
+      company: companyId(entry.company),
+      ...(typeof entry.vehicle === 'number' ? { vehicle: Math.max(0, int(entry.vehicle, 0)) } : {}),
+      ...(typeof entry.town === 'number' ? { town: Math.max(0, int(entry.town, 0)) } : {}),
+      ...(typeof entry.industry === 'number'
+        ? { industry: Math.max(0, int(entry.industry, 0)) }
+        : {}),
+      severity: clampInt(entry.severity, 1, 3, 1),
+      startedTick: Math.max(0, int(entry.startedTick, 0)),
+      remainingDays: Math.max(0, int(entry.remainingDays, 0)),
+    });
+  }
+  return disasters;
+}
 
 function parseMeta(value: unknown): SnapshotMeta {
   const raw = record(value);
@@ -761,6 +816,7 @@ export function parseWorldJson(input: unknown): WorldSnapshot {
     vehicles,
     subsidies: parseSubsidies(root.subsidies),
     news: parseNews(root.news, meta.tick),
+    disasters: parseDisasters(root.disasters),
     events: parseEvents(root.events),
   };
 }

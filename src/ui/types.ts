@@ -311,6 +311,14 @@ export interface FinanceRankingRow {
   share: number | null;
   shareLabel: string;
   isLocal: boolean;
+  isAI: boolean;
+  /** Niveau de l'IA 1..3, pour le badge du classement (#168). */
+  aiLevel: number | null;
+  vehicles: number;
+  stations: number;
+  networkLabel: string;
+  result: number | null;
+  resultLabel: string;
   bankrupt: boolean;
 }
 
@@ -446,6 +454,20 @@ export interface MarketShareRow {
   share: number | null;
   shareLabel: string;
   isLocal: boolean;
+  isAI: boolean;
+  aiLevel: number | null;
+}
+
+/** Ligne du panneau « Désastres » (#172). */
+export interface DisasterStatsRow {
+  id: number;
+  kindLabel: string;
+  detail: string;
+  location: string;
+  companyLabel: string | null;
+  severity: number;
+  remainingDays: number;
+  remainingLabel: string;
 }
 
 export interface StatsPanelView {
@@ -461,6 +483,10 @@ export interface StatsPanelView {
   towns: TownStatsRow[];
   market: MarketShareRow[];
   marketBasis: string;
+  disasters: DisasterStatsRow[];
+  activeDisasterCount: number;
+  activeDisasterCountLabel: string;
+  disastersEnabled: boolean | null;
   alerts: FinanceAlertView[];
   hint: string;
 }

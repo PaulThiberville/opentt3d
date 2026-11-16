@@ -63,6 +63,7 @@ function buildGameConfig(options: NewGameOptions): string {
     start_year: options.startYear ?? 1950,
     difficulty: options.difficulty ?? 1,
     ai_companies: options.aiCompanies ?? 0,
+    disasters: options.disasters === true,
     map_size: Math.trunc(options.width),
   };
   if (options.companies && options.companies.length > 0) {
@@ -655,6 +656,9 @@ export class WasmEngine implements EngineDriver {
     }
     if (options.difficulty !== undefined && options.difficulty !== 1) {
       unsupported.push(`difficulté ${options.difficulty}`);
+    }
+    if (options.disasters === true) {
+      unsupported.push('désastres');
     }
     if (unsupported.length > 0) {
       this.warn(
