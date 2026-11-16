@@ -232,10 +232,16 @@ describe('budgets TerrainLayer', () => {
     }
   });
 
-  it('l’eau ajoute exactement 2 triangles par tuile en eau', () => {
+  it('l’eau ajoute 2 triangles par tuile d’eau et sa couronne de berge', () => {
     const layer = new TerrainLayer();
     const map = makeMap(64, 64, (fixture) => {
       fillRect(fixture, 0, 0, 64, 8, TILE_KIND_INDEX.water);
+      // Même niveau pour l'eau et sa couronne : chaque berge est recouverte.
+      for (let y = 0; y <= 8; y += 1) {
+        for (let x = 0; x < fixture.width; x += 1) {
+          fixture.heightMap[y * fixture.width + x] = 4;
+        }
+      }
     });
     layer.setMap(map);
     try {
@@ -245,7 +251,8 @@ describe('budgets TerrainLayer', () => {
         if (!mesh.isMesh || !mesh.name.startsWith('water-')) continue;
         waterTriangles += triangleCount(mesh.geometry);
       }
-      expect(waterTriangles).toBe(64 * 8 * 2);
+      // 8 rangées d'eau + 1 rangée de berge recouverte (#204).
+      expect(waterTriangles).toBe(64 * 9 * 2);
     } finally {
       layer.dispose();
     }
