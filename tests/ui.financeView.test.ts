@@ -143,14 +143,33 @@ describe('panneau finances', () => {
     const view = describeFinancePanel(
       snapshot([
         company({ id: 0, name: 'Local', value: 100, isLocal: true }),
-        company({ id: 1, name: 'Rivale', value: 300, isLocal: false }),
+        company({
+          id: 1,
+          name: 'Rivale',
+          value: 300,
+          isLocal: false,
+          isAI: true,
+          aiLevel: 2,
+          vehicles: 7,
+          stations: 4,
+          income: 80_000,
+          expenses: 30_000,
+        }),
         company({ id: 2, name: 'Petite', value: 100, isLocal: false }),
       ]),
     );
     expect(view.ranking.map((row) => row.name)).toEqual(['Rivale', 'Local', 'Petite']);
     expect(view.ranking[0]?.share).toBe(60);
+    expect(view.ranking[0]?.isAI).toBe(true);
+    expect(view.ranking[0]?.aiLevel).toBe(2);
+    expect(view.ranking[0]?.networkLabel).toContain('7');
+    expect(view.ranking[0]?.networkLabel).toContain('4');
+    expect(view.ranking[0]?.result).toBe(50_000);
+    expect(view.ranking[0]?.resultLabel).toContain('50');
     expect(view.ranking[1]?.share).toBe(20);
     expect(view.ranking[1]?.isLocal).toBe(true);
+    expect(view.ranking[1]?.isAI).toBe(false);
+    expect(view.ranking[1]?.aiLevel).toBeNull();
     expect(companyShares(snapshot([company({ value: 0 })])).at(0)?.share).toBeNull();
   });
 

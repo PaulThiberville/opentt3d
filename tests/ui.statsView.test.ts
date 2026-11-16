@@ -28,7 +28,17 @@ function snapshot(overrides: Partial<WorldSnapshot> = {}): WorldSnapshot {
     meta: { protocol: PROTOCOL_VERSION, tick: 30, hash: 'abc', sequence: 4 },
     economy: { year: 1952, month: 5, day: 8, dayFraction: 0, speed: 1, paused: false },
     map: null,
-    companies: [company(), company({ id: 1, name: 'Rivale', value: 100_000, isLocal: false })],
+    companies: [
+      company(),
+      company({
+        id: 1,
+        name: 'Rivale',
+        value: 100_000,
+        isLocal: false,
+        isAI: true,
+        aiLevel: 2,
+      }),
+    ],
     towns: [
       {
         id: 1,
@@ -164,8 +174,51 @@ describe('panneau statistiques', () => {
     expect(view.market[0]?.share).toBe(75);
     expect(view.market[0]?.shareLabel).toContain('75');
     expect(view.market[1]?.share).toBe(25);
+    expect(view.market[1]?.isAI).toBe(true);
+    expect(view.market[1]?.aiLevel).toBe(2);
     expect(view.marketBasis).toContain('valeur');
     expect(view.alerts).toEqual([]);
+  });
+
+  it('liste les désastres actifs avec leur cible et leur compte à rebours', () => {
+    const view = describeStatsPanel(
+      snapshot({
+        disasters: [
+          {
+            id: 4,
+            kind: 'fire',
+            x: 3.5,
+            y: 3.5,
+            company: 255,
+            industry: 1,
+            severity: 2,
+            startedTick: 10,
+            remainingDays: 5,
+          },
+          {
+            id: 5,
+            kind: 'road_accident',
+            x: 1.5,
+            y: 1.5,
+            company: 0,
+            vehicle: 7,
+            severity: 1,
+            startedTick: 20,
+            remainingDays: 1,
+          },
+        ],
+      }),
+    );
+    expect(view.activeDisasterCount).toBe(2);
+    expect(view.activeDisasterCountLabel).toBe('2');
+    expect(view.disasters[0]?.kindLabel).toBe('Incendie');
+    expect(view.disasters[0]?.location).toContain('Mine');
+    expect(view.disasters[0]?.detail).toContain('Gravité 2');
+    expect(view.disasters[0]?.remainingLabel).toContain('5');
+    expect(view.disasters[1]?.kindLabel).toBe('Accident routier');
+    expect(view.disasters[1]?.location).toContain('#7');
+    expect(view.disasters[1]?.companyLabel).toContain('Transports du Nord');
+    expect(view.disasters[1]?.remainingLabel).toContain('1');
   });
 
   it('tolère les champs absents et les valeurs nulles', () => {
@@ -211,6 +264,8 @@ describe('panneau statistiques', () => {
     expect(view.industries).toEqual([]);
     expect(view.towns).toEqual([]);
     expect(view.market).toEqual([]);
+    expect(view.activeDisasterCount).toBe(0);
+    expect(view.disasters).toEqual([]);
     expect(view.alerts[0]?.id).toBe('no-snapshot');
   });
 });

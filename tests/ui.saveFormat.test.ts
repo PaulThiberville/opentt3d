@@ -92,6 +92,7 @@ describe('validation d’import', () => {
       difficulty: 2,
       aiCompanies: 3,
       climate: 1,
+      disasters: true,
     });
     expect(detectSaveFormat(bytes)).toBe('ot3s');
     const inspection = inspectSaveBytes(bytes);
@@ -104,6 +105,7 @@ describe('validation d’import', () => {
     expect(inspection.difficulty).toBe(2);
     expect(inspection.aiCompanies).toBe(3);
     expect(inspection.climate).toBe('subarctic');
+    expect(inspection.disasters).toBe(true);
     expect(inspection.size).toBe(bytes.length);
   });
 

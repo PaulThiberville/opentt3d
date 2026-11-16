@@ -207,13 +207,18 @@ function readUrlBoot(base: NewGameOptions): UrlBoot {
   const autoParam = params.get('autostart');
   const autoStart =
     autoParam !== '0' &&
-    (params.has('autostart') || params.has('seed') || params.has('size') || params.has('quality'));
+    (params.has('autostart') ||
+      params.has('seed') ||
+      params.has('size') ||
+      params.has('quality') ||
+      params.has('disasters'));
   const patch: Partial<Record<keyof NewGameOptions, unknown>> = {};
   if (params.has('seed')) patch.seed = params.get('seed');
   if (params.has('size')) patch.size = params.get('size');
   if (params.has('quality')) patch.quality = params.get('quality');
   if (params.has('difficulty')) patch.difficulty = params.get('difficulty');
   if (params.has('ai')) patch.aiCompanies = params.get('ai');
+  if (params.has('disasters')) patch.disasters = params.get('disasters');
   return { options: mergeNewGameOptions(base, patch), autoStart };
 }
 

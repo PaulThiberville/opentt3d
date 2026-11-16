@@ -482,6 +482,7 @@ export class GameSession {
           difficulty: config.difficulty,
           startYear: config.startYear,
           climate: config.climate,
+          disasters: config.disasters,
           ...(config.companies && config.companies.length > 0
             ? { companies: config.companies }
             : {}),

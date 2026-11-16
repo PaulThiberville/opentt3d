@@ -268,18 +268,32 @@ export function companyShares(snapshot: WorldSnapshot | null): CompanyShare[] {
 
 function rankingRows(snapshot: WorldSnapshot | null): FinanceRankingRow[] {
   return companyShares(snapshot).map((entry, index) => {
-    const value = finite(entry.company.value);
+    const company = entry.company;
+    const value = finite(company.value);
+    const income = finite(company.income);
+    const expenses = finite(company.expenses);
+    const result = income !== null && expenses !== null ? income - expenses : null;
     return {
-      id: entry.company.id,
+      id: company.id,
       rank: index + 1,
-      name: entry.company.name || t('finance.companyUnknown'),
-      colour: entry.company.colour,
+      name: company.name || t('finance.companyUnknown'),
+      colour: company.colour,
       value,
       valueLabel: value === null ? '—' : formatMoney(value),
       share: entry.share,
       shareLabel: entry.share === null ? '—' : formatPercent(entry.share, 1),
-      isLocal: entry.company.isLocal,
-      bankrupt: entry.company.bankrupt,
+      isLocal: company.isLocal,
+      isAI: company.isAI,
+      aiLevel: company.isAI ? (company.aiLevel ?? null) : null,
+      vehicles: company.vehicles,
+      stations: company.stations,
+      networkLabel: t('finance.ranking.networkValue', {
+        vehicles: formatInt(company.vehicles),
+        stations: formatInt(company.stations),
+      }),
+      result,
+      resultLabel: result === null ? '—' : formatSignedMoney(result),
+      bankrupt: company.bankrupt,
     };
   });
 }

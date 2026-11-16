@@ -46,6 +46,8 @@ export interface NewGameOptions {
   aiCompanies: number;
   climate: Climate;
   startYear: number;
+  /** Catastrophes optionnelles (#172), désactivées par défaut. */
+  disasters: boolean;
   /**
    * Entreprises humaines créées au démarrage (#99). Absent en solo (une seule
    * entreprise locale) ; en réseau, la liste vient du `StartInfo` du salon.
@@ -74,6 +76,7 @@ export function createDefaultNewGameOptions(quality: QualityLevel = 'medium'): N
     aiCompanies: 1,
     climate: 'temperate',
     startYear: DEFAULT_START_YEAR,
+    disasters: false,
   };
 }
 
@@ -117,6 +120,17 @@ function isClimate(value: unknown): value is Climate {
 
 function isMapSize(value: number): value is MapSize {
   return (MAP_SIZES as readonly number[]).includes(value);
+}
+
+/** Booléen tolérant : accepte 0/1 et les chaînes usuelles des paramètres URL. */
+function toBoolean(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 0 ? false : value === 1 ? true : null;
+  if (typeof value !== 'string') return null;
+  const text = value.trim().toLowerCase();
+  if (text === '1' || text === 'true' || text === 'on' || text === 'oui') return true;
+  if (text === '0' || text === 'false' || text === 'off' || text === 'non') return false;
+  return null;
 }
 
 /**
@@ -175,6 +189,11 @@ export function validateNewGameOptions(
     });
   }
 
+  const disasters = input.disasters === undefined ? defaults.disasters : toBoolean(input.disasters);
+  if (disasters === null) {
+    errors.push({ field: 'disasters', message: 'Option désastres invalide (oui ou non).' });
+  }
+
   if (
     errors.length > 0 ||
     seed === null ||
@@ -183,7 +202,8 @@ export function validateNewGameOptions(
     difficulty === null ||
     aiCompanies === null ||
     !isClimate(climate) ||
-    startYear === null
+    startYear === null ||
+    disasters === null
   ) {
     return { ok: false, errors };
   }
@@ -198,6 +218,7 @@ export function validateNewGameOptions(
       aiCompanies,
       climate,
       startYear,
+      disasters,
     },
   };
 }

@@ -293,6 +293,7 @@ export function mapStartInfoToGameOptions(
       aiCompanies: wasm ? aiCount : Math.min(3, aiCount),
       climate: CLIMATE_TO_ENGINE[info.settings.climate],
       startYear,
+      disasters: false,
       ...(companies.length > 0 ? { companies } : {}),
     },
     warnings,

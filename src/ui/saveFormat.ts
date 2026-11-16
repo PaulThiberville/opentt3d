@@ -140,6 +140,8 @@ export interface SaveInspection {
   difficulty: number | null;
   aiCompanies: number | null;
   startYear: number | null;
+  /** Option désastres (#172), absente des conteneurs antérieurs. */
+  disasters: boolean | null;
 }
 
 interface BridgeMetadata {
@@ -149,6 +151,7 @@ interface BridgeMetadata {
   difficulty: number | null;
   aiCompanies: number | null;
   startYear: number | null;
+  disasters: boolean | null;
 }
 
 function emptyBridgeMetadata(): BridgeMetadata {
@@ -159,6 +162,7 @@ function emptyBridgeMetadata(): BridgeMetadata {
     difficulty: null,
     aiCompanies: null,
     startYear: null,
+    disasters: null,
   };
 }
 
@@ -253,6 +257,7 @@ function inspectOt3s(bytes: Uint8Array): SaveInspection {
     difficulty: metadata.difficulty,
     aiCompanies: metadata.aiCompanies,
     startYear: metadata.startYear,
+    disasters: metadata.disasters,
   };
 }
 
@@ -276,6 +281,7 @@ function readBridgeMetadata(bytes: Uint8Array, offset: number, size: number): Br
   if ((flags & (1 << 1)) !== 0) metadata.startYear = readU32(bytes, offset + 4);
   if ((flags & (1 << 2)) !== 0) metadata.difficulty = readU32(bytes, offset + 8);
   if ((flags & (1 << 3)) !== 0) metadata.aiCompanies = readU32(bytes, offset + 12);
+  if ((flags & (1 << 7)) !== 0) metadata.disasters = (bytes[offset + 28] ?? 0) !== 0;
   if ((flags & (1 << 6)) !== 0) metadata.mapSize = readU32(bytes, offset + 24);
 
   const nameLength = readU32(bytes, offset + 32);
@@ -368,6 +374,7 @@ function inspectMockJson(bytes: Uint8Array): SaveInspection {
     difficulty: null,
     aiCompanies: null,
     startYear: null,
+    disasters: null,
   };
 }
 

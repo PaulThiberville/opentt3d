@@ -17,6 +17,7 @@ import { CameraController } from './CameraController';
 import { CityLayer } from './CityLayer';
 import { CatenaryLayer } from './CatenaryLayer';
 import { DepotLayer } from './DepotLayer';
+import { DisasterLayer } from './DisasterLayer';
 import { IndustryLayer } from './IndustryLayer';
 import { InfrastructureLayer } from './InfrastructureLayer';
 import { Picking, type PickResult } from './Picking';
@@ -80,6 +81,7 @@ export class WorldView {
   readonly signals = new SignalLayer();
   readonly catenary = new CatenaryLayer();
   readonly depots = new DepotLayer();
+  readonly disasters = new DisasterLayer();
   readonly infrastructure = new InfrastructureLayer();
   readonly structures = new StructureLayer();
   readonly atmosphere = new AtmosphereLayer();
@@ -147,6 +149,7 @@ export class WorldView {
     this.scene.add(this.signals.group);
     this.scene.add(this.catenary.group);
     this.scene.add(this.depots.group);
+    this.scene.add(this.disasters.group);
     this.scene.add(this.infrastructure.group);
     this.scene.add(this.structures.group);
     this.scene.add(this.atmosphere.group);
@@ -210,6 +213,7 @@ export class WorldView {
     // hauteur du sol (la dernière carte connue est conservée).
     this.signals.setSignals(snapshot.signals, this.currentMap);
     this.depots.setDepots(snapshot.depots, this.currentMap);
+    this.disasters.setDisasters(snapshot.disasters, this.currentMap);
     this.cityLayer.setStations(snapshot.stations, this.currentMap);
     this.atmosphere.applyWorld(this.currentMap, snapshot.towns, snapshot.stations);
     // L'heure visuelle ne suit le calendrier moteur qu'une fois : ensuite elle
@@ -291,6 +295,7 @@ export class WorldView {
     this.cityLayer.update(this.camera.position);
     this.townProps.update(this.camera.position);
     this.industries.update(deltaSeconds, this.camera.position);
+    this.disasters.update(deltaSeconds);
     this.atmosphere.update(deltaSeconds, this.camera.position, this.dayNight.phase);
     this.surroundings.update(deltaSeconds);
     this.dayNight.advance(deltaSeconds);
@@ -596,6 +601,7 @@ export class WorldView {
     this.scene.remove(this.vehicles.group);
     this.scene.remove(this.signals.group);
     this.scene.remove(this.depots.group);
+    this.scene.remove(this.disasters.group);
     this.scene.remove(this.infrastructure.group);
     this.scene.remove(this.structures.group);
     this.scene.remove(this.atmosphere.group);
@@ -611,6 +617,7 @@ export class WorldView {
     this.signals.dispose();
     this.catenary.dispose();
     this.depots.dispose();
+    this.disasters.dispose();
     this.infrastructure.dispose();
     this.structures.dispose();
     this.atmosphere.dispose();

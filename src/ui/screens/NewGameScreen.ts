@@ -61,6 +61,7 @@ export class NewGameScreen extends BaseScreen {
   private aiSelect: HTMLSelectElement;
   private climateSelect: HTMLSelectElement;
   private yearInput: HTMLInputElement;
+  private disastersInput: HTMLInputElement;
   private sizeInputs: HTMLInputElement[] = [];
   private cleanupNavigation: () => void;
   private enginePicker!: EnginePicker;
@@ -221,6 +222,28 @@ export class NewGameScreen extends BaseScreen {
     );
     const aiField = this.field(t('newgame.ai.label'), 'aiCompanies', this.aiSelect);
 
+    // Désastres --------------------------------------------------------------
+    this.disastersInput = el('input', {
+      className: 'input-checkbox',
+      attrs: {
+        id: 'new-disasters',
+        name: 'disasters',
+        type: 'checkbox',
+      },
+    });
+    this.disastersInput.checked = initial.disasters;
+    const disastersField = this.field(
+      t('newgame.disasters.label'),
+      'disasters',
+      this.disastersInput,
+    );
+    disastersField.append(
+      el('p', {
+        className: 'field-hint',
+        text: t('newgame.disasters.hint'),
+      }),
+    );
+
     // Climat -----------------------------------------------------------------
     this.climateSelect = this.select(
       'new-climate',
@@ -254,6 +277,7 @@ export class NewGameScreen extends BaseScreen {
       qualityField,
       difficultyField,
       aiField,
+      disastersField,
       climateField,
       yearField,
     );
@@ -331,6 +355,7 @@ export class NewGameScreen extends BaseScreen {
         aiCompanies: this.aiSelect.value,
         climate: this.climateSelect.value,
         startYear: this.yearInput.value,
+        disasters: this.disastersInput.checked,
       },
       this.options.initial,
     );

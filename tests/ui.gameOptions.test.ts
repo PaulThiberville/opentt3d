@@ -37,6 +37,7 @@ describe('validation des options de partie', () => {
     expect(defaults.size).toBe(256);
     expect(defaults.quality).toBe('high');
     expect(defaults.difficulty).toBe(1);
+    expect(defaults.disasters).toBe(false);
     expect(validateNewGameOptions({}, defaults).ok).toBe(true);
   });
 
@@ -50,6 +51,7 @@ describe('validation des options de partie', () => {
         aiCompanies: '0',
         climate: 'subarctic',
         startYear: '2000',
+        disasters: 'oui',
       },
       defaults,
     );
@@ -63,6 +65,7 @@ describe('validation des options de partie', () => {
       aiCompanies: 0,
       climate: 'subarctic',
       startYear: 2000,
+      disasters: true,
     });
   });
 
@@ -99,6 +102,13 @@ describe('validation des options de partie', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.errors[0]?.field).toBe('seed');
+  });
+
+  it('rejette une valeur de désastres non booléenne', () => {
+    const result = validateNewGameOptions({ disasters: 'peut-être' }, defaults);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.map((error) => error.field)).toContain('disasters');
   });
 
   it('expose toutes les tailles attendues', () => {
