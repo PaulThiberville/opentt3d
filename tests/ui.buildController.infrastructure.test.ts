@@ -15,6 +15,8 @@ function makeMap(width = 16, height = 16): MapSnapshot {
     slope: new Uint8Array(size),
     flags: new Uint8Array(size),
     trackBits: new Uint8Array(size),
+    railTypes: new Uint8Array(size),
+    signalData: new Uint8Array(size),
   };
 }
 
@@ -137,6 +139,65 @@ describe('BuildController : gares', () => {
   });
 });
 
+describe('BuildController : ponts et tunnels', () => {
+  it('affiche un pont A→B, mémorise le matériau et le commit', () => {
+    const { controller, previews, commits, settings } = harness();
+    settings.bridge = { kind: 'rail', material: 'suspension' };
+    controller.setSettings(settings);
+    controller.setTool('bridge');
+    controller.handleBegin({ x: 2, y: 4 });
+    controller.handleMove({ x: 8, y: 4 });
+    const plan = lastPlan(previews);
+    expect(plan?.tool).toBe('bridge');
+    expect(plan?.valid).toBe(true);
+    expect(plan?.tiles).toHaveLength(7);
+    expect(plan?.bridge).toMatchObject({ kind: 'rail', material: 'suspension', span: 6 });
+    expect(describeBuildPlan(plan, 'bridge')?.text.toLowerCase()).toContain('suspendu');
+    controller.handleEnd({ x: 8, y: 4 });
+    expect(commits).toHaveLength(1);
+    expect(commits[0]?.bridge?.material).toBe('suspension');
+  });
+
+  it('refuse un drag diagonal et ne commite rien', () => {
+    const { controller, previews, commits, notices } = harness();
+    controller.setTool('bridge');
+    controller.handleBegin({ x: 2, y: 2 });
+    controller.handleMove({ x: 6, y: 6 });
+    expect(lastPlan(previews)?.valid).toBe(false);
+    controller.handleEnd({ x: 6, y: 6 });
+    expect(commits).toHaveLength(0);
+    expect(notices.some((text) => text.includes('droit'))).toBe(true);
+  });
+
+  it('prévisualise et construit un tunnel entre deux portails', () => {
+    const map = makeMap();
+    for (let x = 4; x <= 6; x += 1) {
+      const index = x + 4 * map.width;
+      map.heightMap[index] = 7;
+    }
+    const { controller, previews, commits, settings } = harness(map);
+    settings.tunnel = { kind: 'rail' };
+    controller.setSettings(settings);
+    controller.setTool('tunnel');
+    controller.handleBegin({ x: 2, y: 4 });
+    controller.handleMove({ x: 8, y: 4 });
+    expect(lastPlan(previews)?.valid).toBe(true);
+    expect(lastPlan(previews)?.tunnel?.depth).toBe(3);
+    controller.handleEnd({ x: 8, y: 4 });
+    expect(commits).toHaveLength(1);
+    expect(commits[0]?.tool).toBe('tunnel');
+  });
+
+  it('affiche un aperçu par défaut au simple survol, sans commit', () => {
+    const { controller, previews, commits } = harness();
+    controller.setTool('bridge');
+    controller.handleHover({ x: 3, y: 5 });
+    expect(lastPlan(previews)?.tool).toBe('bridge');
+    expect(lastPlan(previews)?.tiles.length).toBeGreaterThan(1);
+    expect(commits).toHaveLength(0);
+  });
+});
+
 describe('BuildController : dépôts et signaux', () => {
   it('pose un dépôt route adjacent à une route', () => {
     const map = makeMap();
@@ -185,5 +246,65 @@ describe('BuildController : dépôts et signaux', () => {
     expect(commits).toHaveLength(1);
     expect(commits[0]?.tiles).toHaveLength(3);
     expect(describeBuildPlan(commits[0] ?? null, 'signal')?.text).toContain('3 signaux');
+  });
+});
+
+describe('BuildController : signaux et types de rail (#156/#157)', () => {
+  it('transmet le type de signal, le sens et la densité', () => {
+    const map = makeMap();
+    for (let x = 2; x <= 8; x += 1) setTile(map, x, 2, TILE_KIND_INDEX.rail, 2 | 8, 0);
+    const { controller, commits, settings } = harness(map);
+    settings.signal = {
+      type: 'exit',
+      track: null,
+      direction: 'both',
+      spacing: 3,
+    };
+    controller.setSettings(settings);
+    controller.setTool('signal');
+    controller.handleBegin({ x: 2, y: 2 });
+    controller.handleEnd({ x: 8, y: 2 });
+
+    expect(commits).toHaveLength(1);
+    expect(commits[0]?.tool).toBe('signal');
+    expect(commits[0]?.signal).toMatchObject({
+      type: 'exit',
+      direction: 'both',
+      spacing: 3,
+    });
+    expect(commits[0]?.tiles.map((tile) => tile.x)).toEqual([2, 5, 8]);
+    expect(describeBuildPlan(commits[0] ?? null, 'signal')?.text).toContain('3 signaux');
+  });
+
+  it('arme la conversion avec le type de rail choisi', () => {
+    const map = makeMap();
+    for (let x = 2; x <= 4; x += 1) setTile(map, x, 2, TILE_KIND_INDEX.rail, 2 | 8, 0);
+    const { controller, commits, settings } = harness(map);
+    settings.rail = { type: 'maglev' };
+    controller.setSettings(settings);
+    controller.setTool('convert');
+    controller.handleBegin({ x: 2, y: 2 });
+    controller.handleEnd({ x: 4, y: 2 });
+
+    expect(commits).toHaveLength(1);
+    expect(commits[0]?.tool).toBe('convert');
+    expect(commits[0]?.railType).toBe('maglev');
+    expect(describeBuildPlan(commits[0] ?? null, 'convert')?.text).toContain('3 tuiles');
+  });
+
+  it('arme le retrait de signaux sans confondre avec la démolition', () => {
+    const map = makeMap();
+    setTile(map, 2, 2, TILE_KIND_INDEX.rail, 2 | 8, 0);
+    map.flags[2 * map.width + 2] = 1 << 6;
+    map.signalData![2 * map.width + 2] = 0x41;
+    const { controller, commits, settings } = harness(map);
+    controller.setSettings(settings);
+    controller.setTool('unsignal');
+    controller.handleBegin({ x: 2, y: 2 });
+    controller.handleEnd({ x: 2, y: 2 });
+
+    expect(commits).toHaveLength(1);
+    expect(commits[0]?.tool).toBe('unsignal');
+    expect(commits[0]?.tiles).toHaveLength(1);
   });
 });

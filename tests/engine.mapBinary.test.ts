@@ -14,7 +14,7 @@ import {
   setHeaderU32,
 } from './fixtures/mapBinaryFixture';
 
-describe('décodeur de snapshot carte v1', () => {
+describe('décodeur de snapshot carte', () => {
   it('décode l’en-tête, les couches et les métadonnées', () => {
     const bytes = buildMapFixture({ width: 4, height: 2, tick: 4321, sequence: 7 });
     const decoded = decodeMapSnapshot(bytes);
@@ -25,7 +25,7 @@ describe('décodeur de snapshot carte v1', () => {
     expect(decoded.tick).toBe(4321);
     expect(decoded.sequence).toBe(7);
     expect(decoded.header.magic).toBe(0x314d544f);
-    expect(decoded.header.version).toBe(1);
+    expect(decoded.header.version).toBe(2);
     expect(decoded.header.dataOffset).toBe(MAP_DATA_OFFSET);
     expect(decoded.map.width).toBe(4);
     expect(decoded.map.height).toBe(2);
@@ -41,9 +41,9 @@ describe('décodeur de snapshot carte v1', () => {
     for (const name of MAP_LAYER_ORDER) {
       const offset = layerOffset(name, width, height);
       const expected = bytes.slice(offset, offset + width * height);
-      expect(decoded.map[name]).toEqual(expected);
+      expect(decoded.map[name]!).toEqual(expected);
       // Le champ décodé est une copie, pas une vue sur le buffer source.
-      expect(decoded.map[name].buffer).not.toBe(bytes.buffer);
+      expect(decoded.map[name]!.buffer).not.toBe(bytes.buffer);
     }
     // Le motif par défaut dépend bien de l'identifiant de couche.
     expect(decoded.map.kind).not.toEqual(decoded.map.heightMap);
@@ -97,9 +97,17 @@ describe('décodeur de snapshot carte v1', () => {
     expect(() => decodeMapSnapshot(bytes)).toThrow(/Magic de carte invalide/);
   });
 
+  it('lit encore une carte v1 sans couche de signaux', () => {
+    const bytes = buildMapFixture({ width: 2, height: 2, version: 1 });
+    const decoded = decodeMapSnapshot(bytes);
+    expect(decoded.header.version).toBe(1);
+    expect(decoded.map.signalData).toEqual(new Uint8Array(4));
+    expect(decoded.map.trackBits).toHaveLength(4);
+  });
+
   it('refuse une version inconnue', () => {
     const bytes = buildMapFixture();
-    setHeaderU16(bytes, 4, 2);
+    setHeaderU16(bytes, 4, 3);
     expect(() => decodeMapSnapshot(bytes)).toThrow(/Version de snapshot carte non supportée/);
   });
 

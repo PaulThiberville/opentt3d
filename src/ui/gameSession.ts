@@ -17,6 +17,9 @@ import type {
   CompanySnapshot,
   EngineCommand,
   EngineDriver,
+  OrderOptions,
+  TownActionKind,
+  VehicleKind,
   WorldSnapshot,
 } from '../engine/protocol';
 import { TILE_FLAG } from '../engine/protocol';
@@ -25,22 +28,35 @@ import { WasmEngine } from '../engine/WasmEngine';
 import { engineBuildId, resolveEngineModuleUrl, type EngineMode } from '../engine/loadEngine';
 import { Game, type GameSpeed, type Selection } from '../game/Game';
 import {
+  BRIDGE_MATERIAL_ORDER,
   cloneBuildSettings,
   commandFromPlan,
   createBuildSettings,
   nextDirection,
   planBuild,
+  type BridgeMaterial,
   type BuildPlan,
   type BuildSettings,
   type BuildTool,
 } from '../game/buildRules';
 import { tileKindAt } from '../game/mapGrid';
 import {
+  assignGroupCommand,
   buyVehicleCommand,
+  cloneOrderOptions,
+  cloneVehicleCommand,
+  createGroupCommand,
+  deleteGroupCommand,
   depotAtTile,
   depotOrder,
+  groupActionCommand,
+  groupAutoreplaceCommand,
   orderVehicleCommand,
   ordersFromSnapshot,
+  refitVehicleCommand,
+  renameGroupCommand,
+  sendVehicleToDepotCommand,
+  serviceVehicleCommand,
   stationAtTile,
   stationOrder,
   validateVehicleOrders,
@@ -97,6 +113,15 @@ import {
   type LockstepGameDriver,
 } from './networkRunner';
 import { describeSelection } from './selection';
+import { describeBankruptcyAlert, describeFinanceView } from './financeView';
+import { TouchCameraGestures } from './touchGestures';
+import {
+  bankruptcyWarning,
+  financeCommand,
+  loanCapacity,
+  townActionCommand,
+  townActionCost,
+} from '../game/economyRules';
 import {
   describePlacePanel,
   industryAtTile,
@@ -105,7 +130,13 @@ import {
 } from './placeView';
 import { describeDepotPanel, describeVehiclePanel } from './vehicleView';
 import type { GameSettings } from './settings';
-import type { GameOverSummary, NetworkStatusView, PlaceTarget, SessionOverview } from './types';
+import type {
+  FinanceHistoryPoint,
+  GameOverSummary,
+  NetworkStatusView,
+  PlaceTarget,
+  SessionOverview,
+} from './types';
 
 export interface LoadToken {
   cancelled: boolean;
@@ -225,6 +256,16 @@ const BUILD_TOOL_INTROS: Record<BuildTool, string> = {
   station: 'Gares : réglez la taille et l’orientation, puis cliquez pour poser',
   depot: 'Dépôts : cliquez à côté d’une voie, R oriente l’entrée',
   signal: 'Signaux : cliquez ou glissez le long d’une voie ferrée',
+  unsignal: 'Retrait de signaux : cliquez ou glissez le long d’une voie ferrée',
+  convert: 'Type de rail : choisissez le type puis cliquez ou glissez sur une voie',
+  terraform: 'Terrassement : choisissez monter/descendre, puis cliquez ou glissez',
+  tree: 'Arbres : cliquez ou glissez pour boiser une zone',
+  canal: 'Canaux : cliquez ou glissez pour creuser un bief',
+  lock: 'Écluses : cliquez sur un canal relié à un bief voisin',
+  aqueduct: 'Aqueducs : glissez d’une rive à l’autre au-dessus du val',
+  crossing: 'Passage à niveau : cliquez sur une voie droite',
+  bridge: 'Ponts : glissez d’une culée à l’autre, M change le matériau',
+  tunnel: 'Tunnels : glissez entre deux portails à la même hauteur',
 };
 
 /** Touches 1/2/3 du mode photo, alignées sur `PHOTO_PRESET_IDS`. */
@@ -261,6 +302,7 @@ export class GameSession {
   private game: Game | null = null;
   private renderer: Renderer | null = null;
   private world: WorldView | null = null;
+  private touchGestures: TouchCameraGestures | null = null;
   private hud: Hud | null = null;
   private buildController: BuildController | null = null;
   private buildTool: BuildToolId | null = null;
@@ -288,6 +330,10 @@ export class GameSession {
   private lastTarget: WorldTarget | null = null;
   /** Dépôt ouvert par un clic (id stable de `snapshot.depots`). */
   private openDepot: number | null = null;
+  /** Panneau finances (#165) : échantillons client pour le graphique. */
+  private financeHistory: FinanceHistoryPoint[] = [];
+  private lastFinanceSampleAt = 0;
+  private bankruptcyMonthsAnnounced = -1;
   /** Véhicule dont la tournée attend un clic sur une gare/dépôt. */
   private orderPickingFor: number | null = null;
   private hudTimer = 0;
@@ -445,6 +491,7 @@ export class GameSession {
           difficulty: config.difficulty,
           startYear: config.startYear,
           climate: config.climate,
+          disasters: config.disasters,
           ...(config.companies && config.companies.length > 0
             ? { companies: config.companies }
             : {}),
@@ -489,6 +536,11 @@ export class GameSession {
     });
     this.attachEvents(game);
     this.attachListeners();
+    this.touchGestures = new TouchCameraGestures({
+      element: this.canvas,
+      camera: this.world.getCameraController(),
+    });
+    this.touchGestures.attach();
     this.createEngineBadge();
     this.createSaveChip();
     this.photoMode = this.createPhotoMode();
@@ -1131,12 +1183,31 @@ export class GameSession {
       onAddOrder: (vehicleId) => this.toggleOrderPicking(vehicleId),
       onRemoveOrder: (vehicleId, index) => this.removeOrder(vehicleId, index),
       onMoveOrder: (vehicleId, index, delta) => this.moveOrder(vehicleId, index, delta),
+      onRefitVehicle: (vehicleId, cargo) => this.refitVehicle(vehicleId, cargo),
+      onUpdateOrder: (vehicleId, index, options) =>
+        this.updateOrderOptions(vehicleId, index, options),
+      onAddConditionalOrder: (vehicleId) => this.addConditionalOrder(vehicleId),
+      onShareOrders: (vehicleId, targetId) => this.shareOrders(vehicleId, targetId),
+      onCloneVehicle: (vehicleId) => this.cloneVehicle(vehicleId),
+      onServiceVehicle: (vehicleId) => this.serviceVehicle(vehicleId),
+      onSendVehicleToDepot: (vehicleId) => this.sendVehicleToDepot(vehicleId),
+      onCreateGroup: (kind, name) => this.createGroup(kind, name),
+      onRenameGroup: (groupId, name) => this.renameGroup(groupId, name),
+      onDeleteGroup: (groupId) => this.deleteGroup(groupId),
+      onAssignVehicleGroup: (vehicleId, groupId) => this.assignVehicleGroup(vehicleId, groupId),
+      onGroupAction: (groupId, action) => this.runGroupAction(groupId, action),
+      onGroupAutoreplace: (groupId, model, whenOld) =>
+        this.setGroupAutoreplace(groupId, model, whenOld),
       onCloseVehicle: () => this.clearSelection(),
       onPlaceFocus: (x, y) => this.focusPlace(x, y),
       onPlaceSelect: (target) => this.selectPlaceTarget(target),
       onClosePlace: () => this.clearSelection(),
       onToggleAudio: () => this.toggleAudioMute(),
       onPhotoMode: () => this.togglePhotoMode(),
+      onToggleFinances: () => this.toggleFinances(),
+      onIncreaseLoan: () => this.adjustLoan('increase_loan'),
+      onDecreaseLoan: () => this.adjustLoan('decrease_loan'),
+      onTownAction: (townId, action) => this.runTownAction(townId, action),
     });
   }
 
@@ -1193,6 +1264,23 @@ export class GameSession {
       event.preventDefault();
       this.undoLastBuild();
       return;
+    }
+    if (!event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (event.code === 'KeyB') {
+        event.preventDefault();
+        this.setBuildTool('bridge');
+        return;
+      }
+      if (event.code === 'KeyT') {
+        event.preventDefault();
+        this.setBuildTool('tunnel');
+        return;
+      }
+      if (event.code === 'KeyM' && this.buildTool === 'bridge') {
+        event.preventDefault();
+        this.cycleBridgeMaterial();
+        return;
+      }
     }
     if ((event.key === 'r' || event.key === 'R') && this.buildTool) {
       if (this.rotateBuild()) {
@@ -1509,6 +1597,11 @@ export class GameSession {
     }
     if (vehicle) depot = null;
     const place = vehicle || depot ? null : describePlacePanel(snapshot, selection);
+    const company = this.localCompanySnapshot();
+    if (company) this.sampleFinanceHistory(company.money, company.value);
+    const finance = describeFinanceView(snapshot, companyId, this.financeHistory);
+    const bankruptcyAlert = describeBankruptcyAlert(snapshot, companyId);
+    this.announceBankruptcy(company);
     hud.update({
       snapshot,
       fps: game.getFps(),
@@ -1518,12 +1611,101 @@ export class GameSession {
       depot,
       vehicle,
       place,
+      finance,
+      bankruptcyAlert,
       quality: this.quality,
       following: world.isFollowing(),
       drawCalls: world.getDrawCalls(),
       controlsLocked: this.isNetwork,
       networkStatus: this.networkStatus(),
     });
+  }
+
+  /** Échantillonne trésorerie et valeur pour le graphique (max 60 points). */
+  private sampleFinanceHistory(money: number, value: number): void {
+    const now =
+      typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? performance.now()
+        : Date.now();
+    if (now - this.lastFinanceSampleAt < 2_000) return;
+    this.lastFinanceSampleAt = now;
+    this.financeHistory.push({ money, value });
+    if (this.financeHistory.length > 60) this.financeHistory.shift();
+  }
+
+  /** Signale chaque nouveau mois de trésorerie négative sans spammer. */
+  private announceBankruptcy(company: CompanySnapshot | null): void {
+    if (!company) return;
+    const months = bankruptcyWarning(company).months;
+    if (months > this.bankruptcyMonthsAnnounced) {
+      const alert = describeBankruptcyAlert(this.game?.getLatestSnapshot() ?? null);
+      if (alert) this.hud?.notify(alert.tone === 'error' ? 'error' : 'warning', alert.text);
+    }
+    this.bankruptcyMonthsAnnounced = months;
+  }
+
+  /** Ouvre/ferme le panneau finances (#165). */
+  toggleFinances(): void {
+    this.hud?.toggleFinances();
+    this.refreshHud();
+  }
+
+  /** Emprunt ou remboursement d'un pas, borné par le snapshot. */
+  private adjustLoan(action: 'increase_loan' | 'decrease_loan'): void {
+    const game = this.game;
+    const companyId = this.localCompanyId();
+    if (!game || companyId === null) {
+      this.hud?.notify('warning', t('finance.noCompany'));
+      return;
+    }
+    const snapshot = game.getLatestSnapshot();
+    const company = snapshot?.companies.find((item) => item.id === companyId) ?? null;
+    const capacity = loanCapacity(company, snapshot?.economy ?? null);
+    if (action === 'increase_loan' && !capacity.canIncrease) {
+      this.hud?.notify('warning', t('finance.loan.blocked'));
+      return;
+    }
+    if (action === 'decrease_loan' && !capacity.canDecrease) {
+      this.hud?.notify('warning', t('finance.loan.blocked'));
+      return;
+    }
+    const amount = action === 'increase_loan' ? capacity.increaseAmount : capacity.decreaseAmount;
+    game.issueCommand(financeCommand(companyId, action, amount));
+    if (this.isNetwork) {
+      this.hud?.notify('info', t('finance.networkPending'));
+      return;
+    }
+    game.refresh();
+    this.refreshHud();
+  }
+
+  /** Action municipale depuis le panneau ville (#166). */
+  private runTownAction(townId: number, action: TownActionKind): void {
+    const game = this.game;
+    const companyId = this.localCompanyId();
+    if (!game || companyId === null) {
+      this.hud?.notify('warning', t('finance.noCompany'));
+      return;
+    }
+    const snapshot = game.getLatestSnapshot();
+    const town = snapshot?.towns.find((item) => item.id === townId) ?? null;
+    const cost = town ? townActionCost(town, action) : null;
+    if (cost === null) {
+      this.hud?.notify('warning', t('authority.reason.unavailable'));
+      return;
+    }
+    game.issueCommand(townActionCommand(companyId, townId, action));
+    if (this.isNetwork) {
+      this.hud?.notify('info', t('finance.networkPending'));
+      return;
+    }
+    game.refresh();
+    const after = game.getLatestSnapshot();
+    const company = after?.companies.find((item) => item.id === companyId);
+    if (company && company.money < cost) {
+      this.hud?.notify('warning', t('authority.reason.insufficientFunds'));
+    }
+    this.refreshHud();
   }
 
   private applySelection(target: WorldTarget | null): void {
@@ -1681,7 +1863,10 @@ export class GameSession {
     const company = this.localCompanyId();
     if (company === null) return;
     const vehicle = this.game?.getLatestSnapshot()?.vehicles.find((item) => item.id === vehicleId);
-    if (vehicle && vehicle.orderTargets.length === 0) {
+    const hasOrder =
+      vehicle?.orderDetails?.some((order) => order.kind !== 'conditional') ??
+      (vehicle?.orderTargets.length ?? 0) > 0;
+    if (vehicle && !hasOrder) {
       this.hud?.notify('warning', 'Ajoutez au moins une gare à la tournée avant de démarrer.');
       return;
     }
@@ -1717,6 +1902,87 @@ export class GameSession {
     }
     game.refresh();
     this.refreshHud();
+  }
+
+  /** Entretien au dépôt (#163). */
+  private serviceVehicle(vehicleId: number): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(serviceVehicleCommand(company, vehicleId));
+  }
+
+  /** Envoi au dépôt sans entretien (#163). */
+  private sendVehicleToDepot(vehicleId: number): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(sendVehicleToDepotCommand(company, vehicleId));
+  }
+
+  /** Émet une commande de groupe, force le snapshot en solo puis rafraîchit le HUD. */
+  private issueGroupCommand(command: EngineCommand, message = 'Commande de groupe envoyée.'): void {
+    const game = this.game;
+    if (!game) return;
+    game.issueCommand(command);
+    if (this.isNetwork) {
+      this.hud?.notify('info', `${message} Elle sera appliquée au prochain tour.`);
+      return;
+    }
+    game.refresh();
+    this.refreshHud();
+  }
+
+  private createGroup(kind: VehicleKind, name: string): void {
+    const company = this.localCompanyId();
+    if (company === null) {
+      this.hud?.notify('warning', 'Aucune entreprise locale : création impossible.');
+      return;
+    }
+    this.issueGroupCommand(createGroupCommand(company, kind, name), 'Création du groupe envoyée.');
+  }
+
+  private renameGroup(groupId: number, name: string): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueGroupCommand(renameGroupCommand(company, groupId, name), 'Renommage envoyé.');
+  }
+
+  private deleteGroup(groupId: number): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueGroupCommand(deleteGroupCommand(company, groupId), 'Suppression envoyée.');
+  }
+
+  private assignVehicleGroup(vehicleId: number, groupId: number | null): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueGroupCommand(
+      assignGroupCommand(company, groupId, [vehicleId]),
+      'Affectation envoyée.',
+    );
+  }
+
+  private runGroupAction(
+    groupId: number,
+    action: 'start' | 'stop' | 'send_to_depot' | 'sell',
+  ): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    if (action === 'sell' && this.game?.getSelection()?.kind === 'vehicle') {
+      this.clearSelection();
+    }
+    this.issueGroupCommand(
+      groupActionCommand(company, groupId, action),
+      'Action de groupe envoyée.',
+    );
+  }
+
+  private setGroupAutoreplace(groupId: number, model: string | null, whenOld: boolean): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueGroupCommand(
+      groupAutoreplaceCommand(company, groupId, model, whenOld),
+      'Autoreplace envoyé.',
+    );
   }
 
   /** Arme ou désarme l'ajout d'un ordre par clic sur la carte. */
@@ -1801,6 +2067,109 @@ export class GameSession {
     });
   }
 
+  /** Reconfigure la cargaison d'un véhicule arrêté dans un dépôt (#160). */
+  private refitVehicle(vehicleId: number, cargo: string): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(refitVehicleCommand(company, vehicleId, cargo));
+  }
+
+  /** Remplace les options d'un ordre existant (#161/#162). */
+  private updateOrderOptions(vehicleId: number, index: number, options: OrderOptions): void {
+    this.updateOrders(vehicleId, (orders) =>
+      orders.map((order, position) =>
+        position === index
+          ? {
+              target: order.target,
+              kind: order.kind,
+              options: cloneOrderOptions(options),
+            }
+          : order,
+      ),
+    );
+  }
+
+  /** Ajoute un ordre conditionnel par défaut (chargement ≥ 100 %) (#161). */
+  private addConditionalOrder(vehicleId: number): void {
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    if (!snapshot) return;
+    const vehicle = snapshot.vehicles.find((item) => item.id === vehicleId);
+    if (!vehicle) return;
+    const orders = ordersFromSnapshot(vehicle, snapshot);
+    if (orders.length === 0) {
+      this.hud?.notify('warning', 'Ajoutez d’abord un arrêt avant une condition.');
+      return;
+    }
+    const next: VehicleOrder[] = [
+      ...orders,
+      {
+        target: -1,
+        kind: 'conditional',
+        options: {
+          condition: { type: 'percentage', comparator: 'more_or_equal', value: 100 },
+          jump: 0,
+        },
+      },
+    ];
+    const validation = validateVehicleOrders(next, snapshot);
+    if (!validation.ok) {
+      this.hud?.notify('warning', validation.reason ?? 'Condition refusée.');
+      return;
+    }
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(orderVehicleCommand(company, vehicleId, next));
+    this.hud?.notify('info', 'Ordre conditionnel ajouté.');
+  }
+
+  /** Copie la tournée d'un véhicule vers un autre de la même entreprise. */
+  private shareOrders(vehicleId: number, targetId: number): void {
+    const snapshot = this.game?.getLatestSnapshot() ?? null;
+    if (!snapshot) return;
+    const source = snapshot.vehicles.find((item) => item.id === vehicleId);
+    const target = snapshot.vehicles.find((item) => item.id === targetId);
+    if (!source || !target) return;
+    const orders = ordersFromSnapshot(source, snapshot);
+    if (orders.length === 0) {
+      this.hud?.notify('warning', 'Aucune tournée à partager.');
+      return;
+    }
+    const validation = validateVehicleOrders(orders, snapshot);
+    if (!validation.ok) {
+      this.hud?.notify('warning', validation.reason ?? 'Tournée non partageable.');
+      return;
+    }
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(orderVehicleCommand(company, targetId, orders));
+    this.hud?.notify('info', `Tournée partagée avec le véhicule #${targetId}.`);
+  }
+
+  /** Achète un clone du véhicule dans son dépôt (#161). */
+  private cloneVehicle(vehicleId: number): void {
+    const game = this.game;
+    if (!game) return;
+    const company = this.localCompanyId();
+    if (company === null) return;
+    const before = new Set(game.getLatestSnapshot()?.vehicles.map((item) => item.id) ?? []);
+    game.issueCommand(cloneVehicleCommand(company, vehicleId));
+    if (this.isNetwork) {
+      this.hud?.notify('info', 'Duplication envoyée : elle sera appliquée au prochain tour.');
+      return;
+    }
+    game.refresh();
+    const snapshot = game.getLatestSnapshot();
+    const cloned = snapshot?.vehicles
+      .filter((item) => item.company === company && !before.has(item.id))
+      .sort((a, b) => b.id - a.id)[0];
+    if (cloned) {
+      this.selectVehicle(cloned.id);
+      this.hud?.notify('info', `Véhicule #${cloned.id} dupliqué depuis #${vehicleId}.`);
+      return;
+    }
+    this.refreshHud();
+  }
+
   private updateOrders(
     vehicleId: number,
     transform: (orders: VehicleOrder[]) => VehicleOrder[],
@@ -1809,7 +2178,18 @@ export class GameSession {
     if (!snapshot) return;
     const vehicle = snapshot.vehicles.find((item) => item.id === vehicleId);
     if (!vehicle) return;
-    const orders = transform(ordersFromSnapshot(vehicle, snapshot));
+    const next = transform(ordersFromSnapshot(vehicle, snapshot));
+    const lastIndex = Math.max(0, next.length - 1);
+    const orders = next.map((order) => {
+      if (order.kind !== 'conditional' || order.options?.jump === undefined) return order;
+      return {
+        ...order,
+        options: {
+          ...cloneOrderOptions(order.options),
+          jump: Math.min(order.options.jump, lastIndex),
+        },
+      };
+    });
     const company = this.localCompanyId();
     if (company === null) return;
     this.issueVehicleCommand(orderVehicleCommand(company, vehicleId, orders));
@@ -1894,17 +2274,34 @@ export class GameSession {
     this.hud?.setBuildOptions(this.buildTool, this.buildSettings);
   }
 
+  /** Change la famille de pont active (touche M). */
+  private cycleBridgeMaterial(): void {
+    const current = this.buildSettings.bridge.material;
+    const index = BRIDGE_MATERIAL_ORDER.indexOf(current);
+    const material: BridgeMaterial =
+      BRIDGE_MATERIAL_ORDER[(index + 1) % BRIDGE_MATERIAL_ORDER.length] ?? 'wood';
+    this.applyBuildSettings({
+      ...this.buildSettings,
+      bridge: { ...this.buildSettings.bridge, material },
+    });
+  }
+
   /** Pivote l'outil actif (R ou bouton « Pivoter »). */
   private rotateBuild(): boolean {
-    if (!this.buildTool || (this.buildTool !== 'station' && this.buildTool !== 'depot')) {
+    if (
+      !this.buildTool ||
+      (this.buildTool !== 'station' && this.buildTool !== 'depot' && this.buildTool !== 'lock')
+    ) {
       return false;
     }
     if (this.buildTool === 'station') {
       this.buildSettings.station.direction = nextDirection(this.buildSettings.station.direction);
-    } else {
+    } else if (this.buildTool === 'depot') {
       this.buildSettings.depot.direction = nextDirection(
         this.buildSettings.depot.direction ?? 'se',
       );
+    } else {
+      this.buildSettings.lock.direction = nextDirection(this.buildSettings.lock.direction ?? 'ne');
     }
     this.buildController?.setSettings(this.buildSettings);
     this.hud?.setBuildOptions(this.buildTool, this.buildSettings);
@@ -1968,7 +2365,9 @@ export class GameSession {
     if (this.isNetwork) {
       // Le lockstep appliquera la commande au prochain tour : on ne peut pas
       // encore vérifier la carte, mais l'annulation reste une commande valide.
-      if (plan.tool !== 'signal') this.lastBuild = plan;
+      if (plan.tool !== 'signal' && plan.tool !== 'unsignal' && plan.tool !== 'convert') {
+        this.lastBuild = plan;
+      }
       this.hud?.notify(
         'info',
         'Commande de construction envoyée : elle sera appliquée au prochain tour.',
@@ -1981,7 +2380,14 @@ export class GameSession {
     this.refreshHud();
     // Un signal ne se retire pas avec la démolition (elle arracherait la voie) :
     // il n'entre pas dans la pile Ctrl+Z.
-    if (plan.tool !== 'signal' && this.buildConfirmed(plan, company)) this.lastBuild = plan;
+    if (
+      plan.tool !== 'signal' &&
+      plan.tool !== 'unsignal' &&
+      plan.tool !== 'convert' &&
+      this.buildConfirmed(plan, company)
+    ) {
+      this.lastBuild = plan;
+    }
   }
 
   /** Vérifie sur la carte que toutes les tuiles du plan ont bien été posées. */
@@ -1994,6 +2400,52 @@ export class GameSession {
         (tile) =>
           tileKindAt(map, tile.x, tile.y) === 'rail' &&
           ((map.flags[tile.index] ?? 0) & TILE_FLAG.SIGNAL) !== 0,
+      );
+    }
+    if (plan.tool === 'unsignal') return false;
+    if (plan.tool === 'terraform') {
+      const delta = plan.terraform?.direction === 'down' ? -1 : 1;
+      return plan.tiles.every((tile) => {
+        const expected = Math.max(0, Math.min(15, tile.height + delta));
+        return (map.heightMap[tile.index] ?? 0) === expected;
+      });
+    }
+    if (plan.tool === 'tree') {
+      return plan.tiles.every(
+        (tile) => tileKindAt(map, tile.x, tile.y) === 'trees' && map.owner[tile.index] === company,
+      );
+    }
+    if (plan.tool === 'canal') {
+      return plan.tiles.every(
+        (tile) => tileKindAt(map, tile.x, tile.y) === 'canal' && map.owner[tile.index] === company,
+      );
+    }
+    if (plan.tool === 'lock') {
+      return plan.tiles.every(
+        (tile) => tileKindAt(map, tile.x, tile.y) === 'lock' && map.owner[tile.index] === company,
+      );
+    }
+    if (plan.tool === 'aqueduct') {
+      const last = plan.tiles.length - 1;
+      return plan.tiles.every((tile, index) => {
+        const expected = index === 0 || index === last ? 'canal' : 'aqueduct';
+        return tileKindAt(map, tile.x, tile.y) === expected && map.owner[tile.index] === company;
+      });
+    }
+    if (plan.tool === 'crossing') {
+      return plan.tiles.every(
+        (tile) =>
+          tileKindAt(map, tile.x, tile.y) === 'crossing' && map.owner[tile.index] === company,
+      );
+    }
+    if (plan.tool === 'bridge') {
+      return plan.tiles.every((tile) => ((map.flags[tile.index] ?? 0) & TILE_FLAG.BRIDGE) !== 0);
+    }
+    if (plan.tool === 'tunnel') {
+      // OpenTTD ne marque que les deux portails ; le relief intermédiaire
+      // n'est pas une tuile de tunnel.
+      return [plan.tiles[0], plan.tiles[plan.tiles.length - 1]].every(
+        (tile) => tile !== undefined && ((map.flags[tile.index] ?? 0) & TILE_FLAG.TUNNEL) !== 0,
       );
     }
     const expected = plan.tool === 'station' ? 'station' : plan.depot?.kind;
@@ -2029,10 +2481,42 @@ export class GameSession {
     const snapshot = game.getLatestSnapshot();
     const money = snapshot?.companies.find((item) => item.id === company)?.money;
 
+    // Terrassement : la commande inverse remonte ou abaisse les mêmes tuiles.
+    if (last.tool === 'terraform') {
+      const direction = last.terraform?.direction === 'down' ? 'up' : 'down';
+      game.issueCommand({
+        type: 'build',
+        tool: 'terraform',
+        company,
+        from: last.from,
+        to: last.to,
+        options: { direction, size: last.terraform?.size ?? 1 },
+      });
+      this.lastBuild = null;
+      if (this.isNetwork) {
+        this.hud?.notify('info', 'Annulation envoyée : terrassement inverse au prochain tour.');
+        return;
+      }
+      game.refresh();
+      this.refreshHud();
+      return;
+    }
+
     // Gare/dépôt : l'emprise est rectangulaire, on démolit chaque tuile du plan
     // (une commande par tuile) pour ne pas déborder sur le voisinage.
-    if (last.tool === 'station' || last.tool === 'depot') {
+    if (
+      last.tool === 'station' ||
+      last.tool === 'depot' ||
+      last.tool === 'tree' ||
+      last.tool === 'canal' ||
+      last.tool === 'lock' ||
+      last.tool === 'aqueduct' ||
+      last.tool === 'crossing'
+    ) {
       const commands: EngineCommand[] = [];
+      const restores: EngineCommand[] = [];
+      const restoreHeight =
+        last.tool === 'canal' || last.tool === 'lock' || last.tool === 'aqueduct';
       for (const tile of last.tiles) {
         const clear = planBuild({
           map,
@@ -2050,6 +2534,52 @@ export class GameSession {
           return;
         }
         commands.push(commandFromPlan(clear, company));
+        if (restoreHeight) {
+          const current = map.heightMap[tile.index] ?? tile.height;
+          const levels = Math.abs(current - tile.height);
+          for (let level = 0; level < levels; level += 1) {
+            restores.push({
+              type: 'build',
+              tool: 'terraform',
+              company,
+              from: { x: tile.x, y: tile.y },
+              options: { direction: current < tile.height ? 'up' : 'down', size: 1 },
+            });
+          }
+        }
+      }
+      for (const command of commands) game.issueCommand(command);
+      for (const command of restores) game.issueCommand(command);
+      this.lastBuild = null;
+      if (this.isNetwork) {
+        this.hud?.notify('info', 'Annulation envoyée : démolition au prochain tour.');
+        return;
+      }
+      game.refresh();
+      this.refreshHud();
+      return;
+    }
+
+    // Pont/tunnel : démolir une culée ou un portail suffit à retirer tout
+    // l'ouvrage dans OpenTTD ; les tuiles intermédiaires (eau, relief) ne
+    // doivent pas être « démolies » séparément.
+    if (last.tool === 'bridge' || last.tool === 'tunnel') {
+      const commands: EngineCommand[] = [];
+      for (const point of [last.from, last.to]) {
+        const clear = planBuild({
+          map,
+          tool: 'clear',
+          from: point,
+          company,
+          ...(money !== undefined ? { budget: money } : {}),
+        });
+        if (!clear.valid) continue;
+        commands.push(commandFromPlan(clear, company));
+      }
+      if (commands.length === 0) {
+        this.hud?.notify('warning', 'Démolition impossible : aucune extrémité accessible.');
+        this.lastBuild = null;
+        return;
       }
       for (const command of commands) game.issueCommand(command);
       this.lastBuild = null;
@@ -2213,6 +2743,8 @@ export class GameSession {
     this.introHint = null;
     this.photoMode?.dispose();
     this.photoMode = null;
+    this.touchGestures?.detach();
+    this.touchGestures = null;
     this.renderer?.stop();
     this.audio?.dispose();
     this.audio = null;

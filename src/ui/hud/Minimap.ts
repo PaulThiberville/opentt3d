@@ -47,6 +47,9 @@ const MINIMAP_COLORS: Record<TileKind, number> = {
   dock: 0x7b6a4a,
   canal: 0x2b6087,
   river: 0x2d6a8e,
+  lock: 0x2b6087,
+  aqueduct: 0x8a8170,
+  crossing: 0x4b4d50,
 };
 
 export interface MinimapOptions {

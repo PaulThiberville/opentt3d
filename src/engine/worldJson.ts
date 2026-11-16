@@ -17,7 +17,12 @@
  * | `company.*` absent | 0, `''`, couleur 0, `isLocal = false` |
  * | `town.growthRate` | 0 |
  * | `town.rating` | 0 (échelle 0..1000) |
+ * | `town.authority` absent | aucune action locale exposée |
  * | `industry.kind` | `'unknown'` |
+ * | `industry.serviceRate` | `transported / production × 100` |
+ * | `company.maxLoan`/`monthsOfBankruptcy` | absents = repli UI |
+ * | `economy.inflation`/`interestRate`… | absents = repli UI |
+ * | `subsidies` absent | `[]` |
  * | `station.kind` inconnu | `'train'` |
  * | `depot.kind` inconnu | dépôt ignoré (aucune cible d'achat/ordre) |
  * | `depot.id` | 0 minimum, entier |
@@ -27,6 +32,12 @@
  * | `vehicle.cargo` | `null` |
  * | `vehicle.status` | 0 (arrêté) |
  * | `vehicle.orderTargets` | `[]` |
+ * | `vehicle.orderDetails` | absent : l'UI retombe sur `orderTargets` |
+ * | `vehicle.currentOrder` | absent |
+ * | `vehicle.model` | absent : modèle inféré par type/cargaison |
+ * | `vehicle.reliability` | absent : panneau d'entretien masqué (#163) |
+ * | `vehicle.group` | absent : véhicule non groupé (#164) |
+ * | `groups` absent | `[]` (#164) |
  * | `vehicle.kind` inconnu | véhicule ignoré (aucun modèle de rendu) |
  * | `news`/`events` absents | `[]` |
  *
@@ -37,21 +48,39 @@
 import {
   COMPANY_NONE,
   PROTOCOL_VERSION,
+  type BreakdownState,
   type CompanyId,
   type CompanySnapshot,
   type DepotKind,
   type DepotSnapshot,
+  type DisasterKind,
+  type DisasterSnapshot,
   type EconomySnapshot,
   type IndustrySnapshot,
+  type OrderAction,
+  type OrderComparator,
+  type OrderCondition,
+  type OrderConditionType,
+  type OrderOptions,
   type OrderTargetKind,
+  type OrderTimetable,
   type SnapshotMeta,
   type StationSnapshot,
+  type StructureSnapshot,
+  type SubsidySnapshot,
+  type TownActionKind,
+  type TownActionSnapshot,
+  type TownAuthoritySnapshot,
   type TownSnapshot,
   type VehicleKind,
+  type VehicleGroupSnapshot,
+  type VehicleOrderSnapshot,
+  type VehicleReliabilitySnapshot,
   type VehicleSnapshot,
   type WorldEvent,
   type WorldSnapshot,
 } from './protocol';
+import { parseRailType } from '../game/railRules';
 
 export type WorldJsonErrorCode = 'not-json' | 'protocol' | 'shape';
 
@@ -140,6 +169,100 @@ function cargoList(
 
 const VEHICLE_KINDS: readonly VehicleKind[] = ['train', 'road', 'ship', 'aircraft'];
 
+const ORDER_KINDS: readonly OrderTargetKind[] = ['station', 'industry', 'depot', 'conditional'];
+const ORDER_ACTIONS: readonly OrderAction[] = [
+  'normal',
+  'full_load',
+  'no_load',
+  'unload',
+  'transfer',
+];
+const ORDER_CONDITION_TYPES: readonly OrderConditionType[] = [
+  'cargo',
+  'money',
+  'date',
+  'percentage',
+];
+const ORDER_COMPARATORS: readonly OrderComparator[] = [
+  'equal',
+  'not_equal',
+  'less',
+  'less_or_equal',
+  'more',
+  'more_or_equal',
+];
+
+function oneOf<T extends string>(value: unknown, values: readonly T[]): T | null {
+  return typeof value === 'string' && (values as readonly string[]).includes(value)
+    ? (value as T)
+    : null;
+}
+
+function parseOrderOptions(value: unknown): OrderOptions | undefined {
+  if (!isRecord(value)) return undefined;
+  const action = oneOf(value.action, ORDER_ACTIONS);
+  const conditionRaw = value.condition;
+  let condition: OrderCondition | undefined;
+  if (isRecord(conditionRaw)) {
+    const type = oneOf(conditionRaw.type, ORDER_CONDITION_TYPES);
+    const comparator = oneOf(conditionRaw.comparator, ORDER_COMPARATORS);
+    if (type && comparator) {
+      condition = {
+        type,
+        comparator,
+        value: int(conditionRaw.value, 0),
+        ...(typeof conditionRaw.cargo === 'string' ? { cargo: conditionRaw.cargo } : {}),
+        ...(Number.isFinite(conditionRaw.month)
+          ? { month: clampInt(conditionRaw.month, 0, 11, 0) }
+          : {}),
+      };
+    }
+  }
+  const jump = Number.isFinite(value.jump) ? Math.max(0, int(value.jump, 0)) : undefined;
+  const timetableRaw = value.timetable;
+  let timetable: OrderTimetable | undefined;
+  if (isRecord(timetableRaw)) {
+    const waitTicks = Number.isFinite(timetableRaw.waitTicks)
+      ? Math.max(0, int(timetableRaw.waitTicks, 0))
+      : undefined;
+    const travelTicks = Number.isFinite(timetableRaw.travelTicks)
+      ? Math.max(0, int(timetableRaw.travelTicks, 0))
+      : undefined;
+    const autostart = timetableRaw.autostart === true ? true : undefined;
+    if (waitTicks !== undefined || travelTicks !== undefined || autostart !== undefined) {
+      timetable = {
+        ...(waitTicks !== undefined ? { waitTicks } : {}),
+        ...(travelTicks !== undefined ? { travelTicks } : {}),
+        ...(autostart !== undefined ? { autostart } : {}),
+      };
+    }
+  }
+  if (!action && !condition && jump === undefined && !timetable) return undefined;
+  return {
+    ...(action ? { action } : {}),
+    ...(condition ? { condition } : {}),
+    ...(jump !== undefined ? { jump } : {}),
+    ...(timetable ? { timetable } : {}),
+  };
+}
+
+function parseOrderDetails(value: unknown): VehicleOrderSnapshot[] {
+  const orders: VehicleOrderSnapshot[] = [];
+  for (const entry of list(value)) {
+    if (!isRecord(entry)) continue;
+    const kind = oneOf(entry.kind, ORDER_KINDS);
+    if (!kind) continue;
+    const target = Math.trunc(num(entry.target, kind === 'conditional' ? -1 : 0));
+    const options = parseOrderOptions(entry.options);
+    orders.push({
+      target,
+      kind,
+      ...(options ? { options } : {}),
+    });
+  }
+  return orders;
+}
+
 function vehicleKind(value: unknown): VehicleKind | null {
   return typeof value === 'string' && (VEHICLE_KINDS as readonly string[]).includes(value)
     ? (value as VehicleKind)
@@ -192,11 +315,44 @@ export function parseCompany(value: unknown): CompanySnapshot {
     isAI: bool(raw.isAI),
     isLocal: bool(raw.isLocal),
     bankrupt: bool(raw.bankrupt),
+    ...(typeof raw.maxLoan === 'number' ? { maxLoan: Math.max(0, num(raw.maxLoan, 0)) } : {}),
+    ...(typeof raw.monthsOfBankruptcy === 'number'
+      ? { monthsOfBankruptcy: Math.max(0, int(raw.monthsOfBankruptcy, 0)) }
+      : {}),
+    ...(typeof raw.aiLevel === 'number' && raw.aiLevel > 0
+      ? { aiLevel: clampInt(raw.aiLevel, 1, 3, 1) }
+      : {}),
+  };
+}
+
+const TOWN_ACTIONS: readonly TownActionKind[] = ['advertise', 'fund_roads', 'fund_buildings'];
+
+function parseTownAction(value: unknown): TownActionSnapshot {
+  const raw = record(value);
+  return {
+    available: bool(raw.available, true),
+    cost: Math.max(0, num(raw.cost, 0)),
+  };
+}
+
+/** Autorité locale : chaque action absente retombe sur « indisponible ». */
+export function parseTownAuthority(value: unknown, rating: number): TownAuthoritySnapshot {
+  const raw = record(value);
+  const actionsRaw = record(raw.actions);
+  const actions = {} as Record<TownActionKind, TownActionSnapshot>;
+  for (const action of TOWN_ACTIONS) {
+    const entry = actionsRaw[action];
+    actions[action] = entry === undefined ? { available: false, cost: 0 } : parseTownAction(entry);
+  }
+  return {
+    rating: clampInt(raw.rating, 0, 1000, rating),
+    actions,
   };
 }
 
 export function parseTown(value: unknown): TownSnapshot {
   const raw = record(value);
+  const rating = clampInt(raw.rating, 0, 1000, 0);
   return {
     id: Math.max(0, int(raw.id, 0)),
     name: str(raw.name, 'Ville'),
@@ -205,21 +361,38 @@ export function parseTown(value: unknown): TownSnapshot {
     population: Math.max(0, int(raw.population, 0)),
     growthRate: int(raw.growthRate, 0),
     buildings: Math.max(0, int(raw.buildings, 0)),
-    rating: clampInt(raw.rating, 0, 1000, 0),
+    rating,
+    ...(isRecord(raw.authority) ? { authority: parseTownAuthority(raw.authority, rating) } : {}),
   };
+}
+
+function stringList(value: unknown): string[] {
+  const entries: string[] = [];
+  for (const item of list(value)) {
+    if (typeof item === 'string' && item.trim() !== '') entries.push(item);
+  }
+  return entries;
 }
 
 export function parseIndustry(value: unknown): IndustrySnapshot {
   const raw = record(value);
+  const production = Math.max(0, int(raw.production, 0));
+  const transported = Math.max(0, int(raw.transported, 0));
   return {
     id: Math.max(0, int(raw.id, 0)),
     name: str(raw.name, 'Industrie'),
     kind: str(raw.kind, 'unknown'),
     x: num(raw.x, 0),
     y: num(raw.y, 0),
-    production: Math.max(0, int(raw.production, 0)),
-    transported: Math.max(0, int(raw.transported, 0)),
+    production,
+    transported,
     stocks: cargoList(raw.stocks),
+    ...(Array.isArray(raw.accepts) ? { accepts: stringList(raw.accepts) } : {}),
+    ...(typeof raw.serviceRate === 'number'
+      ? { serviceRate: Math.max(0, Math.min(100, num(raw.serviceRate, 0))) }
+      : production > 0
+        ? { serviceRate: Math.max(0, Math.min(100, (transported / production) * 100)) }
+        : {}),
   };
 }
 
@@ -252,7 +425,127 @@ export function parseDepot(value: unknown): DepotSnapshot | null {
     direction: clampInt(raw.direction, 0, 3, 0),
     width: Math.max(1, int(raw.width, 1)),
     height: Math.max(1, int(raw.height, 1)),
+    ...(kind === 'rail'
+      ? (() => {
+          const railType = parseRailType(raw.railType);
+          return railType ? { railType } : {};
+        })()
+      : {}),
   };
+}
+
+const BRIDGE_MATERIALS = [
+  'wood',
+  'concrete',
+  'steel',
+  'suspension',
+  'cantilever',
+  'tubular',
+] as const;
+
+function bridgeMaterial(value: unknown): (typeof BRIDGE_MATERIALS)[number] {
+  return typeof value === 'string' && (BRIDGE_MATERIALS as readonly string[]).includes(value)
+    ? (value as (typeof BRIDGE_MATERIALS)[number])
+    : 'wood';
+}
+
+/** Pont ou tunnel exposé par le pont ; `null` si le type est inconnu. */
+export function parseStructure(value: unknown): StructureSnapshot | null {
+  const raw = record(value);
+  const kind = str(raw.kind, '');
+  const from = record(raw.from);
+  const to = record(raw.to);
+  const transport = raw.transport === 'road' ? 'road' : 'rail';
+  const id = Math.max(0, int(raw.id, 0));
+  const length = Math.max(1, int(raw.length, 1));
+  if (kind === 'bridge') {
+    return {
+      id,
+      kind: 'bridge',
+      company: companyId(raw.company),
+      transport,
+      material: bridgeMaterial(raw.material),
+      from: { x: int(from.x, 0), y: int(from.y, 0) },
+      to: { x: int(to.x, 0), y: int(to.y, 0) },
+      length,
+      deckHeight: Math.max(0, int(raw.deckHeight, 0)),
+    };
+  }
+  if (kind === 'tunnel') {
+    return {
+      id,
+      kind: 'tunnel',
+      company: companyId(raw.company),
+      transport,
+      from: { x: int(from.x, 0), y: int(from.y, 0) },
+      to: { x: int(to.x, 0), y: int(to.y, 0) },
+      length,
+      portalHeight: Math.max(0, int(raw.portalHeight, 0)),
+    };
+  }
+  return null;
+}
+
+/** Usure et panne exposées par le pont (#163) ; `null` si le bloc manque. */
+function parseReliability(value: unknown): VehicleReliabilitySnapshot | null {
+  if (!isRecord(value)) return null;
+  const breakdown: BreakdownState =
+    value.breakdown === 'slowing' ? 'slowing' : value.breakdown === 'stopped' ? 'stopped' : 'none';
+  const lastService = value.lastServiceTick;
+  return {
+    wear: Math.max(0, Math.min(100, num(value.wear, 0))),
+    reliability: Math.max(0, Math.min(100, num(value.reliability, 100))),
+    breakdown,
+    breakdownTicks: Math.max(0, int(value.breakdownTicks, 0)),
+    lastServiceTick:
+      typeof lastService === 'number' && Number.isFinite(lastService)
+        ? Math.max(0, int(lastService, 0))
+        : null,
+    serviceIntervalDays: Math.max(0, int(value.serviceIntervalDays, 0)),
+    daysSinceService: Math.max(0, int(value.daysSinceService, 0)),
+    maintenancePerYear: Math.max(0, num(value.maintenancePerYear, 0)),
+  };
+}
+
+/** Groupe d'appartenance d'un véhicule (#164). */
+function parseGroupRef(value: unknown): VehicleSnapshot['group'] {
+  if (!isRecord(value)) return undefined;
+  const id = int(value.id, -1);
+  if (id < 0) return undefined;
+  return { id, name: str(value.name, `Groupe ${id + 1}`) };
+}
+
+/** Groupe de véhicules exposé par le pont (#164). */
+export function parseGroup(value: unknown): VehicleGroupSnapshot | null {
+  if (!isRecord(value)) return null;
+  const id = int(value.id, -1);
+  const kind = vehicleKind(value.kind);
+  if (id < 0 || !kind) return null;
+  const autoreplace = isRecord(value.autoreplace)
+    ? {
+        model: str(value.autoreplace.model, ''),
+        whenOld: bool(value.autoreplace.whenOld, true),
+      }
+    : null;
+  const parent = int(value.parent, -1);
+  return {
+    id,
+    company: companyId(value.company),
+    name: str(value.name, `Groupe ${id + 1}`),
+    kind,
+    parent: parent >= 0 ? parent : null,
+    vehicles: Math.max(0, int(value.vehicles, 0)),
+    autoreplace: autoreplace && autoreplace.model !== '' ? autoreplace : null,
+  };
+}
+
+function parseGroups(value: unknown): VehicleGroupSnapshot[] {
+  const groups: VehicleGroupSnapshot[] = [];
+  for (const entry of list(value)) {
+    const group = parseGroup(entry);
+    if (group) groups.push(group);
+  }
+  return groups;
 }
 
 /** Renvoie `null` pour un véhicule dont le type n'a pas de représentation 3D. */
@@ -283,10 +576,18 @@ export function parseVehicle(value: unknown): VehicleSnapshot | null {
     orderKinds.push(kind);
   }
 
+  const orderDetails = parseOrderDetails(raw.orderDetails);
+  const currentOrder = Number.isFinite(raw.currentOrder)
+    ? Math.max(0, int(raw.currentOrder, 0))
+    : undefined;
+  const groupRef = parseGroupRef(raw.group);
+  const reliability = parseReliability(raw.reliability);
+
   return {
     id: Math.max(0, int(raw.id, 0)),
     kind,
     company: companyId(raw.company),
+    ...(typeof raw.model === 'string' && raw.model !== '' ? { model: raw.model } : {}),
     x: num(raw.x, 0),
     y: num(raw.y, 0),
     z: num(raw.z, 0),
@@ -296,8 +597,12 @@ export function parseVehicle(value: unknown): VehicleSnapshot | null {
     cargo,
     orderTargets,
     ...(orderKinds.length === orderTargets.length && orderKinds.length > 0 ? { orderKinds } : {}),
+    ...(orderDetails.length > 0 ? { orderDetails } : {}),
+    ...(currentOrder !== undefined ? { currentOrder } : {}),
     profitLastYear: num(raw.profitLastYear, 0),
     ageDays: Math.max(0, int(raw.ageDays, 0)),
+    ...(groupRef ? { group: groupRef } : {}),
+    ...(reliability ? { reliability } : {}),
   };
 }
 
@@ -355,6 +660,92 @@ function parseEvents(value: unknown): WorldEvent[] {
           tick,
         });
         break;
+      case 'loan_changed':
+        events.push({
+          type: 'loan_changed',
+          company: companyId(entry.company),
+          loan: Math.max(0, num(entry.loan, 0)),
+          tick,
+        });
+        break;
+      case 'subsidy_awarded':
+        events.push({
+          type: 'subsidy_awarded',
+          subsidy: Math.max(0, int(entry.subsidy, 0)),
+          company: companyId(entry.company),
+          tick,
+        });
+        break;
+      case 'subsidy_expired':
+        events.push({
+          type: 'subsidy_expired',
+          subsidy: Math.max(0, int(entry.subsidy, 0)),
+          tick,
+        });
+        break;
+      case 'disaster_started':
+        events.push({
+          type: 'disaster_started',
+          disaster: Math.max(0, int(entry.disaster, 0)),
+          kind: disasterKind(entry.kind),
+          tick,
+        });
+        break;
+      case 'disaster_ended':
+        events.push({
+          type: 'disaster_ended',
+          disaster: Math.max(0, int(entry.disaster, 0)),
+          tick,
+        });
+        break;
+      case 'town_action':
+        events.push({
+          type: 'town_action',
+          town: Math.max(0, int(entry.town, 0)),
+          action: TOWN_ACTIONS.includes(entry.action as TownActionKind)
+            ? (entry.action as TownActionKind)
+            : 'advertise',
+          tick,
+        });
+        break;
+      case 'vehicle_breakdown':
+        events.push({
+          type: 'vehicle_breakdown',
+          vehicle: Math.max(0, int(entry.vehicle, 0)),
+          breakdown:
+            entry.breakdown === 'slowing'
+              ? 'slowing'
+              : entry.breakdown === 'stopped'
+                ? 'stopped'
+                : 'none',
+          tick,
+        });
+        break;
+      case 'vehicle_repaired':
+        events.push({
+          type: 'vehicle_repaired',
+          vehicle: Math.max(0, int(entry.vehicle, 0)),
+          cost: Math.max(0, num(entry.cost, 0)),
+          tick,
+        });
+        break;
+      case 'vehicle_autoreplaced':
+        events.push({
+          type: 'vehicle_autoreplaced',
+          vehicle: Math.max(0, int(entry.vehicle, 0)),
+          model: str(entry.model, ''),
+          tick,
+        });
+        break;
+      case 'group_created':
+      case 'group_deleted':
+        events.push({
+          type: entry.type,
+          group: Math.max(0, int(entry.group, 0)),
+          company: companyId(entry.company),
+          tick,
+        });
+        break;
       default:
         break;
     }
@@ -365,6 +756,41 @@ function parseEvents(value: unknown): WorldEvent[] {
 /* ------------------------------------------------------------------------- */
 /*  Snapshot complet                                                         */
 /* ------------------------------------------------------------------------- */
+
+const DISASTER_KINDS: readonly DisasterKind[] = [
+  'fire',
+  'road_accident',
+  'train_crash',
+  'aircraft_crash',
+];
+
+function disasterKind(value: unknown): DisasterKind {
+  return DISASTER_KINDS.includes(value as DisasterKind) ? (value as DisasterKind) : 'fire';
+}
+
+function parseDisasters(value: unknown): DisasterSnapshot[] {
+  const disasters: DisasterSnapshot[] = [];
+  for (const entry of list(value)) {
+    if (!isRecord(entry)) continue;
+    const kind = disasterKind(entry.kind);
+    disasters.push({
+      id: Math.max(0, int(entry.id, disasters.length)),
+      kind,
+      x: num(entry.x, 0),
+      y: num(entry.y, 0),
+      company: companyId(entry.company),
+      ...(typeof entry.vehicle === 'number' ? { vehicle: Math.max(0, int(entry.vehicle, 0)) } : {}),
+      ...(typeof entry.town === 'number' ? { town: Math.max(0, int(entry.town, 0)) } : {}),
+      ...(typeof entry.industry === 'number'
+        ? { industry: Math.max(0, int(entry.industry, 0)) }
+        : {}),
+      severity: clampInt(entry.severity, 1, 3, 1),
+      startedTick: Math.max(0, int(entry.startedTick, 0)),
+      remainingDays: Math.max(0, int(entry.remainingDays, 0)),
+    });
+  }
+  return disasters;
+}
 
 function parseMeta(value: unknown): SnapshotMeta {
   const raw = record(value);
@@ -387,7 +813,7 @@ function parseMeta(value: unknown): SnapshotMeta {
 function parseEconomy(value: unknown): EconomySnapshot {
   if (!isRecord(value)) return { ...DEFAULT_ECONOMY };
   const raw = value;
-  return {
+  const economy: EconomySnapshot = {
     year: int(raw.year, DEFAULT_ECONOMY.year),
     month: clampInt(raw.month, 0, 11, DEFAULT_ECONOMY.month),
     day: clampInt(raw.day, 1, 31, DEFAULT_ECONOMY.day),
@@ -395,6 +821,57 @@ function parseEconomy(value: unknown): EconomySnapshot {
     speed: num(raw.speed, DEFAULT_ECONOMY.speed),
     paused: bool(raw.paused, DEFAULT_ECONOMY.paused),
   };
+  /* Les champs #165 restent absents des snapshots antérieurs : ne pas les
+   * inventer ici, l'UI applique ses propres replis. */
+  if (typeof raw.inflation === 'number' && Number.isFinite(raw.inflation)) {
+    economy.inflation = Math.max(0, raw.inflation);
+  }
+  if (typeof raw.difficulty === 'number' && Number.isFinite(raw.difficulty)) {
+    economy.difficulty = clampInt(raw.difficulty, 0, 3, 1);
+  }
+  if (typeof raw.interestRate === 'number' && Number.isFinite(raw.interestRate)) {
+    economy.interestRate = Math.max(0, raw.interestRate);
+  }
+  if (typeof raw.maxLoan === 'number' && Number.isFinite(raw.maxLoan)) {
+    economy.maxLoan = Math.max(0, raw.maxLoan);
+  }
+  if (typeof raw.loanInterval === 'number' && Number.isFinite(raw.loanInterval)) {
+    economy.loanInterval = Math.max(1, raw.loanInterval);
+  }
+  return economy;
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Subventions                                                              */
+/* ------------------------------------------------------------------------- */
+
+function sourceKind(value: unknown): 'town' | 'industry' {
+  return value === 'town' ? 'town' : 'industry';
+}
+
+function parseSubsidy(value: unknown): SubsidySnapshot | null {
+  const raw = record(value);
+  if (!isRecord(value)) return null;
+  const awarded = int(raw.awardedTo, -1);
+  return {
+    id: Math.max(0, int(raw.id, 0)),
+    cargo: str(raw.cargo, 'inconnu'),
+    from: str(raw.from, '—'),
+    to: str(raw.to, '—'),
+    fromKind: sourceKind(raw.fromKind),
+    toKind: sourceKind(raw.toKind),
+    remainingMonths: Math.max(0, int(raw.remainingMonths, 0)),
+    awardedTo: awarded >= 0 && awarded <= 254 ? awarded : null,
+  };
+}
+
+function parseSubsidies(value: unknown): SubsidySnapshot[] {
+  const subsidies: SubsidySnapshot[] = [];
+  for (const entry of list(value)) {
+    const subsidy = parseSubsidy(entry);
+    if (subsidy) subsidies.push(subsidy);
+  }
+  return subsidies;
 }
 
 /**
@@ -430,6 +907,11 @@ export function parseWorldJson(input: unknown): WorldSnapshot {
     const vehicle = parseVehicle(entry);
     if (vehicle) vehicles.push(vehicle);
   }
+  const structures: StructureSnapshot[] = [];
+  for (const entry of list(root.structures)) {
+    const structure = parseStructure(entry);
+    if (structure) structures.push(structure);
+  }
 
   return {
     meta,
@@ -440,8 +922,12 @@ export function parseWorldJson(input: unknown): WorldSnapshot {
     industries: list(root.industries).map(parseIndustry),
     stations: list(root.stations).map(parseStation),
     depots,
+    structures,
     vehicles,
+    subsidies: parseSubsidies(root.subsidies),
+    groups: parseGroups(root.groups),
     news: parseNews(root.news, meta.tick),
+    disasters: parseDisasters(root.disasters),
     events: parseEvents(root.events),
   };
 }

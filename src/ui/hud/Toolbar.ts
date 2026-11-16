@@ -50,6 +50,66 @@ const TOOLS: ToolDefinition[] = [
     labelKey: 'toolbar.signal.label',
     hintKey: 'toolbar.signal.hint',
   },
+  {
+    id: 'unsignal',
+    icon: '⊘',
+    labelKey: 'toolbar.unsignal.label',
+    hintKey: 'toolbar.unsignal.hint',
+  },
+  {
+    id: 'convert',
+    icon: '⇄',
+    labelKey: 'toolbar.convert.label',
+    hintKey: 'toolbar.convert.hint',
+  },
+  {
+    id: 'terraform',
+    icon: '⛰',
+    labelKey: 'toolbar.terraform.label',
+    hintKey: 'toolbar.terraform.hint',
+  },
+  {
+    id: 'tree',
+    icon: '♣',
+    labelKey: 'toolbar.tree.label',
+    hintKey: 'toolbar.tree.hint',
+  },
+  {
+    id: 'canal',
+    icon: '≋',
+    labelKey: 'toolbar.canal.label',
+    hintKey: 'toolbar.canal.hint',
+  },
+  {
+    id: 'lock',
+    icon: '⚓',
+    labelKey: 'toolbar.lock.label',
+    hintKey: 'toolbar.lock.hint',
+  },
+  {
+    id: 'aqueduct',
+    icon: '⌒',
+    labelKey: 'toolbar.aqueduct.label',
+    hintKey: 'toolbar.aqueduct.hint',
+  },
+  {
+    id: 'crossing',
+    icon: '╬',
+    labelKey: 'toolbar.crossing.label',
+    hintKey: 'toolbar.crossing.hint',
+  },
+  {
+    id: 'bridge',
+    icon: '⌁',
+    labelKey: 'toolbar.bridge.label',
+    hintKey: 'toolbar.bridge.hint',
+  },
+  {
+    id: 'tunnel',
+    icon: '◍',
+    labelKey: 'toolbar.tunnel.label',
+    hintKey: 'toolbar.tunnel.hint',
+  },
 ];
 
 const SHORT_LABELS: Record<BuildToolId, TranslationKey> = {
@@ -58,7 +118,17 @@ const SHORT_LABELS: Record<BuildToolId, TranslationKey> = {
   station: 'toolbar.short.station',
   depot: 'toolbar.short.depot',
   signal: 'toolbar.short.signal',
+  unsignal: 'toolbar.short.unsignal',
+  convert: 'toolbar.short.convert',
+  bridge: 'toolbar.short.bridge',
+  tunnel: 'toolbar.short.tunnel',
   clear: 'toolbar.short.road',
+  terraform: 'toolbar.short.terraform',
+  tree: 'toolbar.short.tree',
+  canal: 'toolbar.short.canal',
+  lock: 'toolbar.short.lock',
+  aqueduct: 'toolbar.short.aqueduct',
+  crossing: 'toolbar.short.crossing',
 };
 
 export interface ToolbarOptions {

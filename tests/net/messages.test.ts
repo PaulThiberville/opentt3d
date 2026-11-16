@@ -66,6 +66,83 @@ describe('guards du protocole réseau', () => {
       }),
     ).toBe(true);
     expect(
+      isEngineCommand({
+        type: 'build',
+        tool: 'convert',
+        company: 0,
+        from: { x: 1, y: 2 },
+        to: { x: 4, y: 2 },
+        options: { railType: 'electrified' },
+      }),
+    ).toBe(true);
+    expect(
+      isEngineCommand({
+        type: 'build',
+        tool: 'unsignal',
+        company: 0,
+        from: { x: 1, y: 2 },
+        options: { type: 'path' },
+      }),
+    ).toBe(true);
+    // #163/#164 : entretien, groupes et autoreplace traversent le lockstep.
+    expect(isEngineCommand({ type: 'vehicle', action: 'service', company: 0, vehicle: 4 })).toBe(
+      true,
+    );
+    expect(
+      isEngineCommand({
+        type: 'vehicle',
+        action: 'send_to_depot',
+        company: 0,
+        vehicle: 4,
+      }),
+    ).toBe(true);
+    expect(
+      isEngineCommand({
+        type: 'group',
+        action: 'create',
+        company: 0,
+        kind: 'road',
+        name: 'Ligne A',
+      }),
+    ).toBe(true);
+    expect(
+      isEngineCommand({
+        type: 'group',
+        action: 'assign',
+        company: 0,
+        group: 3,
+        vehicles: [4, 5],
+      }),
+    ).toBe(true);
+    expect(
+      isEngineCommand({
+        type: 'group',
+        action: 'autoreplace',
+        company: 0,
+        group: 3,
+        model: 'bus_intercity',
+        whenOld: false,
+      }),
+    ).toBe(true);
+    expect(isEngineCommand({ type: 'group', action: 'delete', company: 0, group: 3 })).toBe(true);
+    expect(isEngineCommand({ type: 'group', action: 'explode', company: 0, group: 3 })).toBe(false);
+    expect(
+      isEngineCommand({
+        type: 'finance',
+        action: 'increase_loan',
+        company: 0,
+        amount: 10_000,
+      }),
+    ).toBe(true);
+    expect(
+      isEngineCommand({
+        type: 'town_action',
+        action: 'advertise',
+        company: 0,
+        town: 2,
+      }),
+    ).toBe(true);
+    expect(
       isEngineCommand({ type: 'build', tool: 'laser', company: 0, from: { x: 0, y: 0 } }),
     ).toBe(false);
     expect(isEngineCommand({ type: 'console', command: 42 })).toBe(false);

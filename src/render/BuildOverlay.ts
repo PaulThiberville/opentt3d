@@ -180,7 +180,7 @@ export class BuildOverlay {
     for (let i = 0; i < count; i += 1) {
       const tile = plan.tiles[i];
       if (!tile) continue;
-      const ground = sampleHeightWorld(map, tile.x + 0.5, tile.y + 0.5);
+      const ground = tile.elevation ?? sampleHeightWorld(map, tile.x + 0.5, tile.y + 0.5);
       this.position.set(tile.x + 0.5, ground + TILE_LIFT, tile.y + 0.5);
       this.matrix.compose(this.position, this.quaternion.identity(), this.scale);
       this.tiles.setMatrixAt(i, this.matrix);
@@ -201,7 +201,11 @@ export class BuildOverlay {
       plan.tool === 'road' ||
       plan.tool === 'rail' ||
       plan.tool === 'clear' ||
-      plan.tool === 'signal';
+      plan.tool === 'signal' ||
+      plan.tool === 'canal' ||
+      plan.tool === 'aqueduct' ||
+      plan.tool === 'bridge' ||
+      plan.tool === 'tunnel';
     geometry.setDrawRange(0, showPathLine ? count : 0);
     const attribute = geometry.getAttribute('position') as THREE.BufferAttribute;
     attribute.needsUpdate = true;
@@ -221,7 +225,15 @@ export class BuildOverlay {
     map: MapSnapshot,
     rect: { left: number; top: number; right: number; bottom: number },
   ): void {
-    if (plan.tool === 'road' || plan.tool === 'rail' || plan.tool === 'clear') {
+    if (
+      plan.tool === 'road' ||
+      plan.tool === 'rail' ||
+      plan.tool === 'clear' ||
+      plan.tool === 'canal' ||
+      plan.tool === 'aqueduct' ||
+      plan.tool === 'bridge' ||
+      plan.tool === 'tunnel'
+    ) {
       this.outline.visible = false;
       return;
     }
@@ -317,7 +329,7 @@ export class BuildOverlay {
     const last = plan.tiles[count - 1];
     const previous = plan.tiles[count - 2];
     if (last && previous) {
-      const ground = sampleHeightWorld(map, last.x + 0.5, last.y + 0.5);
+      const ground = last.elevation ?? sampleHeightWorld(map, last.x + 0.5, last.y + 0.5);
       this.marker.position.set(last.x + 0.5, ground + 0.55, last.y + 0.5);
       this.direction.set(last.x - previous.x, 0, last.y - previous.y);
       if (this.direction.lengthSq() > 0) {
@@ -390,7 +402,13 @@ function rectOf(plan: BuildPlan): {
   right: number;
   bottom: number;
 } {
-  if (plan.tool === 'road' || plan.tool === 'rail' || plan.tool === 'clear') {
+  if (
+    plan.tool === 'road' ||
+    plan.tool === 'rail' ||
+    plan.tool === 'clear' ||
+    plan.tool === 'bridge' ||
+    plan.tool === 'tunnel'
+  ) {
     let left = plan.from.x;
     let top = plan.from.y;
     let right = plan.from.x;

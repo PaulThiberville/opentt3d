@@ -6,6 +6,9 @@ import {
   CONNECT_WEST,
   DEPOT_COST,
   SIGNAL_COST,
+  planConvertRail,
+  planRemoveSignal,
+  railConvertCost,
   STATION_COST_PER_TILE,
   commandFromPlan,
   createBuildSettings,
@@ -20,7 +23,13 @@ import {
   stationFootprint,
   type StationSettings,
 } from '../src/game/buildRules';
-import { TILE_KIND_INDEX, type MapSnapshot } from '../src/engine/protocol';
+import { RAIL_TYPE_INDEX, TILE_KIND_INDEX, type MapSnapshot } from '../src/engine/protocol';
+import {
+  SIGNAL_KIND_COST,
+  SIGNAL_CONVERT_COST as SIGNAL_CONVERT_COST_RULES,
+  SIGNAL_REMOVE_COST,
+  encodeSignalBits,
+} from '../src/game/signalRules';
 
 function makeMap(width = 16, height = 16, level = 4): MapSnapshot {
   const size = width * height;
@@ -33,6 +42,7 @@ function makeMap(width = 16, height = 16, level = 4): MapSnapshot {
     slope: new Uint8Array(size),
     flags: new Uint8Array(size),
     trackBits: new Uint8Array(size),
+    signalData: new Uint8Array(size),
   };
 }
 
@@ -223,7 +233,7 @@ describe('buildRules : signal', () => {
     const grass = planSignal({
       map: makeMap(),
       from: { x: 2, y: 2 },
-      settings: { type: 'block', track: null },
+      settings: { type: 'block', track: null, direction: 'one-way', spacing: 1 },
       company: 0,
     });
     expect(grass.valid).toBe(false);
@@ -234,7 +244,7 @@ describe('buildRules : signal', () => {
     const other = planSignal({
       map,
       from: { x: 2, y: 2 },
-      settings: { type: 'block', track: null },
+      settings: { type: 'block', track: null, direction: 'one-way', spacing: 1 },
       company: 0,
     });
     expect(other.valid).toBe(false);
@@ -250,7 +260,7 @@ describe('buildRules : signal', () => {
       map,
       from: { x: 2, y: 2 },
       to: { x: 4, y: 2 },
-      settings: { type: 'block', track: 'x' },
+      settings: { type: 'block', track: 'x', direction: 'one-way', spacing: 1 },
       company: 0,
     });
     expect(line.valid).toBe(true);
@@ -267,7 +277,7 @@ describe('buildRules : signal', () => {
       map,
       from: { x: 2, y: 2 },
       to: { x: 4, y: 4 },
-      settings: { type: 'block', track: null },
+      settings: { type: 'block', track: null, direction: 'one-way', spacing: 1 },
       company: 0,
     });
     expect(diagonal.valid).toBe(false);
@@ -321,5 +331,121 @@ describe('buildRules : options par défaut et commandes', () => {
         axis: 'y',
       },
     });
+  });
+});
+
+describe('buildRules : signalisation avancée (#156)', () => {
+  it('facture le type choisi et applique la densité', () => {
+    const map = makeMap();
+    for (let x = 2; x <= 9; x += 1) {
+      setTile(map, x, 2, TILE_KIND_INDEX.rail, CONNECT_EAST | CONNECT_WEST, 0);
+    }
+    const plan = planSignal({
+      map,
+      from: { x: 2, y: 2 },
+      to: { x: 9, y: 2 },
+      settings: { type: 'path', track: 'x', direction: 'one-way', spacing: 3 },
+      company: 0,
+    });
+    expect(plan.valid).toBe(true);
+    expect(plan.tiles.map((tile) => tile.x)).toEqual([2, 5, 8]);
+    expect(plan.cost).toBe(3 * SIGNAL_KIND_COST.path);
+    expect(commandFromPlan(plan, 0).options).toMatchObject({
+      type: 'path',
+      direction: 'one-way',
+      spacing: 3,
+    });
+  });
+
+  it('facture la conversion d’un signal existant', () => {
+    const map = makeMap();
+    setTile(map, 2, 2, TILE_KIND_INDEX.rail, CONNECT_EAST | CONNECT_WEST, 0);
+    map.signalData![2 * map.width + 2] = encodeSignalBits({
+      kind: 'block',
+      direction: 'one-way',
+      aspect: 'green',
+      semaphore: false,
+    });
+    const plan = planSignal({
+      map,
+      from: { x: 2, y: 2 },
+      settings: { type: 'combo', track: null, direction: 'both', spacing: 1 },
+      company: 0,
+    });
+    expect(plan.valid).toBe(true);
+    expect(plan.cost).toBe(SIGNAL_CONVERT_COST_RULES);
+  });
+
+  it('retire un signal sans toucher à la voie', () => {
+    const map = makeMap();
+    setTile(map, 2, 2, TILE_KIND_INDEX.rail, CONNECT_EAST | CONNECT_WEST, 0);
+    map.signalData![2 * map.width + 2] = encodeSignalBits({
+      kind: 'entry',
+      direction: 'both',
+      aspect: 'red',
+      semaphore: true,
+    });
+    const plan = planRemoveSignal({
+      map,
+      from: { x: 2, y: 2 },
+      settings: { type: 'block', track: null, direction: 'one-way', spacing: 1 },
+      company: 0,
+    });
+    expect(plan.valid).toBe(true);
+    expect(plan.cost).toBe(SIGNAL_REMOVE_COST);
+    expect(commandFromPlan(plan, 0).tool).toBe('unsignal');
+  });
+});
+
+describe('buildRules : conversion de rail (#157)', () => {
+  it('convertit un tronçon et facture chaque tuile', () => {
+    const map = makeMap();
+    for (let x = 2; x <= 4; x += 1) {
+      setTile(map, x, 2, TILE_KIND_INDEX.rail, CONNECT_EAST | CONNECT_WEST, 0);
+    }
+    map.railTypes = new Uint8Array(map.width * map.height);
+    const plan = planConvertRail({
+      map,
+      from: { x: 2, y: 2 },
+      to: { x: 4, y: 2 },
+      railType: 'electrified',
+      company: 0,
+    });
+    expect(plan.valid).toBe(true);
+    expect(plan.cost).toBe(3 * railConvertCost('electrified'));
+    expect(commandFromPlan(plan, 1)).toMatchObject({
+      tool: 'convert',
+      options: { railType: 'electrified' },
+    });
+  });
+
+  it('refuse une conversion vers le même type, une autre entreprise et un budget court', () => {
+    const same = makeMap();
+    setTile(same, 2, 2, TILE_KIND_INDEX.rail, CONNECT_EAST | CONNECT_WEST, 0);
+    same.railTypes = new Uint8Array(same.width * same.height).fill(RAIL_TYPE_INDEX.electrified);
+    expect(
+      planConvertRail({
+        map: same,
+        from: { x: 2, y: 2 },
+        railType: 'electrified',
+        company: 0,
+      }).reason,
+    ).toContain('déjà de ce type');
+
+    const other = makeMap();
+    setTile(other, 2, 2, TILE_KIND_INDEX.rail, CONNECT_EAST | CONNECT_WEST, 1);
+    other.railTypes = new Uint8Array(other.width * other.height);
+    expect(
+      planConvertRail({ map: other, from: { x: 2, y: 2 }, railType: 'maglev', company: 0 }).reason,
+    ).toContain('autre entreprise');
+
+    const budget = planConvertRail({
+      map: other,
+      from: { x: 2, y: 2 },
+      railType: 'maglev',
+      company: 1,
+      budget: 1,
+    });
+    expect(budget.reason).toContain('Trésorerie insuffisante');
   });
 });

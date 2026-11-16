@@ -15,17 +15,50 @@
 
 import {
   COMPANY_NONE,
+  TILE_FLAG,
   TILE_KIND_INDEX,
+  type BridgeMaterial,
   type EngineCommand,
   type MapSnapshot,
+  type RailType,
+  type SignalDirection,
+  type SignalKind,
+  type SignalTrack,
   type TileKind,
 } from '../engine/protocol';
-import { TILE_KINDS, tileIndex } from './mapGrid';
+import { MAX_HEIGHT_LEVEL, TILE_KINDS, tileIndex } from './mapGrid';
+import { RAIL_TYPE_SURCHARGE, RAIL_TYPE_CONVERT_COST, parseRailType } from './railRules';
+import { SIGNAL_CONVERT_COST, SIGNAL_KIND_COST, SIGNAL_REMOVE_COST } from './signalRules';
 
-export type BuildTool = 'road' | 'rail' | 'clear' | 'station' | 'depot' | 'signal';
+export type { SignalTrack };
+export type { BridgeMaterial } from '../engine/protocol';
 
-/** Outils qui tracent un chemin de tuiles (route, rail, démolition). */
-export type PathBuildTool = 'road' | 'rail' | 'clear';
+/** Outils qui posent un ouvrage d'art (pont ou tunnel). */
+export type StructureBuildTool = 'bridge' | 'tunnel';
+
+export type BuildTool =
+  | 'road'
+  | 'rail'
+  | 'clear'
+  | 'station'
+  | 'depot'
+  | 'signal'
+  | 'unsignal'
+  | 'convert'
+  | 'terraform'
+  | 'tree'
+  | 'canal'
+  | 'lock'
+  | 'aqueduct'
+  | 'crossing'
+  | 'bridge'
+  | 'tunnel';
+
+/** Outils qui tracent un chemin de tuiles (route, rail, canal, démolition). */
+export type PathBuildTool = 'road' | 'rail' | 'clear' | 'canal';
+
+/** Sens d'un terrassement (#158). */
+export type TerraformDirection = 'up' | 'down';
 
 /** Axe du premier segment du tracé en L (`x` = horizontal puis vertical). */
 export type BuildAxis = 'x' | 'y';
@@ -40,8 +73,10 @@ export type BuildTransport = 'rail' | 'road';
  */
 export type BuildDirection = 'ne' | 'se' | 'sw' | 'nw';
 
-/** Voie choisie quand une tuile porte plusieurs voies (signal). */
-export type SignalTrack = 'x' | 'y' | 'upper' | 'lower' | 'left' | 'right';
+/** Réglages d'une voie ferrée neuve ou convertie (#157). */
+export interface RailSettings {
+  type: RailType;
+}
 
 export interface StationSettings {
   kind: BuildTransport;
@@ -61,15 +96,190 @@ export interface DepotSettings {
 }
 
 export interface SignalSettings {
-  type: 'block';
+  type: SignalKind;
   track: SignalTrack | null;
+  /** Sens du signal : unique (défaut) ou bidirectionnel. */
+  direction: SignalDirection;
+  /** Un signal tous les N tuiles lors d'un glissement (1..8). */
+  spacing: number;
+}
+
+/** Terrassement : sens et taille du carré posé au survol (#158). */
+export interface TerraformSettings {
+  direction: TerraformDirection;
+  /** Côté du carré en tuiles (1..4). */
+  size: number;
+}
+
+/** Plantation d'arbres : côté du carré en tuiles (1..4). */
+export interface TreeSettings {
+  size: number;
+}
+
+/** Écluse : orientation forcée ou détection sur le canal voisin. */
+export interface LockSettings {
+  direction: BuildDirection | null;
+}
+
+export interface BridgeSettings {
+  kind: BuildTransport;
+  material: BridgeMaterial;
+}
+
+export interface TunnelSettings {
+  kind: BuildTransport;
 }
 
 export interface BuildSettings {
   station: StationSettings;
   depot: DepotSettings;
   signal: SignalSettings;
+  terraform: TerraformSettings;
+  tree: TreeSettings;
+  lock: LockSettings;
+  rail: RailSettings;
+  bridge: BridgeSettings;
+  tunnel: TunnelSettings;
 }
+
+export interface BridgeMaterialSpec {
+  id: BridgeMaterial;
+  /** Portée minimale entre culées, en tuiles (0 = ponts accolés). */
+  minSpan: number;
+  /** Portée maximale entre culées, en tuiles. */
+  maxSpan: number;
+  /** Coût du tablier par tuile, réseau routier. */
+  roadCost: number;
+  /** Coût du tablier par tuile, réseau ferroviaire. */
+  railCost: number;
+  /** Entretien annuel par tuile, réseau routier. */
+  roadMaintenance: number;
+  /** Entretien annuel par tuile, réseau ferroviaire. */
+  railMaintenance: number;
+  /** Hauteur du tablier au-dessus des culées, en demi-niveaux. */
+  deckLift: number;
+  /** Teinte du tablier pour le rendu procédural. */
+  colour: number;
+}
+
+/**
+ * Familles exposées à l'UI. Les valeurs restent volontairement synthétiques :
+ * le moteur WASM choisit la spec OpenTTD réelle (année, portée, prix) et le
+ * mock reproduit ces invariants pour que l'aperçu soit juste.
+ */
+export const BRIDGE_MATERIALS: Record<BridgeMaterial, BridgeMaterialSpec> = {
+  wood: {
+    id: 'wood',
+    minSpan: 0,
+    maxSpan: 46,
+    roadCost: 110,
+    railCost: 150,
+    roadMaintenance: 14,
+    railMaintenance: 20,
+    deckLift: 2,
+    colour: 0x8a6a43,
+  },
+  concrete: {
+    id: 'concrete',
+    minSpan: 0,
+    maxSpan: 2,
+    roadCost: 150,
+    railCost: 205,
+    roadMaintenance: 18,
+    railMaintenance: 25,
+    deckLift: 2,
+    colour: 0xa8a49b,
+  },
+  steel: {
+    id: 'steel',
+    minSpan: 0,
+    maxSpan: 5,
+    roadCost: 195,
+    railCost: 265,
+    roadMaintenance: 22,
+    railMaintenance: 30,
+    deckLift: 2,
+    colour: 0x7d8b99,
+  },
+  suspension: {
+    id: 'suspension',
+    minSpan: 3,
+    maxSpan: 10,
+    roadCost: 265,
+    railCost: 355,
+    roadMaintenance: 28,
+    railMaintenance: 38,
+    deckLift: 3,
+    colour: 0xb06a45,
+  },
+  cantilever: {
+    id: 'cantilever',
+    minSpan: 3,
+    maxSpan: 9,
+    roadCost: 235,
+    railCost: 315,
+    roadMaintenance: 26,
+    railMaintenance: 35,
+    deckLift: 3,
+    colour: 0x9a5a4a,
+  },
+  tubular: {
+    id: 'tubular',
+    minSpan: 2,
+    maxSpan: 45,
+    roadCost: 305,
+    railCost: 410,
+    roadMaintenance: 32,
+    railMaintenance: 44,
+    deckLift: 3,
+    colour: 0x5f8f8a,
+  },
+};
+
+export const BRIDGE_MATERIAL_ORDER: readonly BridgeMaterial[] = [
+  'wood',
+  'concrete',
+  'steel',
+  'suspension',
+  'cantilever',
+  'tubular',
+];
+
+export const BRIDGE_MATERIAL_LABELS: Record<BridgeMaterial, string> = {
+  wood: 'bois',
+  concrete: 'béton',
+  steel: 'acier',
+  suspension: 'suspendu',
+  cantilever: 'cantilever',
+  tubular: 'tubulaire',
+};
+
+/** Coût fixe d'une culée (rampe), hors tablier. */
+export const BRIDGE_RAMP_COST: Record<BuildTransport, number> = {
+  road: 280,
+  rail: 460,
+};
+
+/** Longueur maximale d'un pont, culées comprises. */
+export const MAX_BRIDGE_TILES = 48;
+
+/** Coût d'un tunnel par tuile (portails et section enterrée). */
+export const TUNNEL_COST_PER_TILE: Record<BuildTransport, number> = {
+  road: 340,
+  rail: 580,
+};
+
+/** Surcoût par demi-niveau de profondeur d'un tunnel. */
+export const TUNNEL_DEPTH_COST = 120;
+
+/** Entretien annuel d'un tunnel par tuile. */
+export const TUNNEL_MAINTENANCE_PER_TILE: Record<BuildTransport, number> = {
+  road: 24,
+  rail: 34,
+};
+
+export const TUNNEL_MIN_TILES = 3;
+export const TUNNEL_MAX_TILES = 40;
 
 export const STATION_MAX_PLATFORMS = 8;
 export const STATION_MAX_LENGTH = 16;
@@ -86,7 +296,45 @@ export const DEPOT_COST: Record<BuildTransport, number> = {
 };
 
 /** Signal de bloc simple (pose sur une voie existante). */
-export const SIGNAL_COST = 320;
+export const SIGNAL_COST = SIGNAL_KIND_COST.block;
+
+/** Coût de base d'une tuile de rail classique, hors surcoût de type. */
+export const RAIL_COST_PER_TILE = 400;
+
+export function railBuildCost(type: RailType): number {
+  return RAIL_COST_PER_TILE + RAIL_TYPE_SURCHARGE[type];
+}
+
+export function railConvertCost(type: RailType): number {
+  return RAIL_TYPE_CONVERT_COST[type];
+}
+
+/** Terrassement (#158) : coût de base par tuile et par niveau. */
+export const TERRAFORM_COST_PER_TILE = 120;
+/** Surcoût par voisin de hauteur différente (ouvrage en flanc de coteau). */
+export const TERRAFORM_SLOPE_COST = 40;
+export const TERRAFORM_MAX_SIZE = 4;
+export const TERRAFORM_MAX_TILES = 256;
+
+/** Plantation d'arbres (#158). */
+export const TREE_COST = 90;
+export const TREE_MAX_SIZE = 4;
+export const TREE_MAX_TILES = 256;
+
+/** Canal (#158) : creusement et fond. */
+export const CANAL_COST_PER_TILE = 200;
+export const CANAL_EXCAVATION_COST = 90;
+
+/** Écluse (#158). */
+export const LOCK_COST = 1400;
+
+/** Aqueduc (#158) : tablier et piles facturés à la tuile. */
+export const AQUEDUCT_COST_PER_TILE = 520;
+export const AQUEDUCT_MAX_TILES = 32;
+
+/** Passage à niveau (#159). */
+export const CROSSING_COST = 640;
+export const CROSSING_MAX_TILES = 16;
 
 export const DIRECTION_ORDER: readonly BuildDirection[] = ['ne', 'se', 'sw', 'nw'];
 
@@ -140,7 +388,13 @@ export function createBuildSettings(): BuildSettings {
       driveThrough: false,
     },
     depot: { kind: 'rail', direction: null },
-    signal: { type: 'block', track: null },
+    signal: { type: 'block', track: null, direction: 'one-way', spacing: 1 },
+    terraform: { direction: 'up', size: 1 },
+    tree: { size: 1 },
+    lock: { direction: null },
+    rail: { type: 'rail' },
+    bridge: { kind: 'rail', material: 'wood' },
+    tunnel: { kind: 'rail' },
   };
 }
 
@@ -150,6 +404,12 @@ export function cloneBuildSettings(settings: BuildSettings): BuildSettings {
     station: { ...settings.station },
     depot: { ...settings.depot },
     signal: { ...settings.signal },
+    terraform: { ...settings.terraform },
+    tree: { ...settings.tree },
+    lock: { ...settings.lock },
+    rail: { ...settings.rail },
+    bridge: { ...settings.bridge },
+    tunnel: { ...settings.tunnel },
   };
 }
 
@@ -168,6 +428,7 @@ export const BUILD_COST_PER_TILE: Record<PathBuildTool, number> = {
   road: 120,
   rail: 400,
   clear: 40,
+  canal: CANAL_COST_PER_TILE,
 };
 
 /** Surcoût par demi-niveau de dénivelé franchi (terrassement). */
@@ -186,6 +447,16 @@ export const BUILD_TOOL_LABELS: Record<BuildTool, string> = {
   station: 'Gare',
   depot: 'Dépôt',
   signal: 'Signal',
+  terraform: 'Terrassement',
+  tree: 'Arbres',
+  canal: 'Canal',
+  lock: 'Écluse',
+  aqueduct: 'Aqueduc',
+  crossing: 'Passage à niveau',
+  unsignal: 'Retirer signal',
+  convert: 'Type de rail',
+  bridge: 'Pont',
+  tunnel: 'Tunnel',
 };
 
 export interface BuildPlanTile {
@@ -202,6 +473,32 @@ export interface BuildPlanTile {
   connections: number;
   /** Coût de cette tuile, terrassement compris. */
   cost: number;
+  /**
+   * Hauteur monde de l'élément d'aperçu, en unités 3D. Les ponts la fixent au
+   * tablier ; les autres outils retombent sur `ground`.
+   */
+  elevation?: number;
+}
+
+export interface BridgePlanInfo {
+  kind: BuildTransport;
+  material: BridgeMaterial;
+  /** Distance entre les deux culées, en tuiles. */
+  span: number;
+  /** Rampes comprises. */
+  length: number;
+  /** Hauteur du tablier en demi-niveaux OpenTTD. */
+  deckHeight: number;
+  /** Entretien annuel estimé. */
+  maintenance: number;
+}
+
+export interface TunnelPlanInfo {
+  kind: BuildTransport;
+  length: number;
+  /** Épaisseur de terrain traversée, en demi-niveaux. */
+  depth: number;
+  maintenance: number;
 }
 
 export interface BuildPlan {
@@ -219,6 +516,22 @@ export interface BuildPlan {
   station?: StationSettings;
   depot?: { kind: BuildTransport; direction: BuildDirection };
   signal?: SignalSettings;
+  /** Terrassement prévu (#158). */
+  terraform?: { direction: TerraformDirection; size: number };
+  /** Plantation prévue (#158). */
+  tree?: { size: number };
+  /** Écluse résolue (#158). */
+  lock?: { direction: BuildDirection; upper: number; lower: number };
+  /** Aqueduc résolu (#158). */
+  aqueduct?: { axis: BuildAxis; level: number };
+  /** Passage à niveau résolu (#159). */
+  crossing?: { network: BuildTransport; axis: BuildAxis };
+  /** Niveau d'eau visé par un canal ou un aqueduc (demi-niveaux). */
+  waterLevel?: number;
+  /** Type de rail posé ou visé par une conversion (#157). */
+  railType?: RailType;
+  bridge?: BridgePlanInfo;
+  tunnel?: TunnelPlanInfo;
 }
 
 export interface BuildPlanOptions {
@@ -232,6 +545,8 @@ export interface BuildPlanOptions {
   /** Trésorerie disponible : permet d'annoncer un manque de fonds. */
   budget?: number;
   maxTiles?: number;
+  /** Type de rail pour l'outil `rail` (#157), `rail` par défaut. */
+  railType?: RailType;
 }
 
 /** Coordonnée de tuile entière, bornée à la carte par l'appelant. */
@@ -301,19 +616,33 @@ export function axisForDrag(from: BuildPoint, to: BuildPoint): BuildAxis {
   return dx >= dy ? 'x' : 'y';
 }
 
-function occupancyReason(kind: TileKind, tool: BuildTool): string | null {
+function occupancyReason(kind: TileKind, tool: BuildTool, flags = 0): string | null {
   if (tool === 'clear') {
-    if (kind === 'road' || kind === 'rail' || kind === 'bridge' || kind === 'station') {
+    if (
+      kind === 'road' ||
+      kind === 'rail' ||
+      kind === 'bridge' ||
+      kind === 'tunnel' ||
+      kind === 'station' ||
+      kind === 'trees' ||
+      kind === 'canal' ||
+      kind === 'lock' ||
+      kind === 'aqueduct' ||
+      kind === 'crossing' ||
+      (flags & (TILE_FLAG.BRIDGE | TILE_FLAG.TUNNEL)) !== 0
+    ) {
       return null;
     }
-    return 'Aucune voie à démolir sur cette tuile.';
+    return 'Aucune voie ou construction à démolir sur cette tuile.';
   }
   switch (kind) {
     case 'void':
+      return 'Tuile vide : terrain inconstructible.';
     case 'water':
     case 'river':
     case 'canal':
-      return 'Impossible de construire sur l’eau (ponts à venir).';
+    case 'lock':
+      return 'Impossible de construire sur l’eau : utilisez un pont, un tunnel, un canal ou un aqueduc.';
     case 'house':
       return 'Impossible de construire sur un bâtiment.';
     case 'industry':
@@ -328,18 +657,22 @@ function occupancyReason(kind: TileKind, tool: BuildTool): string | null {
       return 'Un objet occupe cette tuile.';
     case 'bridge':
     case 'tunnel':
+    case 'aqueduct':
       return 'Un ouvrage occupe cette tuile.';
     case 'rail':
       return tool === 'rail' ? 'Voie déjà construite.' : 'Croisement rail/route à venir.';
     case 'road':
       return tool === 'road' ? 'Voie déjà construite.' : 'Croisement route/rail à venir.';
+    case 'crossing':
+      return 'Un passage à niveau occupe cette tuile.';
     default:
       return null;
   }
 }
 
-function tileCost(tool: PathBuildTool, heightDelta: number): number {
+function tileCost(tool: PathBuildTool, heightDelta: number, railType: RailType = 'rail'): number {
   const slope = tool === 'clear' ? 0 : Math.abs(heightDelta) * BUILD_SLOPE_COST;
+  if (tool === 'rail') return railBuildCost(railType) + slope;
   return BUILD_COST_PER_TILE[tool] + slope;
 }
 
@@ -355,6 +688,7 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
   const to = buildTile(options.to ?? options.from);
   const axis = options.axis ?? axisForDrag(from, to);
   const maxTiles = Math.max(1, options.maxTiles ?? MAX_BUILD_TILES);
+  const railType: RailType = tool === 'rail' ? (options.railType ?? 'rail') : 'rail';
   const empty: BuildPlan = {
     tool,
     from,
@@ -364,6 +698,7 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     cost: 0,
     valid: false,
     reason: null,
+    ...(tool === 'rail' ? { railType } : {}),
   };
 
   if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
@@ -401,10 +736,10 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     }
 
     const heightDelta = previousHeight === null ? 0 : height - previousHeight;
-    const costOfTile = tileCost(tool, heightDelta);
+    const costOfTile = tileCost(tool, heightDelta, railType);
     cost += costOfTile;
 
-    let tileReason = occupancyReason(kind, tool);
+    let tileReason = occupancyReason(kind, tool, map.flags[index] ?? 0);
     if (
       !tileReason &&
       tool === 'clear' &&
@@ -446,6 +781,7 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     cost,
     valid: reason === null,
     reason,
+    ...(tool === 'rail' ? { railType } : {}),
   };
 }
 
@@ -489,11 +825,89 @@ export function commandFromPlan(
     };
   }
   if (plan.tool === 'signal') {
+    const settings = plan.signal;
     return {
       ...base,
       options: {
-        type: 'block',
-        ...(plan.signal?.track ? { track: plan.signal.track } : {}),
+        type: settings?.type ?? 'block',
+        direction: settings?.direction ?? 'one-way',
+        spacing: settings?.spacing ?? 1,
+        ...(settings?.track ? { track: settings.track } : {}),
+      },
+    };
+  }
+  if (plan.tool === 'terraform') {
+    return {
+      ...base,
+      options: {
+        direction: plan.terraform?.direction ?? 'up',
+        size: plan.terraform?.size ?? 1,
+      },
+    };
+  }
+  if (plan.tool === 'tree') {
+    return { ...base, options: { size: plan.tree?.size ?? 1 } };
+  }
+  if (plan.tool === 'lock') {
+    return {
+      ...base,
+      options: { direction: plan.lock?.direction ?? 'ne' },
+    };
+  }
+  if (plan.tool === 'crossing') {
+    return {
+      ...base,
+      options: {
+        axis: plan.crossing?.axis ?? plan.axis,
+        network: plan.crossing?.network ?? 'rail',
+      },
+    };
+  }
+  if (plan.tool === 'aqueduct') {
+    return { ...base, options: { axis: plan.aqueduct?.axis ?? plan.axis } };
+  }
+  if (plan.tool === 'canal') {
+    return {
+      ...base,
+      options: {
+        axis: plan.axis,
+        order: plan.axis === 'y' ? 'vertical' : 'horizontal',
+      },
+    };
+  }
+  if (plan.tool === 'bridge') {
+    return {
+      ...base,
+      options: {
+        kind: plan.bridge?.kind ?? 'rail',
+        material: plan.bridge?.material ?? 'wood',
+        length: plan.bridge?.length ?? pathLength(plan.from, plan.to),
+        direction: plan.axis,
+      },
+    };
+  }
+  if (plan.tool === 'tunnel') {
+    return {
+      ...base,
+      options: {
+        kind: plan.tunnel?.kind ?? 'rail',
+        length: plan.tunnel?.length ?? pathLength(plan.from, plan.to),
+        direction: plan.axis,
+      },
+    };
+  }
+  if (plan.tool === 'unsignal') {
+    return { ...base, options: {} };
+  }
+  if (plan.tool === 'convert') {
+    return { ...base, options: { railType: plan.railType ?? 'rail' } };
+  }
+  if (plan.tool === 'rail') {
+    return {
+      ...base,
+      options: {
+        axis: plan.axis,
+        ...(plan.railType && plan.railType !== 'rail' ? { railType: plan.railType } : {}),
       },
     };
   }
@@ -502,10 +916,11 @@ export function commandFromPlan(
 
 /** `true` si la tuile peut recevoir une voie du type demandé. */
 export function isBuildableTile(map: MapSnapshot, x: number, y: number, tool: BuildTool): boolean {
+  if (tool === 'bridge' || tool === 'tunnel') return false;
   if (!inBounds(map, x, y)) return false;
   const index = tileIndex(x, y, map.width);
   const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
-  return occupancyReason(kind, tool) === null;
+  return occupancyReason(kind, tool, map.flags[index] ?? 0) === null;
 }
 
 // ---------------------------------------------------------------------------
@@ -635,7 +1050,7 @@ export interface SignalPlanOptions extends InfrastructureOptions {
 }
 
 function emptyInfrastructurePlan(
-  tool: 'station' | 'depot' | 'signal',
+  tool: 'station' | 'depot' | 'signal' | 'unsignal' | 'convert' | 'bridge' | 'tunnel',
   from: BuildPoint,
   to: BuildPoint,
   axis: BuildAxis,
@@ -788,7 +1203,7 @@ function traceSignalTiles(
   return { points, axis };
 }
 
-/** Plan d'un ou plusieurs signaux de bloc le long d'une voie existante. */
+/** Plan d'un ou plusieurs signaux le long d'une voie existante. */
 export function planSignal(options: SignalPlanOptions): BuildPlan {
   const map = options.map;
   const from = buildTile(options.from);
@@ -796,6 +1211,79 @@ export function planSignal(options: SignalPlanOptions): BuildPlan {
   const traced = traceSignalTiles(from, to);
   const axis = traced?.axis ?? options.axis ?? 'x';
   const plan = emptyInfrastructurePlan('signal', from, to, axis);
+  const settings: SignalSettings = {
+    ...options.settings,
+    spacing: Math.max(1, Math.min(8, Math.round(options.settings.spacing || 1))),
+  };
+  plan.signal = { ...settings };
+
+  if (!traced) {
+    return { ...plan, reason: 'Un alignement de signaux doit suivre X ou Y.' };
+  }
+  if (traced.points.length > MAX_BUILD_TILES) {
+    return {
+      ...plan,
+      reason: `Trop de signaux (${traced.points.length}, ${MAX_BUILD_TILES} maximum).`,
+    };
+  }
+
+  let reason: string | null = null;
+  let cost = 0;
+  for (let i = 0; i < traced.points.length; i += 1) {
+    const point = traced.points[i];
+    if (!point) continue;
+    // Densité : un signal toutes les `spacing` tuiles en partant du début.
+    if (i % settings.spacing !== 0) continue;
+    if (!inBounds(map, point.x, point.y)) {
+      reason = reason ?? 'Signal hors de la carte.';
+      continue;
+    }
+    const index = tileIndex(point.x, point.y, map.width);
+    const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    const height = map.heightMap[index] ?? 0;
+    const owner = map.owner[index] ?? COMPANY_NONE;
+    const existing = map.signalData?.[index] ?? 0;
+    let tileReason: string | null = null;
+    if (kind !== 'rail') tileReason = 'Un signal exige une voie ferrée sur la tuile.';
+    else if (
+      options.company !== undefined &&
+      options.company !== COMPANY_NONE &&
+      owner !== options.company
+    ) {
+      tileReason = 'La voie appartient à une autre entreprise.';
+    }
+    if (tileReason) reason = reason ?? tileReason;
+    const costOfTile = existing !== 0 ? SIGNAL_CONVERT_COST : SIGNAL_KIND_COST[settings.type];
+    cost += costOfTile;
+    plan.tiles.push({
+      x: point.x,
+      y: point.y,
+      index,
+      kind,
+      height,
+      ground: height * 0.5,
+      connections: map.trackBits[index] ?? 0,
+      cost: costOfTile,
+    });
+  }
+
+  if (plan.tiles.length === 0 && !reason) {
+    reason = 'Aucun signal à poser sur ce tracé.';
+  }
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  return { ...plan, cost, valid: reason === null, reason };
+}
+
+/** Plan de retrait d'un ou plusieurs signaux (la voie reste en place). */
+export function planRemoveSignal(options: SignalPlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const to = buildTile(options.to ?? options.from);
+  const traced = traceSignalTiles(from, to);
+  const axis = traced?.axis ?? options.axis ?? 'x';
+  const plan = emptyInfrastructurePlan('unsignal', from, to, axis);
   plan.signal = { ...options.settings };
 
   if (!traced) {
@@ -819,9 +1307,12 @@ export function planSignal(options: SignalPlanOptions): BuildPlan {
     const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
     const height = map.heightMap[index] ?? 0;
     const owner = map.owner[index] ?? COMPANY_NONE;
+    const hasSignal =
+      (map.signalData?.[index] ?? 0) !== 0 || ((map.flags[index] ?? 0) & (1 << 6)) !== 0;
     let tileReason: string | null = null;
     if (kind !== 'rail') tileReason = 'Un signal exige une voie ferrée sur la tuile.';
     else if (
+      hasSignal &&
       options.company !== undefined &&
       options.company !== COMPANY_NONE &&
       owner !== options.company
@@ -829,7 +1320,10 @@ export function planSignal(options: SignalPlanOptions): BuildPlan {
       tileReason = 'La voie appartient à une autre entreprise.';
     }
     if (tileReason) reason = reason ?? tileReason;
-    cost += SIGNAL_COST;
+    // Les tuiles sans signal sont traversées sans frais : un glissement peut
+    // couvrir une voie dont seuls certains nœuds portent un signal.
+    if (!hasSignal) continue;
+    cost += SIGNAL_REMOVE_COST;
     plan.tiles.push({
       x: point.x,
       y: point.y,
@@ -838,9 +1332,931 @@ export function planSignal(options: SignalPlanOptions): BuildPlan {
       height,
       ground: height * 0.5,
       connections: map.trackBits[index] ?? 0,
-      cost: SIGNAL_COST,
+      cost: SIGNAL_REMOVE_COST,
     });
   }
+
+  if (plan.tiles.length === 0 && !reason) {
+    reason = 'Aucun signal à retirer sur ce tracé.';
+  }
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  return { ...plan, cost, valid: reason === null, reason };
+}
+
+/** Options de conversion d'un tronçon vers un autre type de rail. */
+export interface ConvertRailPlanOptions extends InfrastructureOptions {
+  railType: RailType;
+  to?: BuildPoint;
+  axis?: BuildAxis;
+}
+
+/**
+ * Plan de conversion d'un tronçon existant (#157) : toutes les tuiles doivent
+ * être des voies de l'entreprise, et au moins une doit changer de type.
+ */
+export function planConvertRail(options: ConvertRailPlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const to = buildTile(options.to ?? options.from);
+  const axis = options.axis ?? axisForDrag(from, to);
+  const plan = emptyInfrastructurePlan('convert', from, to, axis);
+  const target = options.railType;
+  plan.railType = target;
+
+  if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
+    return { ...plan, reason: 'Tracé hors de la carte.' };
+  }
+  const points = traceBuildPath(from, to, axis);
+  if (points.length > MAX_BUILD_TILES) {
+    return {
+      ...plan,
+      reason: `Tronçon trop long (${points.length} tuiles, ${MAX_BUILD_TILES} maximum).`,
+    };
+  }
+
+  const costPerTile = railConvertCost(target);
+  let reason: string | null = null;
+  let cost = 0;
+  let changed = false;
+  for (const point of points) {
+    const index = tileIndex(point.x, point.y, map.width);
+    const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    const height = map.heightMap[index] ?? 0;
+    const owner = map.owner[index] ?? COMPANY_NONE;
+    const current = parseRailType(map.railTypes?.[index]) ?? 'rail';
+    let tileReason: string | null = null;
+    if (kind !== 'rail') tileReason = 'La conversion exige une voie ferrée.';
+    else if (
+      options.company !== undefined &&
+      options.company !== COMPANY_NONE &&
+      owner !== options.company
+    ) {
+      tileReason = 'La voie appartient à une autre entreprise.';
+    }
+    if (tileReason) reason = reason ?? tileReason;
+    if (current !== target) changed = true;
+    cost += costPerTile;
+    plan.tiles.push({
+      x: point.x,
+      y: point.y,
+      index,
+      kind,
+      height,
+      ground: height * 0.5,
+      connections: map.trackBits[index] ?? 0,
+      cost: costPerTile,
+    });
+  }
+  if (!reason && !changed) reason = 'Ce tronçon est déjà de ce type.';
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  return { ...plan, cost, valid: reason === null, reason };
+}
+
+// ---------------------------------------------------------------------------
+// Terrassement et arbres (#158)
+// ---------------------------------------------------------------------------
+
+interface AreaPlanOptions extends InfrastructureOptions {
+  to?: BuildPoint;
+  /** Côté du carré quand aucun drag n'est fourni. */
+  size?: number;
+}
+
+interface AreaRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  size: number;
+}
+
+function areaOf(
+  map: MapSnapshot,
+  from: BuildPoint,
+  to: BuildPoint | undefined,
+  size: number,
+): AreaRect {
+  const start = buildTile(from);
+  if (to) {
+    const end = buildTile(to);
+    const left = Math.min(start.x, end.x);
+    const top = Math.min(start.y, end.y);
+    const right = Math.max(start.x, end.x);
+    const bottom = Math.max(start.y, end.y);
+    return { left, top, right, bottom, size: Math.max(right - left, bottom - top) + 1 };
+  }
+  const side = Math.max(1, Math.round(size));
+  return {
+    left: start.x,
+    top: start.y,
+    right: Math.min(map.width - 1, start.x + side - 1),
+    bottom: Math.min(map.height - 1, start.y + side - 1),
+    size: side,
+  };
+}
+
+function areaTiles(map: MapSnapshot, rect: AreaRect): BuildPlanTile[] {
+  const tiles: BuildPlanTile[] = [];
+  for (let y = rect.top; y <= rect.bottom; y += 1) {
+    for (let x = rect.left; x <= rect.right; x += 1) {
+      const index = tileIndex(x, y, map.width);
+      const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+      const height = map.heightMap[index] ?? 0;
+      tiles.push({
+        x,
+        y,
+        index,
+        kind,
+        height,
+        ground: height * 0.5,
+        connections: 0,
+        cost: 0,
+      });
+    }
+  }
+  return tiles;
+}
+
+function neighbourHeightCount(map: MapSnapshot, x: number, y: number, height: number): number {
+  let count = 0;
+  for (const [dx, dy] of [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (!inBounds(map, nx, ny)) continue;
+    if ((map.heightMap[tileIndex(nx, ny, map.width)] ?? height) !== height) count += 1;
+  }
+  return count;
+}
+
+/** Terrains naturels qu'un terrassement ou une plantation peut modifier. */
+function isNaturalGround(kind: TileKind): boolean {
+  return kind === 'grass' || kind === 'clear' || kind === 'rough' || kind === 'trees';
+}
+
+function naturalGroundReason(kind: TileKind, what: string): string | null {
+  if (isNaturalGround(kind)) return null;
+  if (kind === 'water' || kind === 'river' || kind === 'canal' || kind === 'lock') {
+    return `Impossible de ${what} sur l’eau.`;
+  }
+  if (kind === 'house') return `Impossible de ${what} sur un bâtiment.`;
+  if (kind === 'industry') return `Impossible de ${what} sur une industrie.`;
+  if (kind === 'station') return `Impossible de ${what} sur une gare.`;
+  if (kind === 'airport') return `Impossible de ${what} sur un aéroport.`;
+  if (kind === 'dock') return `Impossible de ${what} sur un quai.`;
+  if (kind === 'rail' || kind === 'road' || kind === 'crossing') {
+    return `Une voie occupe cette tuile : démolissez-la d’abord.`;
+  }
+  if (kind === 'bridge' || kind === 'tunnel' || kind === 'aqueduct' || kind === 'object') {
+    return `Un ouvrage occupe cette tuile.`;
+  }
+  return `Terrain inadapté à ${what === 'planter des arbres' ? 'la plantation' : 'au terrassement'}.`;
+}
+
+export interface TerraformPlanOptions extends AreaPlanOptions {
+  settings: TerraformSettings;
+}
+
+/** Plan de terrassement : un carré ou le rectangle du drag, niveau par niveau. */
+export function planTerraform(options: TerraformPlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const size = Math.max(1, Math.min(TERRAFORM_MAX_SIZE, Math.round(options.settings.size)));
+  const rect = areaOf(map, from, options.to, size);
+  const direction: TerraformDirection = options.settings.direction === 'down' ? 'down' : 'up';
+  const to = { x: rect.right, y: rect.bottom };
+  const plan: BuildPlan = {
+    tool: 'terraform',
+    from,
+    to,
+    axis: 'x',
+    tiles: [],
+    cost: 0,
+    valid: false,
+    reason: null,
+    terraform: { direction, size: rect.size },
+  };
+  if (!inBounds(map, rect.left, rect.top) || !inBounds(map, rect.right, rect.bottom)) {
+    return { ...plan, reason: 'Terrassement hors de la carte.' };
+  }
+  const count = (rect.right - rect.left + 1) * (rect.bottom - rect.top + 1);
+  if (count > TERRAFORM_MAX_TILES) {
+    return {
+      ...plan,
+      reason: `Zone trop grande (${count} tuiles, ${TERRAFORM_MAX_TILES} maximum).`,
+    };
+  }
+
+  const delta = direction === 'up' ? 1 : -1;
+  let reason: string | null = null;
+  let cost = 0;
+  for (const tile of areaTiles(map, rect)) {
+    let tileReason = naturalGroundReason(tile.kind, 'terrasser');
+    const height = tile.height + delta;
+    if (!tileReason && (height < 0 || height > MAX_HEIGHT_LEVEL)) {
+      tileReason =
+        direction === 'up' ? 'Sommet maximal déjà atteint.' : 'Niveau minimal déjà atteint.';
+    }
+    const tileCost =
+      TERRAFORM_COST_PER_TILE +
+      neighbourHeightCount(map, tile.x, tile.y, tile.height) * TERRAFORM_SLOPE_COST;
+    if (tileReason) reason = reason ?? tileReason;
+    cost += tileCost;
+    plan.tiles.push({ ...tile, cost: tileCost });
+  }
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  return { ...plan, cost, valid: reason === null, reason };
+}
+
+export interface TreePlanOptions extends AreaPlanOptions {
+  settings: TreeSettings;
+}
+
+/** Plan de plantation : carré au survol ou rectangle au drag. */
+export function planTree(options: TreePlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const size = Math.max(1, Math.min(TREE_MAX_SIZE, Math.round(options.settings.size)));
+  const rect = areaOf(map, from, options.to, size);
+  const plan: BuildPlan = {
+    tool: 'tree',
+    from,
+    to: { x: rect.right, y: rect.bottom },
+    axis: 'x',
+    tiles: [],
+    cost: 0,
+    valid: false,
+    reason: null,
+    tree: { size: rect.size },
+  };
+  if (!inBounds(map, rect.left, rect.top) || !inBounds(map, rect.right, rect.bottom)) {
+    return { ...plan, reason: 'Plantation hors de la carte.' };
+  }
+  const count = (rect.right - rect.left + 1) * (rect.bottom - rect.top + 1);
+  if (count > TREE_MAX_TILES) {
+    return { ...plan, reason: `Zone trop grande (${count} tuiles, ${TREE_MAX_TILES} maximum).` };
+  }
+
+  let reason: string | null = null;
+  let cost = 0;
+  for (const tile of areaTiles(map, rect)) {
+    const tileReason = naturalGroundReason(tile.kind, 'planter des arbres');
+    const tileCost = TREE_COST * (tile.kind === 'trees' ? 2 : 1);
+    if (tileReason) reason = reason ?? tileReason;
+    cost += tileCost;
+    plan.tiles.push({ ...tile, cost: tileCost });
+  }
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  return { ...plan, cost, valid: reason === null, reason };
+}
+
+// ---------------------------------------------------------------------------
+// Canaux, écluses et aqueducs (#158)
+// ---------------------------------------------------------------------------
+
+const CANAL_WATER_KINDS: readonly TileKind[] = ['water', 'river', 'canal', 'coast'];
+
+function isCanalWater(kind: TileKind): boolean {
+  return CANAL_WATER_KINDS.includes(kind);
+}
+
+export interface CanalPlanOptions extends InfrastructureOptions {
+  to?: BuildPoint;
+  axis?: BuildAxis;
+  maxTiles?: number;
+}
+
+/** Tracé d'un canal en L ; le niveau d'eau suit un lac existant ou creuse le terrain. */
+export function planCanal(options: CanalPlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const to = buildTile(options.to ?? options.from);
+  const axis = options.axis ?? axisForDrag(from, to);
+  const maxTiles = Math.max(1, options.maxTiles ?? MAX_BUILD_TILES);
+  const plan: BuildPlan = {
+    tool: 'canal',
+    from,
+    to,
+    axis,
+    tiles: [],
+    cost: 0,
+    valid: false,
+    reason: null,
+  };
+  if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
+    return { ...plan, reason: 'Tracé hors de la carte.' };
+  }
+  const points = traceBuildPath(from, to, axis);
+  if (points.length > maxTiles) {
+    return { ...plan, reason: `Canal trop long (${points.length} tuiles, ${maxTiles} maximum).` };
+  }
+
+  let reason: string | null = null;
+  let cost = 0;
+  let existingLevel: number | null = null;
+  let minHeight = Number.POSITIVE_INFINITY;
+  const raw: { point: BuildPoint; tile: BuildPlanTile; water: boolean }[] = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const point = points[i];
+    if (!point) continue;
+    const index = tileIndex(point.x, point.y, map.width);
+    const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    const height = map.heightMap[index] ?? 0;
+    let tileReason: string | null = null;
+    if (!isCanalWater(kind) && !isNaturalGround(kind)) {
+      if (kind === 'rail' || kind === 'road' || kind === 'crossing') {
+        tileReason = 'Un canal ne traverse pas une voie : construisez un aqueduc.';
+      } else {
+        tileReason = naturalGroundReason(kind, 'creuser un canal');
+      }
+    }
+    const previous = points[i - 1];
+    const next = points[i + 1];
+    let connections = 0;
+    if (previous) connections |= directionBit(point, previous);
+    if (next) connections |= directionBit(point, next);
+    if (connections === 0) connections = CONNECT_EAST | CONNECT_WEST;
+    const water = isCanalWater(kind);
+    if (water) existingLevel ??= height;
+    else minHeight = Math.min(minHeight, height);
+    if (tileReason) reason = reason ?? tileReason;
+    raw.push({
+      point,
+      water,
+      tile: {
+        x: point.x,
+        y: point.y,
+        index,
+        kind,
+        height,
+        ground: height * 0.5,
+        connections,
+        cost: 0,
+      },
+    });
+  }
+
+  const level = existingLevel ?? Math.max(0, (Number.isFinite(minHeight) ? minHeight : 0) - 2);
+  for (const entry of raw) {
+    const excavation = entry.water ? 0 : Math.abs(entry.tile.height - level);
+    const tileCost = CANAL_COST_PER_TILE + excavation * CANAL_EXCAVATION_COST;
+    cost += tileCost;
+    plan.tiles.push({ ...entry.tile, cost: tileCost });
+  }
+  plan.waterLevel = level;
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  return { ...plan, cost, valid: reason === null, reason };
+}
+
+export interface LockPlanOptions extends InfrastructureOptions {
+  settings: LockSettings;
+}
+
+function directionToNeighbour(dx: number, dy: number): BuildDirection {
+  if (dx > 0) return 'ne';
+  if (dx < 0) return 'sw';
+  if (dy > 0) return 'se';
+  return 'nw';
+}
+
+/** Plan d'une écluse : exige une tuile d'eau reliée à un bief voisin. */
+export function planLock(options: LockPlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const plan: BuildPlan = {
+    tool: 'lock',
+    from,
+    to: from,
+    axis: 'x',
+    tiles: [],
+    cost: 0,
+    valid: false,
+    reason: null,
+  };
+  if (!inBounds(map, from.x, from.y)) return { ...plan, reason: 'Écluse hors de la carte.' };
+  const index = tileIndex(from.x, from.y, map.width);
+  const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+  const height = map.heightMap[index] ?? 0;
+  if (kind === 'lock') return { ...plan, reason: 'Une écluse occupe déjà cette tuile.' };
+  if (!isCanalWater(kind))
+    return { ...plan, reason: 'Une écluse exige une tuile de canal ou d’eau.' };
+
+  let best: { dx: number; dy: number; height: number } | null = null;
+  for (const [dx, dy] of [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const) {
+    const nx = from.x + dx;
+    const ny = from.y + dy;
+    if (!inBounds(map, nx, ny)) continue;
+    const nIndex = tileIndex(nx, ny, map.width);
+    const nKind = TILE_KINDS[map.kind[nIndex] ?? 0] ?? 'void';
+    if (!isCanalWater(nKind)) continue;
+    const nHeight = map.heightMap[nIndex] ?? 0;
+    if (!best || Math.abs(nHeight - height) > Math.abs(best.height - height)) {
+      best = { dx, dy, height: nHeight };
+    }
+  }
+  if (!best) {
+    return { ...plan, reason: 'Une écluse exige un bief voisin (canal ou eau).' };
+  }
+  const direction = options.settings.direction ?? directionToNeighbour(best.dx, best.dy);
+  const upper = Math.max(height, best.height);
+  const lower = Math.min(height, best.height);
+  const axis = directionAxis(direction);
+  const connections = axis === 'x' ? CONNECT_EAST | CONNECT_WEST : CONNECT_NORTH | CONNECT_SOUTH;
+  let reason: string | null = null;
+  if (options.budget !== undefined && LOCK_COST > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(LOCK_COST)} £ requis.`;
+  }
+  plan.lock = { direction, upper, lower };
+  plan.tiles.push({
+    x: from.x,
+    y: from.y,
+    index,
+    kind,
+    height,
+    ground: height * 0.5,
+    connections,
+    cost: LOCK_COST,
+  });
+  return { ...plan, axis, cost: LOCK_COST, valid: reason === null, reason };
+}
+
+export interface AqueductPlanOptions extends InfrastructureOptions {
+  to: BuildPoint;
+}
+
+const AQUEDUCT_ENDPOINT_KINDS: readonly TileKind[] = [
+  'grass',
+  'clear',
+  'rough',
+  'trees',
+  'water',
+  'river',
+  'canal',
+  'coast',
+];
+
+/** Plan d'un aqueduc rectiligne : deux têtes d'eau et un tablier au-dessus du val. */
+export function planAqueduct(options: AqueductPlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const to = buildTile(options.to);
+  const plan: BuildPlan = {
+    tool: 'aqueduct',
+    from,
+    to,
+    axis: from.x === to.x ? 'y' : 'x',
+    tiles: [],
+    cost: 0,
+    valid: false,
+    reason: null,
+  };
+  if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
+    return { ...plan, reason: 'Aqueduc hors de la carte.' };
+  }
+  if (from.x !== to.x && from.y !== to.y) {
+    return { ...plan, reason: 'Un aqueduc doit suivre X ou Y.' };
+  }
+  if (from.x === to.x && from.y === to.y) {
+    return { ...plan, reason: 'Un aqueduc relie deux tuiles distinctes.' };
+  }
+  const axis: BuildAxis = from.x !== to.x ? 'x' : 'y';
+  const points = traceBuildPath(from, to, axis);
+  if (points.length < 3) {
+    return { ...plan, reason: 'Un aqueduc doit franchir au moins une tuile.' };
+  }
+  if (points.length > AQUEDUCT_MAX_TILES) {
+    return {
+      ...plan,
+      reason: `Aqueduc trop long (${points.length} tuiles, ${AQUEDUCT_MAX_TILES} maximum).`,
+    };
+  }
+
+  let reason: string | null = null;
+  let level = 0;
+  const endpointHeights: number[] = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const point = points[i];
+    if (!point) continue;
+    const index = tileIndex(point.x, point.y, map.width);
+    const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    const height = map.heightMap[index] ?? 0;
+    const endpoint = i === 0 || i === points.length - 1;
+    if (endpoint) {
+      if (!AQUEDUCT_ENDPOINT_KINDS.includes(kind)) {
+        reason = reason ?? naturalGroundReason(kind, 'ancrer un aqueduc');
+      }
+      endpointHeights.push(height);
+      level = Math.max(level, height);
+    } else if (
+      kind === 'house' ||
+      kind === 'industry' ||
+      kind === 'station' ||
+      kind === 'airport' ||
+      kind === 'dock' ||
+      kind === 'object' ||
+      kind === 'void'
+    ) {
+      reason = reason ?? 'Un bâtiment ou un objet bloque le tablier de l’aqueduc.';
+    }
+    const previous = points[i - 1];
+    const next = points[i + 1];
+    let connections = 0;
+    if (previous) connections |= directionBit(point, previous);
+    if (next) connections |= directionBit(point, next);
+    const tileCost = AQUEDUCT_COST_PER_TILE;
+    plan.tiles.push({
+      x: point.x,
+      y: point.y,
+      index,
+      kind,
+      height,
+      ground: height * 0.5,
+      connections,
+      cost: tileCost,
+    });
+  }
+  const cost = AQUEDUCT_COST_PER_TILE * points.length;
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  plan.aqueduct = { axis, level };
+  plan.waterLevel = level;
+  return { ...plan, axis, cost, valid: reason === null, reason };
+}
+
+// ---------------------------------------------------------------------------
+// Passage à niveau (#159)
+// ---------------------------------------------------------------------------
+
+export interface CrossingPlanOptions extends InfrastructureOptions {
+  from: BuildPoint;
+}
+
+function straightAxis(bits: number): BuildAxis | null {
+  if ((bits & (CONNECT_EAST | CONNECT_WEST)) === (CONNECT_EAST | CONNECT_WEST)) return 'x';
+  if ((bits & (CONNECT_NORTH | CONNECT_SOUTH)) === (CONNECT_NORTH | CONNECT_SOUTH)) return 'y';
+  return null;
+}
+
+/** Plan d'un passage à niveau sur une voie droite existante (rail ou route). */
+export function planCrossing(options: CrossingPlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const plan: BuildPlan = {
+    tool: 'crossing',
+    from,
+    to: from,
+    axis: 'x',
+    tiles: [],
+    cost: 0,
+    valid: false,
+    reason: null,
+  };
+  if (!inBounds(map, from.x, from.y)) {
+    return { ...plan, reason: 'Passage à niveau hors de la carte.' };
+  }
+  const index = tileIndex(from.x, from.y, map.width);
+  const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+  const height = map.heightMap[index] ?? 0;
+  if (kind !== 'rail' && kind !== 'road') {
+    return {
+      ...plan,
+      reason: 'Un passage à niveau se pose sur une voie ferrée ou une route.',
+    };
+  }
+  const bits = (map.trackBits[index] ?? 0) & 0x0f;
+  const axis = straightAxis(bits);
+  if (!axis) {
+    return { ...plan, reason: 'Le passage à niveau exige une voie droite.' };
+  }
+  const owner = map.owner[index] ?? COMPANY_NONE;
+  if (
+    options.company !== undefined &&
+    options.company !== COMPANY_NONE &&
+    owner !== COMPANY_NONE &&
+    owner !== options.company
+  ) {
+    return { ...plan, reason: 'La voie appartient à une autre entreprise.' };
+  }
+  let reason: string | null = null;
+  if (options.budget !== undefined && CROSSING_COST > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(CROSSING_COST)} £ requis.`;
+  }
+  plan.crossing = { network: kind === 'rail' ? 'rail' : 'road', axis };
+  plan.tiles.push({
+    x: from.x,
+    y: from.y,
+    index,
+    kind,
+    height,
+    ground: height * 0.5,
+    connections: bits,
+    cost: CROSSING_COST,
+  });
+  return { ...plan, axis, cost: CROSSING_COST, valid: reason === null, reason };
+}
+
+/** Tracé rectiligne entre deux tuiles, culées/portails compris. */
+function straightStructurePoints(
+  from: BuildPoint,
+  to: BuildPoint,
+): { points: BuildPoint[]; axis: BuildAxis } | null {
+  if (from.x !== to.x && from.y !== to.y) return null;
+  const axis: BuildAxis = from.x !== to.x ? 'x' : 'y';
+  const points: BuildPoint[] = [];
+  const stepX = Math.sign(to.x - from.x);
+  const stepY = Math.sign(to.y - from.y);
+  let x = from.x;
+  let y = from.y;
+  points.push({ x, y });
+  while (x !== to.x || y !== to.y) {
+    if (axis === 'x') x += stepX;
+    else y += stepY;
+    points.push({ x, y });
+  }
+  return { points, axis };
+}
+
+/** Motif de refus d'une culée ou d'un portail, hors alignement et hauteur. */
+function structureEndReason(
+  map: MapSnapshot,
+  x: number,
+  y: number,
+  transport: BuildTransport,
+  label: 'culée' | 'portail',
+  company?: number,
+): string | null {
+  if (!inBounds(map, x, y)) return `Une ${label} est hors de la carte.`;
+  const index = tileIndex(x, y, map.width);
+  const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+  const owner = map.owner[index] ?? COMPANY_NONE;
+  if (kind === 'water' || kind === 'river' || kind === 'canal' || kind === 'void') {
+    return `Impossible de poser une ${label} sur l’eau ou le vide.`;
+  }
+  if (
+    kind === 'house' ||
+    kind === 'industry' ||
+    kind === 'station' ||
+    kind === 'airport' ||
+    kind === 'dock' ||
+    kind === 'object'
+  ) {
+    return `Impossible de poser une ${label} sur cet équipement.`;
+  }
+  if (kind === 'bridge' || kind === 'tunnel' || kind === 'aqueduct')
+    return 'Un ouvrage occupe déjà cette tuile.';
+  const ownKind: TileKind = transport === 'rail' ? 'rail' : 'road';
+  const otherKind: TileKind = transport === 'rail' ? 'road' : 'rail';
+  if (kind === otherKind) {
+    return transport === 'rail'
+      ? 'Une route occupe cette tuile : choisissez un pont routier.'
+      : 'Une voie ferrée occupe cette tuile : choisissez un pont ferroviaire.';
+  }
+  if (
+    kind === ownKind &&
+    company !== undefined &&
+    company !== COMPANY_NONE &&
+    owner !== COMPANY_NONE &&
+    owner !== company
+  ) {
+    return 'La voie appartient à une autre entreprise.';
+  }
+  return null;
+}
+
+/** Motif de refus d'une tuile traversée par un pont (au-dessus du sol). */
+function bridgeMiddleReason(map: MapSnapshot, x: number, y: number): string | null {
+  const index = tileIndex(x, y, map.width);
+  const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+  if (kind === 'house' || kind === 'industry' || kind === 'airport' || kind === 'dock') {
+    return 'Le tablier ne peut pas passer au-dessus de cet équipement.';
+  }
+  if (kind === 'station' || kind === 'object') return 'Le tablier ne peut pas passer ici.';
+  if (kind === 'bridge' || kind === 'tunnel' || kind === 'aqueduct')
+    return 'Un ouvrage croise déjà ce tracé.';
+  if (kind === 'void') return 'Le tablier sort de la carte.';
+  return null;
+}
+
+function structureTile(
+  map: MapSnapshot,
+  point: BuildPoint,
+  kind: TileKind,
+  cost: number,
+  elevation?: number,
+): BuildPlanTile {
+  const index = tileIndex(point.x, point.y, map.width);
+  const height = map.heightMap[index] ?? 0;
+  return {
+    x: point.x,
+    y: point.y,
+    index,
+    kind,
+    height,
+    ground: height * 0.5,
+    connections: 0,
+    cost,
+    ...(elevation !== undefined ? { elevation } : {}),
+  };
+}
+
+export interface BridgePlanOptions extends InfrastructureOptions {
+  settings: BridgeSettings;
+  to: BuildPoint;
+}
+
+export interface TunnelPlanOptions extends InfrastructureOptions {
+  settings: TunnelSettings;
+  to: BuildPoint;
+}
+
+/** Plan d'un pont rectiligne entre deux culées (#154). */
+export function planBridge(options: BridgePlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const to = buildTile(options.to);
+  const traced = straightStructurePoints(from, to);
+  const axis = traced?.axis ?? 'x';
+  const spec = BRIDGE_MATERIALS[options.settings.material] ?? BRIDGE_MATERIALS.wood;
+  const plan = emptyInfrastructurePlan('bridge', from, to, axis);
+  const span = Math.abs(to.x - from.x) + Math.abs(to.y - from.y);
+  const length = span + 1;
+  const deckHeight = (map.heightMap[tileIndex(from.x, from.y, map.width)] ?? 0) + spec.deckLift;
+  const maintenancePerTile =
+    options.settings.kind === 'rail' ? spec.railMaintenance : spec.roadMaintenance;
+  plan.bridge = {
+    kind: options.settings.kind,
+    material: spec.id,
+    span,
+    length,
+    deckHeight,
+    maintenance: Math.round(length * maintenancePerTile),
+  };
+
+  if (!traced) {
+    return { ...plan, reason: 'Un pont doit être droit, sur un axe X ou Y.' };
+  }
+  if (span === 0) return { ...plan, reason: 'Un pont relie deux tuiles distinctes.' };
+  if (length > MAX_BRIDGE_TILES) {
+    return {
+      ...plan,
+      reason: `Pont trop long (${length} tuiles, ${MAX_BRIDGE_TILES} maximum).`,
+    };
+  }
+  if (span < spec.minSpan) {
+    return {
+      ...plan,
+      reason: `Le pont ${BRIDGE_MATERIAL_LABELS[spec.id]} exige une portée d’au moins ${spec.minSpan} tuiles.`,
+    };
+  }
+  if (span > spec.maxSpan) {
+    return {
+      ...plan,
+      reason: `Le pont ${BRIDGE_MATERIAL_LABELS[spec.id]} ne dépasse pas ${spec.maxSpan} tuiles de portée.`,
+    };
+  }
+  if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
+    return { ...plan, reason: 'Pont hors de la carte.' };
+  }
+
+  const fromHeight = map.heightMap[tileIndex(from.x, from.y, map.width)] ?? 0;
+  const toHeight = map.heightMap[tileIndex(to.x, to.y, map.width)] ?? 0;
+  let reason: string | null = null;
+  if (fromHeight !== toHeight) {
+    reason = 'Les deux culées d’un pont doivent être à la même hauteur.';
+  }
+  const endReason =
+    structureEndReason(map, from.x, from.y, options.settings.kind, 'culée', options.company) ??
+    structureEndReason(map, to.x, to.y, options.settings.kind, 'culée', options.company);
+  reason = reason ?? endReason;
+
+  const deckElevation = deckHeight * 0.5 + 0.32;
+  const costPerTile = options.settings.kind === 'rail' ? spec.railCost : spec.roadCost;
+  let cost = BRIDGE_RAMP_COST[options.settings.kind] * 2;
+  for (let i = 0; i < traced.points.length; i += 1) {
+    const point = traced.points[i];
+    if (!point) continue;
+    const index = tileIndex(point.x, point.y, map.width);
+    const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    const middle = i > 0 && i < traced.points.length - 1;
+    if (middle) {
+      reason = reason ?? bridgeMiddleReason(map, point.x, point.y);
+      const ground = map.heightMap[index] ?? 0;
+      if (!reason && ground > fromHeight) {
+        reason = 'Terrain trop haut sous le tablier : rehaussez le pont ou changez de tracé.';
+      }
+      cost += costPerTile;
+    }
+    plan.tiles.push(structureTile(map, point, kind, 0, deckElevation));
+  }
+  // Coût réparti pour l'aperçu (le total reste la somme exacte).
+  if (plan.tiles.length > 0) {
+    const first = plan.tiles[0];
+    if (first) first.cost = BRIDGE_RAMP_COST[options.settings.kind];
+    const last = plan.tiles[plan.tiles.length - 1];
+    if (last && last !== first) last.cost = BRIDGE_RAMP_COST[options.settings.kind];
+    for (let i = 1; i < plan.tiles.length - 1; i += 1) {
+      const tile = plan.tiles[i];
+      if (tile) tile.cost = costPerTile;
+    }
+  }
+
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  return { ...plan, cost, valid: reason === null, reason };
+}
+
+/** Plan d'un tunnel rectiligne entre deux portails (#155). */
+export function planTunnel(options: TunnelPlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const to = buildTile(options.to);
+  const traced = straightStructurePoints(from, to);
+  const axis = traced?.axis ?? 'x';
+  const plan = emptyInfrastructurePlan('tunnel', from, to, axis);
+  const length = Math.abs(to.x - from.x) + Math.abs(to.y - from.y) + 1;
+  const portalHeight = map.heightMap[tileIndex(from.x, from.y, map.width)] ?? 0;
+  plan.tunnel = {
+    kind: options.settings.kind,
+    length,
+    depth: 0,
+    maintenance: Math.round(length * TUNNEL_MAINTENANCE_PER_TILE[options.settings.kind]),
+  };
+
+  if (!traced) {
+    return { ...plan, reason: 'Un tunnel doit être droit, sur un axe X ou Y.' };
+  }
+  if (length < TUNNEL_MIN_TILES) {
+    return {
+      ...plan,
+      reason: `Un tunnel traverse au moins ${TUNNEL_MIN_TILES} tuiles (deux portails et du relief).`,
+    };
+  }
+  if (length > TUNNEL_MAX_TILES) {
+    return {
+      ...plan,
+      reason: `Tunnel trop long (${length} tuiles, ${TUNNEL_MAX_TILES} maximum).`,
+    };
+  }
+  if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
+    return { ...plan, reason: 'Tunnel hors de la carte.' };
+  }
+
+  const toHeight = map.heightMap[tileIndex(to.x, to.y, map.width)] ?? 0;
+  let reason: string | null = null;
+  if (portalHeight !== toHeight) {
+    reason = 'Les deux portails d’un tunnel doivent être à la même hauteur.';
+  }
+  reason =
+    reason ??
+    structureEndReason(map, from.x, from.y, options.settings.kind, 'portail', options.company) ??
+    structureEndReason(map, to.x, to.y, options.settings.kind, 'portail', options.company);
+
+  let maxMiddleHeight = portalHeight;
+  const costPerTile = TUNNEL_COST_PER_TILE[options.settings.kind];
+  let cost = 0;
+  for (let i = 0; i < traced.points.length; i += 1) {
+    const point = traced.points[i];
+    if (!point) continue;
+    const index = tileIndex(point.x, point.y, map.width);
+    const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    const height = map.heightMap[index] ?? 0;
+    const middle = i > 0 && i < traced.points.length - 1;
+    if (middle) {
+      maxMiddleHeight = Math.max(maxMiddleHeight, height);
+      if (kind === 'bridge' || kind === 'tunnel') {
+        reason = reason ?? 'Un ouvrage occupe déjà ce tracé.';
+      }
+    }
+    cost += costPerTile;
+    plan.tiles.push(structureTile(map, point, kind, costPerTile));
+  }
+  const depth = Math.max(0, maxMiddleHeight - portalHeight);
+  if (!reason && depth === 0) {
+    reason = 'Un tunnel doit traverser un relief plus haut que ses portails.';
+  }
+  cost += depth * TUNNEL_DEPTH_COST;
+  plan.tunnel.depth = depth;
 
   if (!reason && options.budget !== undefined && cost > options.budget) {
     reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;

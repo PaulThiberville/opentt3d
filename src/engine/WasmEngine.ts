@@ -28,6 +28,8 @@ import {
   type EngineLoadOptions,
 } from './loadEngine';
 import { parseWorldJson } from './worldJson';
+import { deriveRailTypes } from '../game/railRules';
+import { signalsFromMap } from '../game/signalRules';
 import {
   type CompanyId,
   type EngineCommand,
@@ -61,6 +63,7 @@ function buildGameConfig(options: NewGameOptions): string {
     start_year: options.startYear ?? 1950,
     difficulty: options.difficulty ?? 1,
     ai_companies: options.aiCompanies ?? 0,
+    disasters: options.disasters === true,
     map_size: Math.trunc(options.width),
   };
   if (options.companies && options.companies.length > 0) {
@@ -366,6 +369,8 @@ export class WasmEngine implements EngineDriver {
     }
 
     world.map = decoded.map;
+    world.map.railTypes = deriveRailTypes(world.map);
+    world.signals = signalsFromMap(world.map);
     this.tick = world.meta.tick;
     if (this.pendingNews.length > 0) {
       world.news = [...world.news, ...this.pendingNews].slice(-50);
@@ -389,6 +394,9 @@ export class WasmEngine implements EngineDriver {
         return;
       case 'build':
       case 'vehicle':
+      case 'finance':
+      case 'town_action':
+      case 'group':
         this.executeBridgeCommand(command);
         return;
       default:
@@ -396,7 +404,7 @@ export class WasmEngine implements EngineDriver {
     }
   }
 
-  /** Exécute une commande build/vehicle via `ottd_command` (#11). */
+  /** Exécute une commande build/vehicle/finance/town_action via `ottd_command` (#11). */
   private executeBridgeCommand(command: EngineCommand): void {
     const module = this.requireModule();
     const run = module._ottd_command;
@@ -649,6 +657,9 @@ export class WasmEngine implements EngineDriver {
     }
     if (options.difficulty !== undefined && options.difficulty !== 1) {
       unsupported.push(`difficulté ${options.difficulty}`);
+    }
+    if (options.disasters === true) {
+      unsupported.push('désastres');
     }
     if (unsupported.length > 0) {
       this.warn(

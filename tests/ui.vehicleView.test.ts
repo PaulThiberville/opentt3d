@@ -9,6 +9,7 @@ import {
   type VehicleSnapshot,
   type WorldSnapshot,
 } from '../src/engine/protocol';
+import { companyColour } from '../src/render/tileVisuals';
 import { describeDepotPanel, describeVehiclePanel } from '../src/ui/vehicleView';
 
 function makeMap(width = 16, height = 16): MapSnapshot {
@@ -146,6 +147,40 @@ describe('panneau dépôt', () => {
     expect(view?.models.length).toBeGreaterThan(0);
     expect(view?.models.every((model) => model.id.startsWith('rail_'))).toBe(true);
   });
+
+  it('expose la variante visuelle et la livrée de chaque vignette', () => {
+    const map = makeMap();
+    markDepot(map, 2, 2, 'road');
+    const view = describeDepotPanel(snapshot([vehicle()]), 0, 5);
+    const byId = new Map(view?.models.map((model) => [model.id, model]));
+    expect(byId.get('bus_city')?.variant).toBe('bus-city');
+    expect(byId.get('bus_intercity')?.variant).toBe('bus-coach');
+    expect(byId.get('truck_flatbed')?.variant).toBe('truck-flat');
+    expect(byId.get('truck_tanker')?.variant).toBe('truck-tanker');
+    const expectedColour = companyColour(8);
+    expect(view?.models.every((model) => model.colour === expectedColour)).toBe(true);
+    // Véhicule routier de test : marchandises, id impair → citerne.
+    expect(view?.vehicles[0]?.variant).toBe('truck-tanker');
+    expect(view?.vehicles[0]?.colour).toBe(expectedColour);
+  });
+
+  it('choisit une variante ferroviaire pour le catalogue rail', () => {
+    const map = makeMap();
+    markDepot(map, 2, 2, 'rail');
+    const view = describeDepotPanel(snapshot([], 100_000, [depot({ id: 6, kind: 'rail' })]), 0, 6);
+    const byId = new Map(view?.models.map((model) => [model.id, model]));
+    expect(byId.get('rail_autorail')?.variant).toBe('train-coach');
+    expect(byId.get('rail_freight')?.variant).toBe('train-steam');
+  });
+
+  it('suit la livrée de l’entreprise pour les vignettes', () => {
+    const map = makeMap();
+    markDepot(map, 2, 2, 'road');
+    const world = snapshot([]);
+    world.companies = [{ ...company(), colour: 3 }];
+    const view = describeDepotPanel(world, 0, 5);
+    expect(view?.models.every((model) => model.colour === companyColour(3))).toBe(true);
+  });
 });
 
 describe('panneau véhicule', () => {
@@ -171,9 +206,15 @@ describe('panneau véhicule', () => {
       7,
       true,
     );
-    expect(view?.orders).toEqual([
-      { index: 0, label: 'Arrêt de Valmont', kind: 'station' },
-      { index: 1, label: 'Dépôt (2, 2)', kind: 'depot' },
+    expect(view?.orders).toMatchObject([
+      {
+        index: 0,
+        label: 'Arrêt de Valmont',
+        kind: 'station',
+        action: 'normal',
+        current: false,
+      },
+      { index: 1, label: 'Dépôt (2, 2)', kind: 'depot', action: 'normal', current: false },
     ]);
     expect(view?.canStart).toBe(true);
     expect(view?.canStop).toBe(false);
@@ -184,5 +225,147 @@ describe('panneau véhicule', () => {
   it('retourne null pour un véhicule disparu', () => {
     expect(describeVehiclePanel(snapshot([]), makeMap(), 7, false)).toBeNull();
     expect(describeVehiclePanel(null, makeMap(), 7, false)).toBeNull();
+  });
+
+  it('liste les refits du modèle avec capacité, coût et perte', () => {
+    const view = describeVehiclePanel(
+      snapshot([
+        vehicle({
+          model: 'truck_flatbed',
+          cargo: { type: 'goods', amount: 12, capacity: 30 },
+          status: 3,
+        }),
+      ]),
+      makeMap(),
+      7,
+      false,
+    );
+    expect(view?.modelName).toBe('Camion plateau');
+    expect(view?.cargo).toEqual({ label: 'Marchandises', amount: 12, capacity: 30, percent: 40 });
+    expect(view?.cargoAtRisk).toBe(12);
+    expect(view?.inDepot).toBe(true);
+    expect(view?.refits.map((refit) => refit.cargo)).toEqual([
+      'goods',
+      'coal',
+      'grain',
+      'wood',
+      'steel',
+    ]);
+    expect(view?.refits.find((refit) => refit.cargo === 'goods')?.available).toBe(false);
+    const coal = view?.refits.find((refit) => refit.cargo === 'coal');
+    expect(coal?.available).toBe(true);
+    expect(coal?.capacity).toBe(34);
+    expect(coal?.cost).toBe(560);
+  });
+
+  it('désactive le refit hors dépôt et pour un modèle inconnu', () => {
+    const view = describeVehiclePanel(
+      snapshot([vehicle({ model: 'truck_flatbed', status: 1 })]),
+      makeMap(),
+      7,
+      false,
+    );
+    expect(view?.refits.every((refit) => !refit.available)).toBe(true);
+    expect(view?.refits[0]?.reason).toContain('dépôt');
+
+    const unknown = describeVehiclePanel(
+      snapshot([vehicle({ model: 'modele_inconnu', status: 3 })]),
+      makeMap(),
+      7,
+      false,
+    );
+    // Repli par type/cargaison : le panneau reste utilisable.
+    expect(unknown?.refits.length).toBeGreaterThan(0);
+  });
+
+  it('affiche les options d’ordre et marque l’ordre courant', () => {
+    const view = describeVehiclePanel(
+      snapshot([
+        vehicle({
+          status: 1,
+          currentOrder: 2,
+          orderTargets: [3, 5],
+          orderKinds: ['station', 'depot'],
+          orderDetails: [
+            {
+              index: 0,
+              target: 3,
+              kind: 'station',
+              options: { action: 'full_load', timetable: { waitTicks: 120, autostart: true } },
+            },
+            {
+              index: 1,
+              target: -1,
+              kind: 'conditional',
+              options: {
+                condition: { type: 'percentage', comparator: 'more_or_equal', value: 80 },
+                jump: 2,
+              },
+            },
+            { index: 2, target: 5, kind: 'depot', options: { action: 'transfer' } },
+          ],
+        }),
+      ]),
+      makeMap(),
+      7,
+      false,
+    );
+    expect(view?.orders.map((order) => order.kind)).toEqual(['station', 'conditional', 'depot']);
+    expect(view?.orders[0]?.actionLabel).toBe('Plein chargement');
+    expect(view?.orders[0]?.timetableLabel).toContain('attente 120 t');
+    expect(view?.orders[1]?.conditionLabel).toContain('Chargement');
+    expect(view?.orders[1]?.jumpLabel).toContain('ordre 3');
+    expect(view?.orders[2]?.actionLabel).toBe('Transfert');
+    expect(view?.orders[2]?.current).toBe(true);
+    expect(view?.currentOrder).toBe(2);
+    expect(view?.shareCandidates.length).toBe(0);
+  });
+
+  it('affiche la fiabilité, la panne et le groupe (#163/#164)', () => {
+    const world = snapshot([
+      vehicle({
+        group: { id: 4, name: 'Ligne A' },
+        orderTargets: [3],
+        orderKinds: ['station'],
+        reliability: {
+          wear: 72,
+          reliability: 28,
+          breakdown: 'stopped',
+          breakdownTicks: 42,
+          lastServiceTick: 0,
+          serviceIntervalDays: 120,
+          daysSinceService: 160,
+          maintenancePerYear: 480,
+        },
+      }),
+    ]);
+    world.groups = [
+      {
+        id: 4,
+        company: 0,
+        name: 'Ligne A',
+        kind: 'road',
+        parent: null,
+        vehicles: 1,
+        autoreplace: null,
+      },
+    ];
+    const view = describeVehiclePanel(world, makeMap(), 7, false);
+    expect(view?.groupLabel).toBe('Ligne A');
+    expect(view?.groupOptions).toEqual([{ id: 4, label: 'Ligne A' }]);
+    expect(view?.reliability?.reliability).toBe(28);
+    expect(view?.reliability?.wearLabel).toBe('72 %');
+    expect(view?.reliability?.breakdownLabel).toContain('arrêt temporaire');
+    expect(view?.reliability?.maintenanceLabel).toContain('480 £/an');
+    expect(view?.reliability?.serviceCost).toBeGreaterThan(0);
+    expect(view?.canSendToDepot).toBe(false);
+    expect(view?.hint).toContain('entret');
+  });
+
+  it('masque l’entretien pour un snapshot antérieur à #163', () => {
+    const view = describeVehiclePanel(snapshot([vehicle()]), makeMap(), 7, false);
+    expect(view?.reliability).toBeNull();
+    expect(view?.groupLabel).toBeNull();
+    expect(view?.canSendToDepot).toBe(false);
   });
 });

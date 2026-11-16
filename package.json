@@ -1,7 +1,7 @@
 {
   "name": "opentt3d",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.5.0",
   "type": "module",
   "description": "OpenTTD en 3D : moteur OpenTTD headless en WebAssembly, frontend Three.js, multijoueur P2P",
   "license": "GPL-2.0-or-later",

@@ -1,9 +1,10 @@
 name: Desktop builds
 
-# Empaquette l'enveloppe Electron nativement sur macOS et Windows, puis publie
-# les installeurs en artefacts de workflow (rétention 1 jour). Lancement manuel
-# uniquement : aucune release n'est créée et aucun secret de signature n'est
-# requis. Aucun cache n'est activé (politique projet : 1 heure maximum).
+# Empaquette l'enveloppe Electron nativement sur macOS, Windows et Linux,
+# puis publie les installeurs en artefacts de workflow (rétention 1 jour).
+# Lancement manuel uniquement : aucune release n'est créée et aucun secret de
+# signature n'est requis. Aucun cache n'est activé (politique projet : 1 heure
+# maximum).
 # NE JAMAIS ajouter de déclencheur push/tags/release : les artefacts lourds ne
 # sont jamais produits automatiquement à chaque version.
 on:
@@ -31,6 +32,10 @@ jobs:
             platform: win
             label: Windows (installeur, zip)
             artifact: opentt3d-windows
+          - os: ubuntu-latest
+            platform: linux
+            label: Linux (AppImage)
+            artifact: opentt3d-linux
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -82,3 +87,4 @@ jobs:
             release/*.dmg
             release/*.zip
             release/*.exe
+            release/*.AppImage

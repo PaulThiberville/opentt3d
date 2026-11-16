@@ -332,12 +332,46 @@ const BUILD_TOOLS = new Set([
   'station',
   'depot',
   'signal',
+  'unsignal',
+  'convert',
   'bridge',
   'tunnel',
   'clear',
+  'terraform',
+  'tree',
+  'canal',
+  'lock',
+  'aqueduct',
+  'crossing',
 ]);
 
-const VEHICLE_ACTIONS = new Set(['buy', 'sell', 'refit', 'order', 'start', 'stop']);
+const VEHICLE_ACTIONS = new Set([
+  'buy',
+  'sell',
+  'refit',
+  'order',
+  'start',
+  'stop',
+  'clone',
+  'service',
+  'send_to_depot',
+]);
+
+const GROUP_ACTIONS = new Set([
+  'create',
+  'rename',
+  'delete',
+  'assign',
+  'remove',
+  'start',
+  'stop',
+  'send_to_depot',
+  'sell',
+  'autoreplace',
+]);
+
+const VEHICLE_KINDS = new Set(['train', 'road', 'ship', 'aircraft']);
+const TOWN_ACTIONS = new Set(['advertise', 'fund_roads', 'fund_buildings']);
 
 /**
  * Structural validation of an `EngineCommand` (mirrors `protocol.ts` without
@@ -374,10 +408,15 @@ export function isEngineCommand(value: unknown): value is EngineCommand {
       }
       if (!isNat(value.company) || value.company > 255) return false;
       if (value.vehicle !== undefined && !isNat(value.vehicle)) return false;
+      if (value.depotId !== undefined && !isNat(value.depotId)) return false;
       if (value.depot !== undefined && !isPoint(value.depot)) return false;
       if (value.model !== undefined && typeof value.model !== 'string') return false;
+      if (value.cargo !== undefined && typeof value.cargo !== 'string') return false;
+      if (value.shareOrders !== undefined && typeof value.shareOrders !== 'boolean') {
+        return false;
+      }
       if (value.orders !== undefined) {
-        if (!Array.isArray(value.orders)) return false;
+        if (!Array.isArray(value.orders) || value.orders.length > 64) return false;
         for (const order of value.orders) {
           if (
             !isRecord(order) ||
@@ -387,6 +426,43 @@ export function isEngineCommand(value: unknown): value is EngineCommand {
             return false;
           }
         }
+      }
+      return true;
+    }
+    case 'finance':
+      return (
+        (value.action === 'increase_loan' || value.action === 'decrease_loan') &&
+        isNat(value.company) &&
+        value.company <= 255 &&
+        (value.amount === undefined || (isNat(value.amount) && value.amount > 0))
+      );
+    case 'town_action':
+      return (
+        typeof value.action === 'string' &&
+        TOWN_ACTIONS.has(value.action) &&
+        isNat(value.company) &&
+        value.company <= 255 &&
+        isNat(value.town)
+      );
+    case 'group': {
+      if (typeof value.action !== 'string' || !GROUP_ACTIONS.has(value.action)) return false;
+      if (!isNat(value.company) || value.company > 255) return false;
+      if (value.group !== undefined && !isNat(value.group)) return false;
+      if (value.parent !== undefined && !isNat(value.parent)) return false;
+      if (value.name !== undefined && typeof value.name !== 'string') return false;
+      if (
+        value.kind !== undefined &&
+        (typeof value.kind !== 'string' || !VEHICLE_KINDS.has(value.kind))
+      ) {
+        return false;
+      }
+      if (value.model !== undefined && value.model !== null && typeof value.model !== 'string') {
+        return false;
+      }
+      if (value.whenOld !== undefined && typeof value.whenOld !== 'boolean') return false;
+      if (value.vehicles !== undefined) {
+        if (!Array.isArray(value.vehicles) || value.vehicles.length > 128) return false;
+        if (!value.vehicles.every(isNat)) return false;
       }
       return true;
     }

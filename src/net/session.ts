@@ -585,7 +585,16 @@ export function createNetSession(options: NetSessionOptions): NetSession {
   }
 
   function commandCompany(cmd: EngineCommand): number | undefined {
-    return cmd.type === 'build' || cmd.type === 'vehicle' ? cmd.company : undefined;
+    switch (cmd.type) {
+      case 'build':
+      case 'vehicle':
+      case 'finance':
+      case 'town_action':
+      case 'group':
+        return cmd.company;
+      default:
+        return undefined;
+    }
   }
 
   /**

@@ -31,6 +31,17 @@ describe('workflows et artefacts', () => {
     expect(pages).toContain('retention-days: 1');
   });
 
+  it('le workflow desktop couvre macOS, Windows et Linux sans déclencheur automatique', () => {
+    const desktop = workflow('desktop.yml');
+    expect(desktop).toContain('macos-15');
+    expect(desktop).toContain('windows-latest');
+    expect(desktop).toContain('ubuntu-latest');
+    expect(desktop).toContain('platform: linux');
+    expect(desktop).toContain('release/*.AppImage');
+    expect(desktop).toContain('--publish never');
+    expect(desktop).toContain('retention-days: 1');
+  });
+
   it('le nettoyage des caches est planifié', () => {
     const cleanup = workflow('cache-cleanup.yml');
     expect(cleanup).toContain('schedule:');

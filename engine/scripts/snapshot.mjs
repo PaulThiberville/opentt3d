@@ -37,13 +37,22 @@ const TILE_KIND_COUNT = 19;
 const COMPANY_NONE = 255;
 
 const MAP_MAGIC = 0x314d544f; // "OTM1"
-const MAP_VERSION = 1;
+const MAP_VERSION = 2;
 const MAP_HEADER_SIZE = 64;
 const MAP_DIRECTORY_ENTRY_SIZE = 12;
-const MAP_LAYER_COUNT = 6;
+const MAP_LAYER_COUNT = 7;
 const MAP_DATA_OFFSET = MAP_HEADER_SIZE + MAP_LAYER_COUNT * MAP_DIRECTORY_ENTRY_SIZE;
 
-const LAYER_IDS = { kind: 1, heightMap: 2, owner: 3, slope: 4, flags: 5, trackBits: 6 };
+const LAYER_IDS = {
+  kind: 1,
+  heightMap: 2,
+  owner: 3,
+  slope: 4,
+  flags: 5,
+  trackBits: 6,
+  // #156 : bits de signal par tuile (type, sens, état, variante).
+  signalData: 7,
+};
 const TILE_FLAGS = {
   WATER: 1 << 0,
   SNOW: 1 << 1,
@@ -345,6 +354,30 @@ function validateJson(state, label, size) {
   );
   assert(economy.speed >= 0, `${label} : vitesse ${economy.speed}`);
   assert(typeof economy.paused === 'boolean', `${label} : pause non booléenne`);
+  assert(
+    typeof economy.inflation === 'number' && economy.inflation >= 0,
+    `${label} : inflation ${economy.inflation}`,
+  );
+  assert(
+    typeof economy.interestRate === 'number' && economy.interestRate >= 0,
+    `${label} : intérêt ${economy.interestRate}`,
+  );
+  assert(
+    typeof economy.loanInterval === 'number' && economy.loanInterval > 0,
+    `${label} : pas de prêt ${economy.loanInterval}`,
+  );
+  assert(Array.isArray(state.subsidies), `${label} : subventions absentes`);
+  for (const subsidy of state.subsidies) {
+    assert(typeof subsidy.cargo === 'string', `${label} : cargaison de subvention`);
+    assert(
+      typeof subsidy.remainingMonths === 'number' && subsidy.remainingMonths >= 0,
+      `${label} : durée de subvention ${subsidy.remainingMonths}`,
+    );
+    assert(
+      subsidy.awardedTo === null || (Number.isInteger(subsidy.awardedTo) && subsidy.awardedTo >= 0),
+      `${label} : bénéficiaire de subvention ${subsidy.awardedTo}`,
+    );
+  }
 
   assert(
     state.map && state.map.width === width,
@@ -379,6 +412,24 @@ function validateJson(state, label, size) {
     assert(typeof company.isAI === 'boolean', `${label} : isAI`);
     assert(typeof company.isLocal === 'boolean', `${label} : isLocal`);
     assert(
+      typeof company.loan === 'number' && company.loan >= 0,
+      `${label} : prêt entreprise ${company.loan}`,
+    );
+    assert(
+      typeof company.maxLoan === 'number' && company.maxLoan >= company.loan,
+      `${label} : plafond de prêt ${company.maxLoan} < dette ${company.loan}`,
+    );
+    assert(
+      Number.isInteger(company.monthsOfBankruptcy) && company.monthsOfBankruptcy >= 0,
+      `${label} : mois de faillite ${company.monthsOfBankruptcy}`,
+    );
+    if (company.isAI) {
+      assert(
+        Number.isInteger(company.aiLevel) && company.aiLevel >= 1 && company.aiLevel <= 3,
+        `${label} : niveau IA ${company.aiLevel}`,
+      );
+    }
+    assert(
       state.companies.filter((c) => c.isLocal).length <= 1,
       `${label} : plusieurs entreprises locales`,
     );
@@ -398,6 +449,16 @@ function validateJson(state, label, size) {
     checkPoint(town.x, town.y, `ville ${town.id}`);
     assert(town.population >= 0, `${label} : population ville`);
     assert(town.buildings >= 0, `${label} : bâtiments ville`);
+    assert(town.authority && town.authority.actions, `${label} : autorité locale absente`);
+    for (const action of ['advertise', 'fund_roads', 'fund_buildings']) {
+      const entry = town.authority.actions[action];
+      assert(entry, `${label} : action ${action} absente`);
+      assert(typeof entry.available === 'boolean', `${label} : ${action} available`);
+      assert(
+        typeof entry.cost === 'number' && entry.cost >= 0,
+        `${label} : ${action} coût ${entry.cost}`,
+      );
+    }
   }
 
   for (const industry of state.industries) {
@@ -472,6 +533,21 @@ function validateJson(state, label, size) {
 
   assert(Array.isArray(state.news), `${label} : news`);
   assert(Array.isArray(state.events), `${label} : events`);
+  assert(Array.isArray(state.disasters), `${label} : disasters`);
+  for (const disaster of state.disasters) {
+    assert(
+      ['fire', 'road_accident', 'train_crash', 'aircraft_crash'].includes(disaster.kind),
+      `${label} : type de désastre ${disaster.kind}`,
+    );
+    assert(
+      Number.isFinite(disaster.x) && Number.isFinite(disaster.y),
+      `${label} : coordonnées de désastre`,
+    );
+    assert(
+      Number.isInteger(disaster.severity) && disaster.severity >= 1 && disaster.severity <= 3,
+      `${label} : gravité de désastre ${disaster.severity}`,
+    );
+  }
 }
 
 function waitForMap(api, reader, width, height) {

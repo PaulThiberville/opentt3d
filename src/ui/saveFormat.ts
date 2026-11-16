@@ -16,6 +16,7 @@
 
 import { PROTOCOL_VERSION } from '../engine/protocol';
 import { formatGameDate, type GameDateLike } from './format';
+import { t } from './i18n';
 
 /** Taille maximale d'une sauvegarde (32 Mio). Au-delà, import et écriture refusés. */
 export const MAX_SAVE_BYTES = 32 * 1024 * 1024;
@@ -139,6 +140,8 @@ export interface SaveInspection {
   difficulty: number | null;
   aiCompanies: number | null;
   startYear: number | null;
+  /** Option désastres (#172), absente des conteneurs antérieurs. */
+  disasters: boolean | null;
 }
 
 interface BridgeMetadata {
@@ -148,6 +151,7 @@ interface BridgeMetadata {
   difficulty: number | null;
   aiCompanies: number | null;
   startYear: number | null;
+  disasters: boolean | null;
 }
 
 function emptyBridgeMetadata(): BridgeMetadata {
@@ -158,6 +162,7 @@ function emptyBridgeMetadata(): BridgeMetadata {
     difficulty: null,
     aiCompanies: null,
     startYear: null,
+    disasters: null,
   };
 }
 
@@ -178,48 +183,40 @@ function readU32(bytes: Uint8Array, offset: number): number {
 /** Vérifie et décrit une sauvegarde importée. Lève `SaveFormatError` si invalide. */
 export function inspectSaveBytes(bytes: Uint8Array): SaveInspection {
   if (bytes.length === 0) {
-    throw new SaveFormatError('empty', 'Fichier vide : aucune sauvegarde à importer.');
+    throw new SaveFormatError('empty', t('save.error.empty'));
   }
   if (bytes.length > MAX_SAVE_BYTES) {
     throw new SaveFormatError(
       'too-large',
-      `Fichier trop volumineux (${formatSaveSize(bytes.length)} ; maximum ${formatSaveSize(
-        MAX_SAVE_BYTES,
-      )}).`,
+      t('save.error.tooLarge', {
+        size: formatSaveSize(bytes.length),
+        max: formatSaveSize(MAX_SAVE_BYTES),
+      }),
     );
   }
   if (isOt3s(bytes)) return inspectOt3s(bytes);
   if (isRawOpenTtdSave(bytes)) {
-    throw new SaveFormatError(
-      'unsupported',
-      'Ce fichier est un .sav OpenTTD brut. Exportez plutôt le conteneur OpenTT3D (.ot3s), qui contient les métadonnées nécessaires au chargement.',
-    );
+    throw new SaveFormatError('unsupported', t('save.error.unsupportedRaw'));
   }
   const first = firstNonWhitespace(bytes);
   if (first === 0x7b) return inspectMockJson(bytes);
-  throw new SaveFormatError(
-    'unsupported',
-    'Format inconnu : attendu un conteneur OpenTT3D (.ot3s) ou une sauvegarde du moteur mock (JSON).',
-  );
+  throw new SaveFormatError('unsupported', t('save.error.unsupported'));
 }
 
 function inspectOt3s(bytes: Uint8Array): SaveInspection {
   if (bytes.length < OT3S_HEADER_SIZE) {
-    throw new SaveFormatError('truncated', 'Conteneur OpenTT3D tronqué : en-tête incomplet.');
+    throw new SaveFormatError('truncated', t('save.error.headerTruncated'));
   }
   const version = readU16(bytes, 4);
   if (version !== OT3S_VERSION) {
     throw new SaveFormatError(
       'version',
-      `Version de sauvegarde OpenTT3D ${version} non prise en charge (attendu ${OT3S_VERSION}).`,
+      t('save.error.version', { version, expected: OT3S_VERSION }),
     );
   }
   const headerSize = readU16(bytes, 6);
   if (headerSize < OT3S_HEADER_SIZE) {
-    throw new SaveFormatError(
-      'corrupt',
-      'Conteneur OpenTT3D corrompu : taille d’en-tête invalide.',
-    );
+    throw new SaveFormatError('corrupt', t('save.error.headerSize'));
   }
   const payloadSize = readU32(bytes, 8);
   const tick = readU32(bytes, 12);
@@ -228,17 +225,16 @@ function inspectOt3s(bytes: Uint8Array): SaveInspection {
   if (expected > bytes.length) {
     throw new SaveFormatError(
       'truncated',
-      `Conteneur OpenTT3D tronqué : ${formatSaveSize(expected - bytes.length)} manquants.`,
+      t('save.error.truncated', {
+        missing: formatSaveSize(expected - bytes.length),
+      }),
     );
   }
   if (expected !== bytes.length) {
-    throw new SaveFormatError(
-      'corrupt',
-      'Conteneur OpenTT3D incohérent : taille déclarée différente de la taille réelle.',
-    );
+    throw new SaveFormatError('corrupt', t('save.error.sizeMismatch'));
   }
   if (payloadSize === 0) {
-    throw new SaveFormatError('corrupt', 'Conteneur OpenTT3D vide : aucune partie à charger.');
+    throw new SaveFormatError('corrupt', t('save.error.emptyPayload'));
   }
 
   const metadata = readBridgeMetadata(bytes, headerSize, metadataSize);
@@ -261,6 +257,7 @@ function inspectOt3s(bytes: Uint8Array): SaveInspection {
     difficulty: metadata.difficulty,
     aiCompanies: metadata.aiCompanies,
     startYear: metadata.startYear,
+    disasters: metadata.disasters,
   };
 }
 
@@ -274,7 +271,7 @@ function readBridgeMetadata(bytes: Uint8Array, offset: number, size: number): Br
   if (size < 40) return metadata;
   const end = offset + size;
   if (end > bytes.length) {
-    throw new SaveFormatError('truncated', 'Métadonnées du conteneur tronquées.');
+    throw new SaveFormatError('truncated', t('save.error.metadataTruncated'));
   }
   const flags = bytes[offset] ?? 0;
   const landscape = bytes[offset + 1] ?? 0;
@@ -284,11 +281,12 @@ function readBridgeMetadata(bytes: Uint8Array, offset: number, size: number): Br
   if ((flags & (1 << 1)) !== 0) metadata.startYear = readU32(bytes, offset + 4);
   if ((flags & (1 << 2)) !== 0) metadata.difficulty = readU32(bytes, offset + 8);
   if ((flags & (1 << 3)) !== 0) metadata.aiCompanies = readU32(bytes, offset + 12);
+  if ((flags & (1 << 7)) !== 0) metadata.disasters = (bytes[offset + 28] ?? 0) !== 0;
   if ((flags & (1 << 6)) !== 0) metadata.mapSize = readU32(bytes, offset + 24);
 
   const nameLength = readU32(bytes, offset + 32);
   if (36 + nameLength > size) {
-    throw new SaveFormatError('corrupt', 'Métadonnées du conteneur incohérentes.');
+    throw new SaveFormatError('corrupt', t('save.error.metadataCorrupt'));
   }
   if (nameLength > 0) {
     const nameBytes = bytes.subarray(offset + 36, offset + 36 + nameLength);
@@ -302,44 +300,44 @@ function inspectMockJson(bytes: Uint8Array): SaveInspection {
   try {
     parsed = JSON.parse(new TextDecoder().decode(bytes));
   } catch {
-    throw new SaveFormatError('corrupt', 'Sauvegarde mock illisible : JSON invalide.');
+    throw new SaveFormatError('corrupt', t('save.error.mockJson'));
   }
   if (!isRecord(parsed)) {
-    throw new SaveFormatError('corrupt', 'Sauvegarde mock invalide : racine inattendue.');
+    throw new SaveFormatError('corrupt', t('save.error.mockRoot'));
   }
   const version = parsed.v;
   if (version !== PROTOCOL_VERSION) {
     throw new SaveFormatError(
       'version',
-      `Sauvegarde mock de version ${String(version)} incompatible avec le protocole ${PROTOCOL_VERSION}.`,
+      t('save.error.mockVersion', { version: String(version), protocol: PROTOCOL_VERSION }),
     );
   }
   const world = parsed.world;
   if (!isRecord(world)) {
-    throw new SaveFormatError('corrupt', 'Sauvegarde mock invalide : monde absent.');
+    throw new SaveFormatError('corrupt', t('save.error.mockWorld'));
   }
   const width = asPositiveInt(world.width);
   const height = asPositiveInt(world.height);
   if (width === null || height === null || width !== height || width > 4096) {
-    throw new SaveFormatError('corrupt', 'Sauvegarde mock invalide : dimensions de carte.');
+    throw new SaveFormatError('corrupt', t('save.error.mockDimensions'));
   }
   const expected = width * height;
   for (const field of ['kind', 'heightMap', 'owner', 'slope', 'flags', 'trackBits']) {
     const text = world[field];
     if (typeof text !== 'string') {
-      throw new SaveFormatError('corrupt', `Sauvegarde mock invalide : couche « ${field} ».`);
+      throw new SaveFormatError('corrupt', t('save.error.mockLayer', { field }));
     }
     const length = base64ByteLength(text);
     if (length !== expected) {
       throw new SaveFormatError(
         'truncated',
-        `Sauvegarde mock tronquée : couche « ${field} » (${length} octets au lieu de ${expected}).`,
+        t('save.error.mockLayerTruncated', { field, actual: length, expected }),
       );
     }
   }
   for (const field of ['companies', 'towns', 'industries', 'stations', 'vehicles', 'news']) {
     if (!Array.isArray(world[field])) {
-      throw new SaveFormatError('corrupt', `Sauvegarde mock invalide : liste « ${field} ».`);
+      throw new SaveFormatError('corrupt', t('save.error.mockList', { field }));
     }
   }
 
@@ -376,6 +374,7 @@ function inspectMockJson(bytes: Uint8Array): SaveInspection {
     difficulty: null,
     aiCompanies: null,
     startYear: null,
+    disasters: null,
   };
 }
 

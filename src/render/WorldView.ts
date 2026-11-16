@@ -15,11 +15,17 @@ import { AtmosphereLayer } from './AtmosphereLayer';
 import { BuildOverlay } from './BuildOverlay';
 import { CameraController } from './CameraController';
 import { CityLayer } from './CityLayer';
+import { CatenaryLayer } from './CatenaryLayer';
 import { DepotLayer } from './DepotLayer';
+import { DisasterLayer } from './DisasterLayer';
 import { IndustryLayer } from './IndustryLayer';
+import { InfrastructureLayer } from './InfrastructureLayer';
 import { Picking, type PickResult } from './Picking';
 import { SignalLayer } from './SignalLayer';
+import { StructureLayer } from './StructureLayer';
+import { SurroundingsLayer } from './SurroundingsLayer';
 import { TerrainLayer } from './TerrainLayer';
+import { TownPropsLayer } from './TownPropsLayer';
 import { TrackLayer } from './TrackLayer';
 import { VegetationLayer } from './VegetationLayer';
 import { VehicleLayer } from './VehicleLayer';
@@ -68,12 +74,18 @@ export class WorldView {
   readonly terrain = new TerrainLayer();
   readonly tracks = new TrackLayer();
   readonly cityLayer = new CityLayer();
+  readonly townProps = new TownPropsLayer();
   readonly industries = new IndustryLayer();
   readonly vegetation = new VegetationLayer();
   readonly vehicles = new VehicleLayer();
   readonly signals = new SignalLayer();
+  readonly catenary = new CatenaryLayer();
   readonly depots = new DepotLayer();
+  readonly disasters = new DisasterLayer();
+  readonly infrastructure = new InfrastructureLayer();
+  readonly structures = new StructureLayer();
   readonly atmosphere = new AtmosphereLayer();
+  readonly surroundings = new SurroundingsLayer();
 
   private scene: THREE.Scene;
   private canvas: HTMLCanvasElement;
@@ -130,12 +142,18 @@ export class WorldView {
     this.scene.add(this.terrain.group);
     this.scene.add(this.tracks.group);
     this.scene.add(this.cityLayer.group);
+    this.scene.add(this.townProps.group);
     this.scene.add(this.industries.group);
     this.scene.add(this.vegetation.group);
     this.scene.add(this.vehicles.group);
     this.scene.add(this.signals.group);
+    this.scene.add(this.catenary.group);
     this.scene.add(this.depots.group);
+    this.scene.add(this.disasters.group);
+    this.scene.add(this.infrastructure.group);
+    this.scene.add(this.structures.group);
     this.scene.add(this.atmosphere.group);
+    this.scene.add(this.surroundings.group);
     this.scene.add(this.buildOverlay.group);
 
     this.picking = new Picking(
@@ -170,15 +188,21 @@ export class WorldView {
       if (first) {
         this.terrain.setMap(map);
         this.tracks.setMap(map, snapshot.stations);
+        this.infrastructure.setMap(map);
       } else {
         this.terrain.applyDelta(map);
         this.tracks.applyDelta(map, snapshot.stations);
+        this.infrastructure.applyDelta(map);
       }
       this.currentMap = map;
       this.cityLayer.build(snapshot.towns, map);
+      this.townProps.build(snapshot.towns, map, this.quality);
       this.industries.build(snapshot.industries, map, this.quality);
       this.vegetation.build(map, this.quality);
       this.signals.setMap(map);
+      this.catenary.setMap(map);
+      this.surroundings.build(map, this.quality);
+      this.structures.setStructures(snapshot.structures ?? [], map);
       this.mapApplied = true;
       if (first) {
         this.controller.setBounds({ minX: 0, maxX: map.width, minZ: 0, maxZ: map.height });
@@ -187,7 +211,9 @@ export class WorldView {
     }
     // Les dépôts sont complets à chaque snapshot ; la carte ne sert qu'à la
     // hauteur du sol (la dernière carte connue est conservée).
+    this.signals.setSignals(snapshot.signals, this.currentMap);
     this.depots.setDepots(snapshot.depots, this.currentMap);
+    this.disasters.setDisasters(snapshot.disasters, this.currentMap);
     this.cityLayer.setStations(snapshot.stations, this.currentMap);
     this.atmosphere.applyWorld(this.currentMap, snapshot.towns, snapshot.stations);
     // L'heure visuelle ne suit le calendrier moteur qu'une fois : ensuite elle
@@ -205,11 +231,15 @@ export class WorldView {
   private applyNight(amount: number): void {
     this.terrain.setNight(amount);
     this.tracks.setNight(amount);
+    this.catenary.setNight(amount);
     this.vehicles.setNight(amount);
     this.cityLayer.setNight(amount);
+    this.townProps.setNight(amount);
     this.industries.setNight(amount);
     this.depots.setNight(amount);
+    this.infrastructure.setNight(amount);
     this.atmosphere.setNight(amount);
+    this.surroundings.setNight(amount);
   }
 
   /** Phase visuelle courante (0 = minuit, 0,5 = midi). */
@@ -260,10 +290,14 @@ export class WorldView {
     this.controller.update(deltaSeconds);
     this.terrain.update(deltaSeconds);
     this.tracks.update(this.camera.position);
+    this.structures.update(this.camera.position);
     this.vegetation.update(deltaSeconds, this.camera.position);
     this.cityLayer.update(this.camera.position);
+    this.townProps.update(this.camera.position);
     this.industries.update(deltaSeconds, this.camera.position);
+    this.disasters.update(deltaSeconds);
     this.atmosphere.update(deltaSeconds, this.camera.position, this.dayNight.phase);
+    this.surroundings.update(deltaSeconds);
     this.dayNight.advance(deltaSeconds);
     this.applyDayNightPhase();
     this.applyNight(this.timeOfDay?.nightAmount ?? this.night);
@@ -303,11 +337,12 @@ export class WorldView {
   /** Affiche le fantôme du plan courant (ou le masque avec `null`). */
   setBuildPlan(plan: BuildPlan | null): void {
     this.buildOverlay.setPlan(plan, this.currentMap);
-    // Poussière de chantier : uniquement sur un tracé accepté, au centre.
+    // Poussière de chantier : bouffée discrète bornée aux tuiles du plan.
     if (plan && plan.valid) {
       this.atmosphere.setConstructionSite({
         x: (plan.from.x + plan.to.x) / 2 + 0.5,
         z: (plan.from.y + plan.to.y) / 2 + 0.5,
+        tiles: plan.tiles,
       });
     } else {
       this.atmosphere.setConstructionSite(null);
@@ -445,13 +480,19 @@ export class WorldView {
   private applyQuality(level: QualityLevel): void {
     this.terrain.setQuality(level);
     this.tracks.setQuality(level);
+    this.structures.setQuality(level);
+    this.structures.setShadows(level === 'high');
     this.cityLayer.setQuality(level);
     this.cityLayer.setShadows(level === 'high');
     this.cityLayer.setNightLights(qualitySettings(level).nightWindows);
+    this.townProps.setQuality(level);
+    this.townProps.setShadows(level === 'high');
+    this.townProps.setNightLights(qualitySettings(level).nightWindows);
     this.vehicles.setShadows(level === 'high');
     this.vehicles.setQuality(level);
     this.industries.setShadows(level === 'high');
     this.atmosphere.setQuality(level);
+    this.surroundings.setQuality(level);
   }
 
   getCameraController(): CameraController {
@@ -498,6 +539,18 @@ export class WorldView {
     return this.depots.count;
   }
 
+  getInfrastructureCounts(): { locks: number; aqueducts: number; crossings: number } {
+    return {
+      locks: this.infrastructure.lockCount,
+      aqueducts: this.infrastructure.aqueductCount,
+      crossings: this.infrastructure.crossingCount,
+    };
+  }
+
+  getStructureCount(): number {
+    return this.structures.count;
+  }
+
   getTrackChunkCount(): number {
     return this.tracks.chunkCount;
   }
@@ -510,13 +563,25 @@ export class WorldView {
     return (
       this.vehicles.drawCallCount +
       this.cityLayer.drawCallCount +
+      this.townProps.drawCallCount +
       this.vegetation.drawCallCount +
       this.industries.drawCallCount +
       this.depots.drawCallCount +
       this.tracks.drawCallCount +
+      this.structures.drawCallCount +
       this.atmosphere.drawCallCount +
+      this.surroundings.drawCallCount +
       this.vehicles.accessoryDrawCalls
     );
+  }
+
+  /** Triangles ajoutés par le décor hors carte (diagnostic). */
+  getSurroundingsTriangleCount(): number {
+    return this.surroundings.triangleCount;
+  }
+
+  getSurroundingsDrawCalls(): number {
+    return this.surroundings.drawCallCount;
   }
 
   getScene(): THREE.Scene {
@@ -530,22 +595,33 @@ export class WorldView {
     this.scene.remove(this.terrain.group);
     this.scene.remove(this.tracks.group);
     this.scene.remove(this.cityLayer.group);
+    this.scene.remove(this.townProps.group);
     this.scene.remove(this.industries.group);
     this.scene.remove(this.vegetation.group);
     this.scene.remove(this.vehicles.group);
     this.scene.remove(this.signals.group);
     this.scene.remove(this.depots.group);
+    this.scene.remove(this.disasters.group);
+    this.scene.remove(this.infrastructure.group);
+    this.scene.remove(this.structures.group);
     this.scene.remove(this.atmosphere.group);
+    this.scene.remove(this.surroundings.group);
     this.scene.remove(this.buildOverlay.group);
     this.terrain.dispose();
     this.tracks.dispose();
     this.cityLayer.dispose();
+    this.townProps.dispose();
     this.industries.dispose();
     this.vegetation.dispose();
     this.vehicles.dispose();
     this.signals.dispose();
+    this.catenary.dispose();
     this.depots.dispose();
+    this.disasters.dispose();
+    this.infrastructure.dispose();
+    this.structures.dispose();
     this.atmosphere.dispose();
+    this.surroundings.dispose();
     this.buildOverlay.dispose();
     this.renderVehicles = [];
     this.currentMap = null;

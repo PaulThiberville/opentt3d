@@ -5,12 +5,15 @@
  * Disposition little-endian :
  *
  *   0   en-tête de 64 octets (magic OTM1, version, dimensions, tick, séquence…)
- *   64  répertoire : 6 entrées de 12 octets (id, elem_size, flags, offset, length)
- *   136 données : 6 couches contiguës de `width * height` octets
+ *   64  répertoire : 7 entrées de 12 octets (id, elem_size, flags, offset, length)
+ *   148 données : 7 couches contiguës de `width * height` octets
  *
- * Couches, dans l'ordre : kind, heightMap, owner, slope, flags, trackBits.
- * Les tableaux renvoyés sont **des copies** : aucune vue ne dépend du buffer
- * d'entrée, donc aucune vue ne survit à un `step()` du moteur.
+ * Couches, dans l'ordre : kind, heightMap, owner, slope, flags, trackBits,
+ * signalData (#156). La version 2 ajoute `signalData` ; le décodeur accepte
+ * encore la version 1 (6 couches) pour les artefacts WASM antérieurs et
+ * fabrique alors une couche de signaux vide. Les tableaux renvoyés sont des
+ * **copies** : aucune vue ne dépend du buffer d'entrée, donc aucune vue ne
+ * survit à un `step()` du moteur.
  *
  * Toute anomalie lève une `MapSnapshotError` avec un message lisible : le
  * protocole est strict, une carte mal formée ne doit jamais être rendue.
@@ -20,10 +23,14 @@ import type { MapSnapshot } from './protocol';
 
 /** "OTM1" en little-endian. */
 export const MAP_SNAPSHOT_MAGIC = 0x314d544f;
-export const MAP_SNAPSHOT_VERSION = 1;
+export const MAP_SNAPSHOT_VERSION = 2;
+/** Version minimale encore lisible (artefacts WASM antérieurs à #156). */
+export const MAP_SNAPSHOT_MIN_VERSION = 1;
 export const MAP_HEADER_SIZE = 64;
 export const MAP_DIRECTORY_ENTRY_SIZE = 12;
-export const MAP_LAYER_COUNT = 6;
+export const MAP_LAYER_COUNT = 7;
+/** Nombre de couches de la version 1, sans `signalData`. */
+export const MAP_LAYER_COUNT_V1 = 6;
 export const MAP_DATA_OFFSET = MAP_HEADER_SIZE + MAP_LAYER_COUNT * MAP_DIRECTORY_ENTRY_SIZE;
 
 /** Identifiants de couche du répertoire. */
@@ -34,6 +41,7 @@ export const MAP_LAYER_ID = {
   slope: 4,
   flags: 5,
   trackBits: 6,
+  signalData: 7,
 } as const;
 
 export type MapLayerName = keyof typeof MAP_LAYER_ID;
@@ -46,6 +54,7 @@ export const MAP_LAYER_ORDER: readonly MapLayerName[] = [
   'slope',
   'flags',
   'trackBits',
+  'signalData',
 ];
 
 export type MapSnapshotErrorCode =
@@ -131,10 +140,11 @@ export function decodeMapSnapshot(
   }
 
   const version = view.getUint16(4, true);
-  if (version !== MAP_SNAPSHOT_VERSION) {
+  if (version < MAP_SNAPSHOT_MIN_VERSION || version > MAP_SNAPSHOT_VERSION) {
     fail(
       'version',
-      `Version de snapshot carte non supportée : ${version} (attendu ${MAP_SNAPSHOT_VERSION}). ` +
+      `Version de snapshot carte non supportée : ${version} ` +
+        `(attendu ${MAP_SNAPSHOT_MIN_VERSION}..${MAP_SNAPSHOT_VERSION}). ` +
         'Reconstruisez le moteur et le frontend ensemble.',
     );
   }
@@ -179,8 +189,12 @@ export function decodeMapSnapshot(
       `Carte et entités désynchronisées : tick carte ${tick}, tick attendu ${expected.tick}.`,
     );
   }
-  if (layerCount !== MAP_LAYER_COUNT) {
-    fail('directory', `Nombre de couches invalide : ${layerCount} (attendu ${MAP_LAYER_COUNT}).`);
+  const expectedLayers = version === 1 ? MAP_LAYER_COUNT_V1 : MAP_LAYER_COUNT;
+  if (layerCount !== expectedLayers) {
+    fail(
+      'directory',
+      `Nombre de couches invalide : ${layerCount} (attendu ${expectedLayers} en v${version}).`,
+    );
   }
   if (directoryOffset !== MAP_HEADER_SIZE) {
     fail(
@@ -188,7 +202,7 @@ export function decodeMapSnapshot(
       `Offset de répertoire invalide : ${directoryOffset} (attendu ${MAP_HEADER_SIZE}).`,
     );
   }
-  const minimumDataOffset = MAP_HEADER_SIZE + MAP_LAYER_COUNT * MAP_DIRECTORY_ENTRY_SIZE;
+  const minimumDataOffset = MAP_HEADER_SIZE + layerCount * MAP_DIRECTORY_ENTRY_SIZE;
   if (dataOffset < minimumDataOffset) {
     fail('directory', `Offset de données invalide : ${dataOffset} (minimum ${minimumDataOffset}).`);
   }
@@ -196,7 +210,7 @@ export function decodeMapSnapshot(
     fail('directory', `Taille de couche incohérente : ${bytesPerLayer} (attendu ${tileCount}).`);
   }
 
-  const requiredBytes = dataOffset + MAP_LAYER_COUNT * tileCount;
+  const requiredBytes = dataOffset + layerCount * tileCount;
   if (bytes.byteLength < requiredBytes) {
     fail(
       'bounds',
@@ -205,7 +219,7 @@ export function decodeMapSnapshot(
   }
 
   const offsets = new Map<MapLayerName, number>();
-  for (let index = 0; index < MAP_LAYER_COUNT; index += 1) {
+  for (let index = 0; index < layerCount; index += 1) {
     const entry = directoryOffset + index * MAP_DIRECTORY_ENTRY_SIZE;
     const layerId = view.getUint8(entry);
     const elemSize = view.getUint8(entry + 1);
@@ -243,7 +257,9 @@ export function decodeMapSnapshot(
     offsets.set(known, layerOffset);
   }
 
-  for (const name of MAP_LAYER_ORDER) {
+  const requiredLayers =
+    version === 1 ? MAP_LAYER_ORDER.slice(0, MAP_LAYER_COUNT_V1) : MAP_LAYER_ORDER;
+  for (const name of requiredLayers) {
     if (!offsets.has(name)) fail('layer', `Couche manquante dans le répertoire : ${name}.`);
   }
 
@@ -285,6 +301,7 @@ export function decodeMapSnapshot(
       slope: layer('slope'),
       flags: layer('flags'),
       trackBits: layer('trackBits'),
+      signalData: offsets.has('signalData') ? layer('signalData') : new Uint8Array(tileCount),
     },
   };
 }

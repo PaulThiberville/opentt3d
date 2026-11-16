@@ -45,8 +45,16 @@ const TILE_FLAG_SIGNAL = 1 << 6;
 const MAP_MAGIC = 0x314d544f;
 const MAP_HEADER_SIZE = 64;
 const MAP_DIRECTORY_ENTRY_SIZE = 12;
-const MAP_LAYER_COUNT = 6;
-const LAYER_IDS = { kind: 1, heightMap: 2, owner: 3, slope: 4, flags: 5, trackBits: 6 };
+const LAYER_IDS = {
+  kind: 1,
+  heightMap: 2,
+  owner: 3,
+  slope: 4,
+  flags: 5,
+  trackBits: 6,
+  // #156 : couche de signaux ajoutée en version 2 du snapshot carte.
+  signalData: 7,
+};
 
 /**
  * Hash de référence du scénario complet (seed 1234, 128×128, sans IA,
@@ -54,9 +62,9 @@ const LAYER_IDS = { kind: 1, heightMap: 2, owner: 3, slope: 4, flags: 5, trackBi
  * modification du pont, du baseset ou d'OpenTTD le met à jour consciemment
  * (voir wiki, Moteur-WASM > Déterminisme).
  *
- * Dernière mise à jour : #90 (achat par `depotId`, cycle de vie d'un dépôt).
+ * Dernière mise à jour : #160/#161 (refit, duplication, orderDetails).
  */
-const REFERENCE_HASH = '0xd92119299eee8941';
+const REFERENCE_HASH = '0x762487b07143ac10';
 
 function log(...args) {
   console.log(...args);
@@ -200,8 +208,9 @@ function makeMapReader(engine) {
       };
       assert(header.magic === MAP_MAGIC, `magic carte 0x${header.magic.toString(16)}`);
 
+      const layerCount = view.getUint32(20, true);
       const layers = {};
-      for (let i = 0; i < MAP_LAYER_COUNT; i++) {
+      for (let i = 0; i < layerCount; i++) {
         const entry = MAP_HEADER_SIZE + i * MAP_DIRECTORY_ENTRY_SIZE;
         const id = view.getUint8(entry);
         const offset = view.getUint32(entry + 4, true);
@@ -529,6 +538,48 @@ async function runScenario(label) {
     `achat par depotId : dépôt ${busByIdBuy.depotId} au lieu de ${depot.depotId}`,
   );
 
+  /* Camion pour le refit (#160) : le moteur sélectionne un véhicule fret. */
+  const truckBuy = record(
+    'achat camion',
+    run({
+      type: 'vehicle',
+      action: 'buy',
+      company: companyId,
+      depotId: depot.depotId,
+      model: 'goods',
+    }),
+  );
+  expectOk(truckBuy, 'achat du camion');
+  const truckRefit = record(
+    'refit camion',
+    run({
+      type: 'vehicle',
+      action: 'refit',
+      company: companyId,
+      vehicle: truckBuy.vehicleId,
+      cargo: 'goods',
+    }),
+  );
+  expectOk(truckRefit, 'refit du camion vers les marchandises');
+  assert(Number.isFinite(truckRefit.cost), 'refit du camion : coût manquant');
+
+  /* Duplication (#161) : le clone naît dans le même dépôt. */
+  const busClone = record(
+    'duplication bus',
+    run({
+      type: 'vehicle',
+      action: 'clone',
+      company: companyId,
+      vehicle: busByIdBuy.vehicleId,
+      shareOrders: true,
+    }),
+  );
+  expectOk(busClone, 'duplication du bus');
+  assert(
+    Number.isInteger(busClone.vehicleId) && busClone.vehicleId !== busByIdBuy.vehicleId,
+    'duplication : identifiant de clone invalide',
+  );
+
   const busOrder = record(
     'ordre bus',
     run({
@@ -706,7 +757,7 @@ async function runScenario(label) {
   const stoppedState = json.read();
   const spare = stoppedState.vehicles.find((entry) => entry.id === spareBuy.vehicleId);
   assert(spare, 'bus jetable absent après arrêt');
-  assert(spare.status === 0, `bus jetable : statut ${spare.status} après arrêt`);
+  assert(spare.status !== 1, `bus jetable : statut ${spare.status} après arrêt`);
 
   expectOk(
     record(
@@ -797,7 +848,16 @@ async function runScenario(label) {
     ['JSON tronqué', '{', 2],
     ['outil inconnu', { type: 'build', tool: 'inconnu', from: roadFrom }, 3],
     ['hors carte', { type: 'build', tool: 'road', from: { x: -1, y: roadFrom.y } }, 4],
-    ['pont non supporté', { type: 'build', tool: 'bridge', from: roadFrom, to: roadTo }, 8],
+    [
+      'pont diagonal',
+      {
+        type: 'build',
+        tool: 'bridge',
+        from: roadFrom,
+        to: { x: roadFrom.x + 2, y: roadFrom.y + 1 },
+      },
+      4,
+    ],
     [
       'rail sur route',
       { type: 'build', tool: 'rail', from: roadFrom, to: { x: roadFrom.x + 1, y: roadFrom.y } },
@@ -835,9 +895,15 @@ async function runScenario(label) {
       6,
     ],
     [
-      'refit non supporté',
-      { type: 'vehicle', action: 'refit', vehicle: busBuy.vehicleId, model: 'mail' },
-      8,
+      'cargaison de refit inconnue',
+      { type: 'vehicle', action: 'refit', vehicle: truckBuy.vehicleId, cargo: 'unobtainium' },
+      6,
+    ],
+    ['action financière inconnue', { type: 'finance', action: 'inconnue', company: companyId }, 3],
+    [
+      'action municipale inconnue',
+      { type: 'town_action', action: 'inconnue', company: companyId, town: 0 },
+      3,
     ],
     [
       'entreprise inconnue',
@@ -868,6 +934,97 @@ async function runScenario(label) {
     `tick JSON ${finalState.meta.tick} ≠ tick carte ${finalMap.header.tick}`,
   );
   const finalHash = hashHex(api.engine);
+
+  /* --- Prêts et autorité locale (#165/#166) --------------------------- */
+  /* Ces commandes s'exécutent après la capture du hash de référence : elles
+   * vérifient le pont sans modifier le scénario de déterminisme historique. */
+  const economyState = json.read();
+  assert(
+    typeof economyState.economy.interestRate === 'number',
+    'snapshot : economy.interestRate absent',
+  );
+  assert(typeof economyState.economy.inflation === 'number', 'snapshot : economy.inflation absent');
+  assert(Array.isArray(economyState.subsidies), 'snapshot : tableau « subsidies » absent');
+  const financeBefore = localCompany(economyState);
+  assert(
+    typeof financeBefore.maxLoan === 'number' && financeBefore.maxLoan > financeBefore.loan,
+    `prêt : plafond ${financeBefore.maxLoan} incohérent`,
+  );
+  const loanAmount = 50_000;
+  const loanReply = record(
+    'emprunt',
+    run({
+      type: 'finance',
+      action: 'increase_loan',
+      company: companyId,
+      amount: loanAmount,
+    }),
+  );
+  expectOk(loanReply, 'emprunt');
+  const afterLoan = json.read();
+  const financeAfter = localCompany(afterLoan);
+  assert(
+    financeAfter.loan === financeBefore.loan + loanAmount,
+    `emprunt : dette ${financeAfter.loan} au lieu de ${financeBefore.loan + loanAmount}`,
+  );
+  assert(
+    financeAfter.money === financeBefore.money + loanAmount,
+    `emprunt : trésorerie ${financeAfter.money} au lieu de ${financeBefore.money + loanAmount}`,
+  );
+  expectOk(
+    record(
+      'remboursement',
+      run({
+        type: 'finance',
+        action: 'decrease_loan',
+        company: companyId,
+        amount: loanAmount,
+      }),
+    ),
+    'remboursement',
+  );
+
+  /* Les achats et le refit de véhicules ont consommé la trésorerie : un
+   * nouvel emprunt garantit que l'action municipale reste finançable. */
+  expectOk(
+    record(
+      'emprunt autorité',
+      run({
+        type: 'finance',
+        action: 'increase_loan',
+        company: companyId,
+        amount: 200_000,
+      }),
+    ),
+    'emprunt pour l’autorité locale',
+  );
+
+  const town = afterLoan.towns[0];
+  assert(town, 'snapshot : aucune ville pour tester l’autorité locale');
+  assert(town.authority !== undefined, 'snapshot : autorité locale absente');
+  const townActionReply = record(
+    'action municipale',
+    run({ type: 'town_action', action: 'fund_roads', company: companyId, town: town.id }),
+  );
+  expectOk(townActionReply, 'action municipale');
+  assert(
+    typeof townActionReply.cost === 'number' && townActionReply.cost > 0,
+    `action municipale : coût ${townActionReply.cost} incohérent`,
+  );
+  const afterTownAction = json.read();
+  assert(
+    afterTownAction.towns[0]?.authority?.actions.fund_roads.available === false,
+    'action municipale : toujours disponible dans le même mois',
+  );
+  assert(
+    afterTownAction.subsidies.every(
+      (subsidy) =>
+        typeof subsidy.cargo === 'string' &&
+        typeof subsidy.remainingMonths === 'number' &&
+        (subsidy.awardedTo === null || typeof subsidy.awardedTo === 'number'),
+    ),
+    'snapshot : entrée de subvention mal formée',
+  );
 
   const roadTiles = countKind(finalMap, TILE_KIND.road) - countKind(initialMap, TILE_KIND.road);
   const railTiles = countKind(finalMap, TILE_KIND.rail) - countKind(initialMap, TILE_KIND.rail);
@@ -905,15 +1062,30 @@ async function runScenario(label) {
   const bus = vehicles.find((entry) => entry.id === busBuy.vehicleId);
   const busById = vehicles.find((entry) => entry.id === busByIdBuy.vehicleId);
   const train = vehicles.find((entry) => entry.id === trainBuy.vehicleId);
+  const truck = vehicles.find((entry) => entry.id === truckBuy.vehicleId);
+  const clone = vehicles.find((entry) => entry.id === busClone.vehicleId);
   assert(bus, 'bus absent du snapshot');
   assert(busById, 'bus acheté par depotId absent du snapshot');
   assert(train, 'train absent du snapshot');
+  assert(truck, 'camion reconfiguré absent du snapshot');
+  assert(clone, 'clone absent du snapshot');
   assert(bus.kind === 'road', `bus : type ${bus.kind}`);
   assert(busById.kind === 'road', `bus par depotId : type ${busById.kind}`);
   assert(train.kind === 'train', `train : type ${train.kind}`);
   assert(bus.status !== 0, 'bus : toujours arrêté après démarrage');
   assert(bus.orderTargets.includes(roadStation.stationId), 'bus : ordre vers la gare absent');
   assert(train.orderTargets.includes(railStation.stationId), 'train : ordre vers la gare absent');
+  assert(Array.isArray(bus.orderDetails), 'bus : orderDetails absent (#161)');
+  assert(
+    bus.orderDetails[0]?.kind === 'station' && bus.orderDetails[0]?.options?.action === 'normal',
+    'bus : options d’ordre absentes (#161)',
+  );
+  assert(typeof bus.currentOrder === 'number', 'bus : ordre courant absent (#161)');
+  assert(
+    truck.cargo?.type === 'goods',
+    `camion : cargaison ${truck.cargo?.type} au lieu de goods (#160)`,
+  );
+  assert(clone.status === 3, 'clone : le véhicule dupliqué devrait rester au dépôt');
 
   /* Dépôts : ids et coordonnées stables après 200 ticks. */
   assert(
@@ -974,6 +1146,8 @@ async function runScenario(label) {
     ids: {
       bus: busBuy.vehicleId,
       busById: busByIdBuy.vehicleId,
+      truck: truckBuy.vehicleId,
+      clone: busClone.vehicleId,
       train: trainBuy.vehicleId,
       roadStation: roadStation.stationId,
       railStation: railStation.stationId,

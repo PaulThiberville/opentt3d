@@ -9,7 +9,8 @@
 
 import type { StartPayload } from '../../net/lobby-types';
 import { el } from '../dom';
-import { CLIMATE_LABELS, ENGINE_LABELS, MAP_SIZE_LABELS } from '../netlobby';
+import { t, tn } from '../i18n';
+import { MAP_SIZE_LABELS, climateLabel, engineLabel } from '../netlobby';
 import { describeLateJoinState, type LateJoinUiState } from '../netjoin';
 import { BaseScreen } from './BaseScreen';
 
@@ -43,31 +44,35 @@ export class JoinScreen extends BaseScreen {
     const card = el('div', { className: 'panel loading-card join-card' });
     const badges = el('div', { className: 'menu-badges' });
     badges.append(
-      el('span', { className: 'badge', text: ENGINE_LABELS[payload.settings.engine] }),
+      el('span', { className: 'badge', text: engineLabel(payload.settings.engine) }),
       el('span', {
         className: 'badge',
-        text: `Carte ${MAP_SIZE_LABELS[payload.settings.mapSize]}`,
+        text: t('join.badge.map', { size: MAP_SIZE_LABELS[payload.settings.mapSize] }),
       }),
-      el('span', { className: 'badge', text: CLIMATE_LABELS[payload.settings.climate] }),
+      el('span', { className: 'badge', text: climateLabel(payload.settings.climate) }),
       el('span', {
         className: 'badge',
-        text: `${humans} joueur${humans > 1 ? 's' : ''}${ai > 0 ? ` · ${ai} IA` : ''}`,
+        text: `${tn(humans, 'join.badge.players.one', 'join.badge.players.other')}${
+          ai > 0 ? ` · ${t('join.badge.ai', { count: ai })}` : ''
+        }`,
       }),
     );
 
     this.title = el('h1', {
       className: 'panel-title',
-      text: 'Rejoindre la partie en cours',
+      text: t('join.title'),
     });
     const subtitle = el('p', {
       className: 'panel-subtitle',
       text: host
-        ? `Partie de ${host.name}${host.companyName ? ` · ${host.companyName}` : ''}`
-        : 'Partie en cours',
+        ? host.companyName
+          ? t('join.hostTitleCompany', { name: host.name, company: host.companyName })
+          : t('join.hostTitle', { name: host.name })
+        : t('join.inProgress'),
     });
     this.message = el('p', {
       className: 'loading-message',
-      text: 'Recherche de l’hôte…',
+      text: t('join.searching'),
       attrs: { role: 'status', 'aria-live': 'polite' },
     });
     this.progressTrack = el('div', {
@@ -77,31 +82,31 @@ export class JoinScreen extends BaseScreen {
         'aria-valuemin': '0',
         'aria-valuemax': '100',
         'aria-valuenow': '0',
-        'aria-label': 'Progression du join',
+        'aria-label': t('join.progressAria'),
       },
     });
     this.progress = el('div', { className: 'progress-fill' });
     this.progressTrack.append(this.progress);
     this.detail = el('p', {
       className: 'field-hint',
-      text: 'L’hôte envoie la sauvegarde en blocs. Le hash est vérifié avant la reprise des ticks, sans interrompre les autres joueurs au-delà du transfert.',
+      text: t('join.detail'),
     });
     this.cancelButton = el('button', {
       className: 'btn btn-ghost',
-      text: 'Annuler le join',
+      text: t('join.cancel'),
       attrs: { type: 'button' },
     });
     this.cancelButton.addEventListener('click', () => this.cancel());
     this.backButton = el('button', {
       className: 'btn btn-primary',
-      text: 'Retour au menu',
+      text: t('join.back'),
       attrs: { type: 'button', 'data-autofocus': '' },
     });
     this.backButton.hidden = true;
     this.backButton.addEventListener('click', () => this.options.onBack());
 
     card.append(
-      el('span', { className: 'panel-eyebrow', text: 'Multijoueur · partie en cours' }),
+      el('span', { className: 'panel-eyebrow', text: t('join.eyebrow') }),
       this.title,
       subtitle,
       badges,
@@ -127,8 +132,12 @@ export class JoinScreen extends BaseScreen {
     if (state.stage === 'transfer') {
       this.detail.textContent =
         state.total > 0
-          ? `${state.received}/${state.total} blocs reçus (${percent} %). Le hash de l’état chargé sera comparé à celui de l’hôte.`
-          : 'Réception de la sauvegarde en cours…';
+          ? t('join.blocks', {
+              received: state.received,
+              total: state.total,
+              percent,
+            })
+          : t('join.receiving');
     }
     if (state.stage === 'rejected') this.showFailure(description.message);
   }
@@ -144,8 +153,8 @@ export class JoinScreen extends BaseScreen {
     if (this.errorMode) return;
     this.cancelRequested = true;
     this.cancelButton.disabled = true;
-    this.cancelButton.textContent = 'Annulation…';
-    this.message.textContent = 'Annulation du join…';
+    this.cancelButton.textContent = t('join.cancelling');
+    this.message.textContent = t('join.cancellingMessage');
   }
 
   /** Progression de la construction du rendu après un join réussi. */
@@ -153,8 +162,8 @@ export class JoinScreen extends BaseScreen {
     if (this.errorMode || this.cancelRequested) return;
     this.locked = true;
     this.cancelButton.disabled = true;
-    this.cancelButton.textContent = 'Join accepté…';
-    this.title.textContent = 'Préparation de la partie rejointe';
+    this.cancelButton.textContent = t('join.accepted');
+    this.title.textContent = t('join.preparingTitle');
     this.message.textContent = message;
     this.message.dataset.tone = 'ok';
     const percent = Math.round(Math.max(0, Math.min(1, progress)) * 100);
@@ -169,8 +178,7 @@ export class JoinScreen extends BaseScreen {
     this.message.dataset.tone = 'error';
     this.progress.style.width = '100%';
     this.progressTrack.setAttribute('aria-valuenow', '100');
-    this.detail.textContent =
-      'La partie n’a pas été modifiée. Vous pouvez revenir au menu et réessayer avec un lien valide.';
+    this.detail.textContent = t('join.failureDetail');
     this.cancelButton.hidden = true;
     this.backButton.hidden = false;
     this.backButton.focus();

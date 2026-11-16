@@ -69,6 +69,9 @@ export const TILE_KIND_KEYS: Record<string, TranslationKey> = {
   dock: 'label.tile.dock',
   canal: 'label.tile.canal',
   river: 'label.tile.river',
+  lock: 'label.tile.lock',
+  aqueduct: 'label.tile.aqueduct',
+  crossing: 'label.tile.crossing',
 };
 
 export const INDUSTRY_KIND_KEYS: Record<string, TranslationKey> = {

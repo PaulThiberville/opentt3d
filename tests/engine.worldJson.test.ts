@@ -101,6 +101,59 @@ describe('mapping JSON → WorldSnapshot', () => {
     expect(world.depots).toEqual([]);
   });
 
+  it('mappe le niveau IA et les désastres (#168/#172)', () => {
+    const world = parseWorldJson(
+      engineJson({
+        companies: [
+          {
+            id: 2,
+            name: 'Ligne du Lac',
+            isAI: true,
+            aiLevel: 3,
+            vehicles: 4,
+            stations: 2,
+          },
+          { id: 0, name: 'Humaine' },
+        ],
+        disasters: [
+          {
+            id: 5,
+            kind: 'fire',
+            x: 12.5,
+            y: 8.5,
+            company: 2,
+            industry: 3,
+            severity: 2,
+            startedTick: 90,
+            remainingDays: 4,
+          },
+          { id: 6, kind: 'inconnu', vehicle: 7, severity: 9 },
+        ],
+        events: [
+          { type: 'disaster_started', disaster: 5, kind: 'fire', tick: 90 },
+          { type: 'disaster_ended', disaster: 5, tick: 120 },
+        ],
+      }),
+    );
+
+    expect(world.companies[0]).toMatchObject({ isAI: true, aiLevel: 3 });
+    expect(world.companies[1]?.aiLevel).toBeUndefined();
+    expect(world.disasters).toHaveLength(2);
+    expect(world.disasters?.[0]).toMatchObject({
+      id: 5,
+      kind: 'fire',
+      company: 2,
+      industry: 3,
+      severity: 2,
+      remainingDays: 4,
+    });
+    expect(world.disasters?.[1]).toMatchObject({ kind: 'fire', severity: 3 });
+    expect(world.events).toEqual([
+      { type: 'disaster_started', disaster: 5, kind: 'fire', tick: 90 },
+      { type: 'disaster_ended', disaster: 5, tick: 120 },
+    ]);
+  });
+
   it('mappe les entités du pont', () => {
     const world = parseWorldJson(
       engineJson({
@@ -251,6 +304,61 @@ describe('mapping JSON → WorldSnapshot', () => {
     });
   });
 
+  it('mappe les ponts et tunnels optionnels et ignore les types inconnus', () => {
+    const world = parseWorldJson(
+      engineJson({
+        structures: [
+          {
+            id: 4,
+            kind: 'bridge',
+            company: 1,
+            transport: 'rail',
+            material: 'suspension',
+            from: { x: 3, y: 8 },
+            to: { x: 14, y: 8 },
+            length: 12,
+            deckHeight: 9,
+          },
+          {
+            id: 5,
+            kind: 'tunnel',
+            company: 0,
+            transport: 'road',
+            from: { x: 20, y: 3 },
+            to: { x: 28, y: 3 },
+            length: 9,
+            portalHeight: 4,
+          },
+          { id: 6, kind: 'aqueduct' },
+        ],
+      }),
+    );
+    expect(world.structures).toEqual([
+      {
+        id: 4,
+        kind: 'bridge',
+        company: 1,
+        transport: 'rail',
+        material: 'suspension',
+        from: { x: 3, y: 8 },
+        to: { x: 14, y: 8 },
+        length: 12,
+        deckHeight: 9,
+      },
+      {
+        id: 5,
+        kind: 'tunnel',
+        company: 0,
+        transport: 'road',
+        from: { x: 20, y: 3 },
+        to: { x: 28, y: 3 },
+        length: 9,
+        portalHeight: 4,
+      },
+    ]);
+    expect(parseWorldJson(engineJson()).structures).toEqual([]);
+  });
+
   it('ignore les véhicules sans type de rendu et les événements inconnus', () => {
     const world = parseWorldJson(
       engineJson({
@@ -327,6 +435,239 @@ describe('mapping JSON → WorldSnapshot', () => {
       },
     ]);
     expect(world.vehicles[0]?.orderKinds).toEqual(['station', 'depot']);
+  });
+
+  it('mappe l’économie, l’autorité locale et les subventions (#165/#166/#167)', () => {
+    const world = parseWorldJson(
+      engineJson({
+        economy: {
+          year: 1962,
+          month: 4,
+          day: 9,
+          dayFraction: 3,
+          speed: 1,
+          paused: false,
+          inflation: 12.5,
+          difficulty: 2,
+          interestRate: 6,
+          maxLoan: 450000,
+          loanInterval: 50000,
+        },
+        companies: [
+          {
+            id: 0,
+            name: 'Transports',
+            colour: 2,
+            money: -12000,
+            loan: 180000,
+            maxLoan: 450000,
+            monthsOfBankruptcy: 3,
+            value: 800000,
+            income: 0,
+            expenses: 5000,
+            vehicles: 1,
+            stations: 1,
+            isAI: false,
+            isLocal: true,
+            bankrupt: false,
+          },
+        ],
+        towns: [
+          {
+            id: 0,
+            name: 'Valmont',
+            x: 10,
+            y: 10,
+            population: 1200,
+            growthRate: 2,
+            buildings: 40,
+            rating: 680,
+            authority: {
+              rating: 680,
+              actions: {
+                advertise: { available: true, cost: 22500 },
+                fund_roads: { available: false, cost: 56250 },
+              },
+            },
+          },
+        ],
+        industries: [
+          {
+            id: 0,
+            name: 'Centrale',
+            kind: 'power_station',
+            x: 20,
+            y: 20,
+            production: 0,
+            transported: 0,
+            serviceRate: 72,
+            accepts: ['coal'],
+            stocks: [],
+          },
+        ],
+        subsidies: [
+          {
+            id: 0,
+            cargo: 'coal',
+            from: 'Mine',
+            to: 'Centrale',
+            fromKind: 'industry',
+            toKind: 'industry',
+            remainingMonths: 9,
+            awardedTo: 1,
+          },
+        ],
+      }),
+    );
+
+    expect(world.economy.inflation).toBe(12.5);
+    expect(world.economy.difficulty).toBe(2);
+    expect(world.economy.interestRate).toBe(6);
+    expect(world.companies[0]?.maxLoan).toBe(450000);
+    expect(world.companies[0]?.monthsOfBankruptcy).toBe(3);
+    expect(world.towns[0]?.authority?.actions.advertise.available).toBe(true);
+    expect(world.towns[0]?.authority?.actions.fund_roads.available).toBe(false);
+    expect(world.towns[0]?.authority?.actions.fund_buildings).toEqual({
+      available: false,
+      cost: 0,
+    });
+    expect(world.industries[0]?.serviceRate).toBe(72);
+    expect(world.industries[0]?.accepts).toEqual(['coal']);
+    expect(world.subsidies?.[0]?.awardedTo).toBe(1);
+    expect(world.subsidies?.[0]?.fromKind).toBe('industry');
+  });
+
+  it('mappe orderDetails, options et ordre courant (#161)', () => {
+    const world = parseWorldJson(
+      engineJson({
+        vehicles: [
+          {
+            id: 4,
+            kind: 'road',
+            company: 0,
+            model: 'truck_flatbed',
+            cargo: { type: 'coal', amount: 12, capacity: 34 },
+            orderTargets: [12, 5],
+            orderKinds: ['station', 'depot'],
+            currentOrder: 2,
+            orderDetails: [
+              {
+                index: 0,
+                target: 12,
+                kind: 'station',
+                options: {
+                  action: 'full_load',
+                  timetable: { waitTicks: 120, travelTicks: 40, autostart: true },
+                },
+              },
+              {
+                index: 1,
+                target: -1,
+                kind: 'conditional',
+                options: {
+                  condition: { type: 'percentage', comparator: 'more_or_equal', value: 80 },
+                  jump: 2,
+                },
+              },
+              {
+                index: 2,
+                target: 5,
+                kind: 'depot',
+                options: { action: 'transfer' },
+              },
+              { index: 3, target: 1, kind: 'inconnu' },
+            ],
+          },
+        ],
+      }),
+    );
+    const vehicle = world.vehicles[0];
+    expect(vehicle?.model).toBe('truck_flatbed');
+    expect(vehicle?.currentOrder).toBe(2);
+    expect(vehicle?.orderDetails).toHaveLength(3);
+    expect(vehicle?.orderDetails?.[0]?.options).toEqual({
+      action: 'full_load',
+      timetable: { waitTicks: 120, travelTicks: 40, autostart: true },
+    });
+    expect(vehicle?.orderDetails?.[1]).toMatchObject({
+      kind: 'conditional',
+      target: -1,
+      options: {
+        jump: 2,
+        condition: { type: 'percentage', comparator: 'more_or_equal', value: 80 },
+      },
+    });
+    expect(vehicle?.orderDetails?.[2]?.options?.action).toBe('transfer');
+  });
+
+  it('mappe les groupes, la fiabilité et les événements #163/#164', () => {
+    const world = parseWorldJson({
+      ...engineJson(),
+      groups: [
+        {
+          id: 2,
+          company: 0,
+          name: 'Ligne A',
+          kind: 'road',
+          parent: -1,
+          vehicles: 1,
+          autoreplace: { model: 'bus_intercity', whenOld: true },
+        },
+        { id: 3, company: 0, name: '', kind: 'inconnu' },
+      ],
+      vehicles: [
+        {
+          id: 9,
+          kind: 'road',
+          company: 0,
+          group: { id: 2, name: 'Ligne A' },
+          reliability: {
+            wear: 61,
+            reliability: 39,
+            breakdown: 'slowing',
+            breakdownTicks: 12,
+            lastServiceTick: null,
+            serviceIntervalDays: 120,
+            daysSinceService: 70,
+            maintenancePerYear: 480,
+          },
+        },
+      ],
+      events: [
+        { type: 'vehicle_breakdown', vehicle: 9, breakdown: 'stopped', tick: 40 },
+        { type: 'group_created', group: 2, company: 0, tick: 41 },
+        { type: 'group_deleted', group: 2, company: 0, tick: 42 },
+      ],
+    });
+    expect(world.groups).toEqual([
+      {
+        id: 2,
+        company: 0,
+        name: 'Ligne A',
+        kind: 'road',
+        parent: null,
+        vehicles: 1,
+        autoreplace: { model: 'bus_intercity', whenOld: true },
+      },
+    ]);
+    const vehicle = world.vehicles[0];
+    expect(vehicle?.group).toEqual({ id: 2, name: 'Ligne A' });
+    expect(vehicle?.reliability).toEqual({
+      wear: 61,
+      reliability: 39,
+      breakdown: 'slowing',
+      breakdownTicks: 12,
+      lastServiceTick: null,
+      serviceIntervalDays: 120,
+      daysSinceService: 70,
+      maintenancePerYear: 480,
+    });
+    expect(world.events.map((event) => event.type)).toEqual([
+      'vehicle_breakdown',
+      'group_created',
+      'group_deleted',
+    ]);
+    expect(world.events[0]).toMatchObject({ breakdown: 'stopped' });
   });
 
   it('refuse un protocole incompatible', () => {

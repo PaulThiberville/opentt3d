@@ -14,10 +14,20 @@ import {
   cloneBuildSettings,
   createBuildSettings,
   nextDirection,
+  planAqueduct,
+  planBridge,
   planBuild,
+  planCanal,
+  planConvertRail,
+  planCrossing,
   planDepot,
+  planLock,
+  planRemoveSignal,
   planSignal,
   planStation,
+  planTerraform,
+  planTree,
+  planTunnel,
   type BuildPlan,
   type BuildPoint,
   type BuildSettings,
@@ -99,6 +109,8 @@ export class BuildController {
       this.settings.station.direction = nextDirection(this.settings.station.direction);
     } else if (this.tool === 'depot') {
       this.settings.depot.direction = nextDirection(this.settings.depot.direction ?? 'se');
+    } else if (this.tool === 'lock') {
+      this.settings.lock.direction = nextDirection(this.settings.lock.direction ?? 'ne');
     } else {
       return false;
     }
@@ -223,10 +235,49 @@ export class BuildController {
         ...(to ? { to } : {}),
         axis,
       });
+    } else if (tool === 'unsignal') {
+      plan = planRemoveSignal({
+        ...shared,
+        settings: this.settings.signal,
+        ...(to ? { to } : {}),
+        axis,
+      });
+    } else if (tool === 'convert') {
+      plan = planConvertRail({
+        ...shared,
+        railType: this.settings.rail.type,
+        ...(to ? { to } : {}),
+        axis,
+      });
+    } else if (tool === 'terraform') {
+      plan = planTerraform({
+        ...shared,
+        settings: this.settings.terraform,
+        ...(to ? { to } : {}),
+      });
+    } else if (tool === 'tree') {
+      plan = planTree({ ...shared, settings: this.settings.tree, ...(to ? { to } : {}) });
+    } else if (tool === 'canal') {
+      plan = planCanal({ ...shared, ...(to ? { to } : {}), axis });
+    } else if (tool === 'lock') {
+      plan = planLock({ ...shared, settings: this.settings.lock });
+    } else if (tool === 'aqueduct') {
+      plan = planAqueduct({ ...shared, to: to ?? from });
+    } else if (tool === 'crossing') {
+      plan = planCrossing({ ...shared });
+    } else if (tool === 'bridge') {
+      const target = to ?? defaultStructureTarget(from, map);
+      plan = planBridge({ ...shared, to: target, settings: this.settings.bridge });
+    } else if (tool === 'tunnel') {
+      // La portée d'un tunnel se lit dans le relief : on prévisualise un
+      // tunnel court vers l'est à défaut de drag.
+      const target = to ?? defaultStructureTarget(from, map);
+      plan = planTunnel({ ...shared, to: target, settings: this.settings.tunnel });
     } else {
       plan = planBuild({
         ...shared,
         tool: tool ?? 'road',
+        ...(tool === 'rail' ? { railType: this.settings.rail.type } : {}),
         ...(to ? { to } : {}),
         axis,
       });
@@ -234,4 +285,13 @@ export class BuildController {
     this.plan = plan;
     this.options.onPreview(plan);
   }
+}
+
+/** Cible par défaut d'un aperçu d'ouvrage au simple survol (3 tuiles à l'est). */
+function defaultStructureTarget(
+  from: BuildPoint,
+  map: { width: number; height: number },
+): BuildPoint {
+  const offset = from.x + 3 < map.width ? 3 : -3;
+  return { x: Math.max(0, Math.min(map.width - 1, from.x + offset)), y: from.y };
 }

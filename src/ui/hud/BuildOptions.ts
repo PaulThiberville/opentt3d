@@ -6,15 +6,24 @@
  * une copie modifiée à `GameSession`, qui la transmet au contrôleur et au HUD.
  */
 
+import { RAIL_TYPES, type RailType } from '../../game/railRules';
+import { SIGNAL_KINDS, type SignalDirection, type SignalKind } from '../../game/signalRules';
 import {
+  BRIDGE_MATERIAL_ORDER,
   STATION_MAX_LENGTH,
   STATION_MAX_PLATFORMS,
+  TERRAFORM_MAX_SIZE,
+  TREE_MAX_SIZE,
   cloneBuildSettings,
+  railBuildCost,
+  railConvertCost,
   type BuildDirection,
   type BuildSettings,
   type BuildTool,
+  type BridgeMaterial,
 } from '../../game/buildRules';
 import { el } from '../dom';
+import { formatInt } from '../format';
 import { onLanguageChange, t, type TranslationKey } from '../i18n';
 
 export interface BuildOptionsCallbacks {
@@ -34,6 +43,21 @@ const DIRECTION_KEYS: Record<BuildDirection, TranslationKey> = {
   se: 'build.direction.se',
   sw: 'build.direction.sw',
   nw: 'build.direction.nw',
+};
+
+const SIGNAL_KIND_LABEL_KEYS: Record<SignalKind, TranslationKey> = {
+  block: 'build.signal.kind.block',
+  path: 'build.signal.kind.path',
+  entry: 'build.signal.kind.entry',
+  exit: 'build.signal.kind.exit',
+  combo: 'build.signal.kind.combo',
+};
+
+const RAIL_TYPE_LABEL_KEYS: Record<RailType, TranslationKey> = {
+  rail: 'build.railType.rail',
+  electrified: 'build.railType.electrified',
+  monorail: 'build.railType.monorail',
+  maglev: 'build.railType.maglev',
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -77,7 +101,19 @@ export class BuildOptions {
   private render(): void {
     const tool = this.tool;
     this.element.replaceChildren();
-    if (tool !== 'station' && tool !== 'depot' && tool !== 'signal') {
+    if (
+      tool !== 'station' &&
+      tool !== 'depot' &&
+      tool !== 'signal' &&
+      tool !== 'unsignal' &&
+      tool !== 'rail' &&
+      tool !== 'convert' &&
+      tool !== 'terraform' &&
+      tool !== 'tree' &&
+      tool !== 'lock' &&
+      tool !== 'bridge' &&
+      tool !== 'tunnel'
+    ) {
       this.element.hidden = true;
       return;
     }
@@ -88,12 +124,85 @@ export class BuildOptions {
         ? t('build.title.station')
         : tool === 'depot'
           ? t('build.title.depot')
-          : t('build.title.signal');
+          : tool === 'signal'
+            ? t('build.title.signal')
+            : tool === 'unsignal'
+              ? t('build.title.unsignal')
+              : tool === 'rail'
+                ? t('build.title.railType')
+                : tool === 'convert'
+                  ? t('build.title.railType')
+                  : tool === 'terraform'
+                    ? t('build.title.terraform')
+                    : tool === 'tree'
+                      ? t('build.title.tree')
+                      : tool === 'lock'
+                        ? t('build.title.lock')
+                        : tool === 'bridge'
+                          ? t('build.title.bridge')
+                          : t('build.title.tunnel');
     this.element.append(el('span', { className: 'hud-build-options-title', text: title }));
 
     if (tool === 'station') this.renderStation();
     else if (tool === 'depot') this.renderDepot();
-    else this.renderSignal();
+    else if (tool === 'signal') this.renderSignal();
+    else if (tool === 'unsignal') this.renderUnsignal();
+    else if (tool === 'rail') this.renderRailType(false);
+    else if (tool === 'convert') this.renderRailType(true);
+    else if (tool === 'terraform') this.renderTerraform();
+    else if (tool === 'tree') this.renderTree();
+    else if (tool === 'lock') this.renderLock();
+    else if (tool === 'bridge') this.renderBridge();
+    else this.renderTunnel();
+  }
+
+  private renderTerraform(): void {
+    const terraform = this.settings.terraform;
+    this.element.append(
+      this.segmented(
+        [
+          { id: 'up', label: t('build.terraform.up') },
+          { id: 'down', label: t('build.terraform.down') },
+        ],
+        terraform.direction,
+        (direction) => {
+          this.commit({
+            ...this.settings,
+            terraform: { ...terraform, direction: direction === 'down' ? 'down' : 'up' },
+          });
+        },
+        'terraform-direction',
+        'build.terraformDirection',
+      ),
+      this.stepper(
+        t('build.size'),
+        terraform.size,
+        1,
+        TERRAFORM_MAX_SIZE,
+        'terraform-size',
+        (value) => this.commit({ ...this.settings, terraform: { ...terraform, size: value } }),
+      ),
+    );
+  }
+
+  private renderTree(): void {
+    const tree = this.settings.tree;
+    this.element.append(
+      this.stepper(t('build.size'), tree.size, 1, TREE_MAX_SIZE, 'tree-size', (value) =>
+        this.commit({ ...this.settings, tree: { ...tree, size: value } }),
+      ),
+    );
+  }
+
+  private renderLock(): void {
+    const lock = this.settings.lock;
+    this.element.append(
+      el('span', {
+        className: 'hud-build-options-note',
+        text: t('build.lockNote'),
+      }),
+      this.directionButton(lock.direction ?? 'ne'),
+    );
   }
 
   private renderStation(): void {
@@ -178,10 +287,140 @@ export class BuildOptions {
   }
 
   private renderSignal(): void {
+    const signal = this.settings.signal;
+    this.element.append(
+      this.segmented(
+        SIGNAL_KINDS.map((kind) => ({
+          id: kind,
+          label: t(SIGNAL_KIND_LABEL_KEYS[kind]),
+        })),
+        signal.type,
+        (kind) => {
+          this.commit({
+            ...this.settings,
+            signal: { ...signal, type: kind as SignalKind },
+          });
+        },
+        'signal-kind',
+        'build.signalKind',
+      ),
+      this.segmented(
+        [
+          { id: 'one-way', label: t('build.signal.oneWay') },
+          { id: 'both', label: t('build.signal.both') },
+        ],
+        signal.direction,
+        (direction) => {
+          this.commit({
+            ...this.settings,
+            signal: { ...signal, direction: direction as SignalDirection },
+          });
+        },
+        'signal-direction',
+        'build.signalDirection',
+      ),
+      this.stepper(t('build.signal.spacing'), signal.spacing, 1, 8, 'signal-spacing', (value) => {
+        this.commit({ ...this.settings, signal: { ...signal, spacing: value } });
+      }),
+      el('span', {
+        className: 'hud-build-options-note',
+        text: t('build.signalNote', { label: t(SIGNAL_KIND_LABEL_KEYS[signal.type]) }),
+      }),
+    );
+  }
+
+  private renderUnsignal(): void {
     this.element.append(
       el('span', {
         className: 'hud-build-options-note',
-        text: t('build.blockNote'),
+        text: t('build.unsignalNote'),
+      }),
+    );
+  }
+
+  private renderRailType(convert: boolean): void {
+    const current = this.settings.rail.type;
+    this.element.append(
+      this.segmented(
+        RAIL_TYPES.map((type) => ({
+          id: type,
+          label: t(RAIL_TYPE_LABEL_KEYS[type]),
+        })),
+        current,
+        (type) => {
+          this.commit({
+            ...this.settings,
+            rail: { ...this.settings.rail, type: type as RailType },
+          });
+        },
+        'rail-type',
+        'build.railType',
+      ),
+      el('span', {
+        className: 'hud-build-options-note',
+        text: t(convert ? 'build.convertNote' : 'build.railNote', {
+          type: t(RAIL_TYPE_LABEL_KEYS[current]),
+          cost: formatInt(convert ? railConvertCost(current) : railBuildCost(current)),
+        }),
+      }),
+    );
+  }
+
+  private renderBridge(): void {
+    const bridge = this.settings.bridge;
+    this.element.append(
+      this.segmented(
+        [
+          { id: 'rail', label: t('build.rail') },
+          { id: 'road', label: t('build.route') },
+        ],
+        bridge.kind,
+        (kind) => {
+          this.commit({ ...this.settings, bridge: { ...bridge, kind: kind as 'rail' | 'road' } });
+        },
+        'bridge-kind',
+        'build.bridgeKind',
+      ),
+      this.segmented(
+        BRIDGE_MATERIAL_ORDER.map((material: BridgeMaterial) => ({
+          id: material,
+          label: t(`build.material.${material}` as TranslationKey),
+        })),
+        bridge.material,
+        (material) => {
+          this.commit({
+            ...this.settings,
+            bridge: { ...bridge, material: material as BridgeMaterial },
+          });
+        },
+        'bridge-material',
+        'build.bridgeMaterial',
+      ),
+      el('span', {
+        className: 'hud-build-options-note',
+        text: t('build.bridgeNote'),
+      }),
+    );
+  }
+
+  private renderTunnel(): void {
+    const tunnel = this.settings.tunnel;
+    this.element.append(
+      this.segmented(
+        [
+          { id: 'rail', label: t('build.rail') },
+          { id: 'road', label: t('build.route') },
+        ],
+        tunnel.kind,
+        (kind) => {
+          this.commit({ ...this.settings, tunnel: { ...tunnel, kind: kind as 'rail' | 'road' } });
+        },
+        'tunnel-kind',
+        'build.tunnelKind',
+      ),
+      el('span', {
+        className: 'hud-build-options-note',
+        text: t('build.tunnelNote'),
       }),
     );
   }

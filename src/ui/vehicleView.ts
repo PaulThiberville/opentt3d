@@ -6,21 +6,55 @@
  * catalogue partagé (`vehicleRules`), l'état du snapshot.
  */
 
-import type { MapSnapshot, WorldSnapshot } from '../engine/protocol';
+import type { MapSnapshot, OrderOptions, WorldSnapshot } from '../engine/protocol';
 import {
+  ORDER_ACTION_LABELS,
+  cloneOrderOptions,
   depotById,
   depotKindLabel,
+  inferVehicleModel,
   modelsForDepot,
+  orderConditionLabel,
   orderTargetLabel,
   ordersFromSnapshot,
+  refitCost,
+  refitOptions,
+  vehicleModel,
 } from '../game/vehicleRules';
+import { RAIL_TYPE_LABELS } from '../game/railRules';
+import { modelKindFor } from '../game/vehicleInterpolation';
+import { serviceCost } from '../game/vehicleReliability';
+import { companyGroups, vehicleGroupLabel } from '../game/vehicleGroups';
+import { companyColour } from '../render/tileVisuals';
+import { vehicleVariantFor, type VehicleVariant } from '../render/vehicleModels';
 import { cargoLabel, vehicleLabel, vehicleStatusLabel } from './labels';
 import { formatInt, formatMoney } from './format';
+import { t } from './i18n';
 import { describeSelection } from './selection';
-import type { DepotPanelView, VehiclePanelView } from './types';
+import type { DepotPanelView, VehiclePanelView, VehicleOrderView } from './types';
 
 /** Distance maximale (tuiles) pour considérer un véhicule « dans » le dépôt. */
 const DEPOT_RADIUS = 1.25;
+
+/**
+ * Archétype visuel de chaque modèle du catalogue.
+ *
+ * Le catalogue du contrat ne transporte pas encore de variante : on l'aligne
+ * ici sur les archétypes du rendu principal, sans modifier les règles de jeu.
+ */
+const CATALOGUE_VARIANTS: Record<string, VehicleVariant> = {
+  bus_city: 'bus-city',
+  bus_intercity: 'bus-coach',
+  truck_flatbed: 'truck-flat',
+  truck_tanker: 'truck-tanker',
+  rail_autorail: 'train-coach',
+  rail_freight: 'train-steam',
+};
+
+/** Variante d'un modèle du catalogue, avec repli sur la famille du contrat. */
+function catalogueVariant(modelId: string, kind: string): VehicleVariant {
+  return CATALOGUE_VARIANTS[modelId] ?? (kind === 'train' ? 'train-coach' : 'truck-flat');
+}
 
 /** Panneau d'un dépôt : modèles achetables et véhicules sur place. */
 export function describeDepotPanel(
@@ -33,8 +67,10 @@ export function describeDepotPanel(
   if (!depot) return null;
   const company = snapshot.companies.find((item) => item.id === companyId) ?? null;
   const money = company?.money ?? 0;
+  // Livrée des vignettes : couleur d'entreprise, ou bleu par défaut.
+  const colour = companyColour(company?.colour ?? 8);
   const kindLabel = depotKindLabel(depot.kind);
-  const models = modelsForDepot(depot.kind).map((model) => ({
+  const models = modelsForDepot(depot.kind, depot.railType).map((model) => ({
     id: model.id,
     name: model.name,
     cargo: cargoLabel(model.cargo),
@@ -44,6 +80,8 @@ export function describeDepotPanel(
     maintenance: model.maintenance,
     description: model.description,
     affordable: money >= model.cost,
+    variant: catalogueVariant(model.id, model.kind),
+    colour,
   }));
   const centreX = depot.x + depot.width / 2;
   const centreY = depot.y + depot.height / 2;
@@ -67,6 +105,8 @@ export function describeDepotPanel(
         detail: `${vehicleStatusLabel(vehicle.status)} · ${cargo}`,
         canStart: vehicle.orderTargets.length > 0,
         canStop: false,
+        variant: vehicleVariantFor(modelKindFor(vehicle), vehicle.id),
+        colour,
       };
     });
   return {
@@ -75,7 +115,7 @@ export function describeDepotPanel(
     y: depot.y,
     kindLabel,
     title: `${kindLabel} (${depot.x}, ${depot.y})`,
-    detail: `${models.length} modèle(s) · ${vehicles.length} véhicule(s) sur place`,
+    detail: `${depot.railType ? `${RAIL_TYPE_LABELS[depot.railType]} · ` : ''}${models.length} modèle(s) · ${vehicles.length} véhicule(s) sur place`,
     money: company ? formatMoney(company.money) : '—',
     models,
     vehicles,
@@ -83,6 +123,41 @@ export function describeDepotPanel(
       vehicles.length > 0
         ? 'Sélectionnez un véhicule pour éditer sa tournée, ou achetez-en un autre.'
         : 'Achetez un véhicule, ajoutez une gare à sa tournée puis démarrez-le.',
+  };
+}
+
+/** Résumé d'horaire d'un ordre (#162). */
+function timetableLabel(options: OrderOptions): string | null {
+  const timetable = options.timetable;
+  if (!timetable) return null;
+  const parts: string[] = [];
+  if (timetable.waitTicks !== undefined) parts.push(`attente ${formatInt(timetable.waitTicks)} t`);
+  if (timetable.travelTicks !== undefined) {
+    parts.push(`trajet ${formatInt(timetable.travelTicks)} t`);
+  }
+  if (timetable.autostart) parts.push('départ auto');
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+function describeOrder(
+  order: ReturnType<typeof ordersFromSnapshot>[number],
+  index: number,
+  currentOrder: number | null,
+  snapshot: WorldSnapshot | null,
+): VehicleOrderView {
+  const options = order.options ?? {};
+  const action = options.action ?? 'normal';
+  return {
+    index,
+    label: orderTargetLabel(order, snapshot),
+    kind: order.kind,
+    action,
+    actionLabel: ORDER_ACTION_LABELS[action],
+    conditionLabel: orderConditionLabel(options.condition, cargoLabel),
+    jumpLabel: options.jump !== undefined ? `saut vers l’ordre ${options.jump + 1}` : null,
+    timetableLabel: timetableLabel(options),
+    current: currentOrder === index,
+    options: cloneOrderOptions(options),
   };
 }
 
@@ -98,25 +173,114 @@ export function describeVehiclePanel(
   if (!vehicle) return null;
   const summary = describeSelection(snapshot, { kind: 'vehicle', id: vehicleId }, null, map);
   if (!summary) return null;
-  const orders = ordersFromSnapshot(vehicle, snapshot).map((order, index) => ({
-    index,
-    label: orderTargetLabel(order, snapshot),
-    kind: order.kind,
-  }));
+  const orders = ordersFromSnapshot(vehicle, snapshot);
+  const currentOrder =
+    vehicle.currentOrder !== undefined && vehicle.currentOrder >= 0 ? vehicle.currentOrder : null;
+  const orderViews = orders.map((order, index) =>
+    describeOrder(order, index, currentOrder, snapshot),
+  );
+  const model =
+    vehicleModel(vehicle.model) ?? inferVehicleModel(vehicle.kind, vehicle.cargo?.type ?? null);
+  const company = snapshot.companies.find((item) => item.id === vehicle.company) ?? null;
+  const money = company?.money ?? 0;
+  const inDepot = vehicle.status === 3;
+  const cargoAmount = vehicle.cargo?.amount ?? 0;
+  const cargoCapacity = vehicle.cargo?.capacity ?? 0;
+  const cargoType = vehicle.cargo?.type ?? '';
+  const refits = model
+    ? refitOptions(model).map((option) => {
+        const cost = refitCost(model);
+        let reason: string | null = null;
+        if (!inDepot) reason = 'Le véhicule doit être dans un dépôt.';
+        else if (option.cargo === cargoType) reason = 'Cargaison déjà configurée.';
+        else if (money < cost) reason = 'Trésorerie insuffisante.';
+        return {
+          cargo: option.cargo,
+          label: cargoLabel(option.cargo),
+          capacity: option.capacity,
+          cost,
+          available: reason === null,
+          reason,
+        };
+      })
+    : [];
   const status = vehicleStatusLabel(vehicle.status);
+  const reliability = vehicle.reliability
+    ? (() => {
+        const cost = serviceCost(
+          vehicle.reliability.maintenancePerYear,
+          vehicle.reliability.daysSinceService,
+          vehicle.reliability.serviceIntervalDays,
+        );
+        const breakdownLabel =
+          vehicle.reliability.breakdown === 'slowing'
+            ? t('vehicle.reliability.breakdown.slowing')
+            : vehicle.reliability.breakdown === 'stopped'
+              ? t('vehicle.reliability.breakdown.stopped')
+              : null;
+        return {
+          wear: vehicle.reliability.wear,
+          reliability: vehicle.reliability.reliability,
+          wearLabel: t('vehicle.reliability.wearValue', {
+            value: formatInt(vehicle.reliability.wear),
+          }),
+          reliabilityLabel: t('vehicle.reliability.reliabilityValue', {
+            value: formatInt(vehicle.reliability.reliability),
+          }),
+          breakdown: vehicle.reliability.breakdown,
+          breakdownLabel,
+          serviceIntervalLabel: t('selection.unit.days', {
+            value: formatInt(vehicle.reliability.serviceIntervalDays),
+          }),
+          daysSinceService: vehicle.reliability.daysSinceService,
+          maintenanceLabel: t('vehicle.reliability.maintenanceValue', {
+            value: formatInt(vehicle.reliability.maintenancePerYear),
+          }),
+          serviceCost: cost,
+          serviceCostLabel: formatMoney(cost),
+          canService: true,
+          reason: null,
+        };
+      })()
+    : null;
+  const companyGroupsList = companyGroups(snapshot, vehicle.company);
   return {
     ...summary,
     status,
-    orders,
-    canStart: orders.length > 0 && vehicle.status !== 1 && vehicle.status !== 2,
+    modelName: model?.name ?? null,
+    cargo: {
+      label: cargoLabel(cargoType || 'goods'),
+      amount: cargoAmount,
+      capacity: cargoCapacity,
+      percent:
+        cargoCapacity > 0 ? Math.min(100, Math.round((cargoAmount / cargoCapacity) * 100)) : 0,
+    },
+    orders: orderViews,
+    currentOrder,
+    refits,
+    inDepot,
+    cargoAtRisk: cargoAmount,
+    shareCandidates: snapshot.vehicles
+      .filter((item) => item.id !== vehicleId && item.company === vehicle.company)
+      .map((item) => ({ id: item.id, label: `${vehicleLabel(item.kind)} #${item.id}` })),
+    canStart:
+      orders.some((order) => order.kind !== 'conditional') &&
+      vehicle.status !== 1 &&
+      vehicle.status !== 2,
     canStop: vehicle.status === 1 || vehicle.status === 2,
     canSell: true,
     orderPicking,
+    reliability,
+    groupLabel: vehicleGroupLabel(vehicle, snapshot),
+    groupOptions: companyGroupsList.map((group) => ({ id: group.id, label: group.name })),
+    canSendToDepot: !inDepot,
     hint:
       orders.length === 0
         ? 'Aucun ordre : cliquez sur « Ajouter une gare », puis sur une gare ou un dépôt de la carte.'
         : orderPicking
           ? 'Cliquez sur une gare ou un dépôt de la carte pour l’ajouter à la tournée.'
-          : 'Démarrez le véhicule pour qu’il parcoure sa tournée et génère du revenu.',
+          : inDepot
+            ? 'Reconfigurez la cargaison, entretenez le véhicule ou démarrez-le.'
+            : 'Modifiez les options d’un ordre avec ✎, puis démarrez ou arrêtez le véhicule.',
   };
 }

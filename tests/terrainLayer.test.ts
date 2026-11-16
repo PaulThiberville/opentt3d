@@ -13,7 +13,9 @@ import {
 } from '../src/render/terrainSurface';
 import {
   SHORE_MAX_DISTANCE,
+  WATER_BED_DROP,
   WATER_WAVE_AMPLITUDE,
+  waterBedHeight,
   waterSurfaceHeight,
 } from '../src/render/waterSurface';
 
@@ -343,34 +345,145 @@ describe('TerrainLayer', () => {
     layer.dispose();
   });
 
-  it('tient l’eau au-dessus du lit et hors de tout z-fighting', () => {
+  it('tient l’eau sous le terrain sec et hors de tout z-fighting', () => {
     const map = makeMap(64, 64, true);
     const layer = new TerrainLayer();
     layer.setMap(map);
-    const bed = sampleHeightWorld(map, 8.5, 8.5);
-    expect(bed).toBe(0);
     const surface = waterSurfaceHeight(0);
-    expect(surface - bed).toBeGreaterThan(0.4);
+    // Régression #176 : la surface ne doit jamais atteindre le dessus d'une
+    // tuile (route, pont, quai) ni le niveau de la berge voisine.
+    expect(surface).toBeLessThan(0);
+    expect(surface + WATER_WAVE_AMPLITUDE).toBeLessThan(0);
 
     const ground = chunkMesh(layer, 'terrain-0-0');
+    const positions = ground.geometry.getAttribute('position');
+    let deepBed = Infinity;
+    for (let index = 0; index < positions.count; index += 1) {
+      const x = positions.getX(index);
+      const z = positions.getZ(index);
+      if (x < 6 || x > 10 || z < 6 || z > 10) continue;
+      deepBed = Math.min(deepBed, positions.getY(index));
+    }
+    // Le lit rendu laisse une vraie profondeur : aucun z-fighting possible.
+    expect(Number.isFinite(deepBed)).toBe(true);
+    expect(surface - deepBed).toBeGreaterThan(WATER_BED_DROP * 0.7);
+
     for (const water of waterMeshes(layer)) {
-      const positions = water.geometry.getAttribute('position');
-      for (let index = 0; index < positions.count; index += 1) {
-        const y = positions.getY(index);
+      const waterPositions = water.geometry.getAttribute('position');
+      for (let index = 0; index < waterPositions.count; index += 1) {
+        const y = waterPositions.getY(index);
         expect(y).toBeCloseTo(surface, 6);
-        expect(y - bed).toBeGreaterThan(0.4);
+        expect(y + WATER_WAVE_AMPLITUDE).toBeLessThan(0);
       }
       const material = water.material as THREE.MeshPhongMaterial;
       expect(material.transparent).toBe(true);
       expect(material.depthWrite).toBe(false);
+      // Biais neutre ou repoussé : jamais vers la caméra.
       expect(material.polygonOffset).toBe(true);
+      expect(material.polygonOffsetFactor ?? 0).toBeGreaterThanOrEqual(0);
+      expect(material.polygonOffsetUnits ?? 0).toBeGreaterThanOrEqual(0);
       expect(water.renderOrder).toBeGreaterThan(ground.renderOrder);
     }
 
     const ocean = layer.group.children.find((child) => child.name === 'ocean-backdrop') as
       THREE.Mesh | undefined;
     expect(ocean).toBeDefined();
-    expect(ocean?.position.y ?? 0).toBeLessThan(surface - 0.1);
+    // Le fond opaque reste sous le lit, sinon il masquerait la bathymétrie.
+    expect(ocean?.position.y ?? 0).toBeLessThan(waterBedHeight(0));
+    layer.dispose();
+  });
+
+  it('n’étend la teinte sous-marine que sous la surface', () => {
+    const map = makeMap(64, 64, true);
+    // Quai et route côtière secs, à côté de l'eau.
+    map.kind[4 * 64 + 3] = TILE_KIND_INDEX.dock;
+    map.heightMap[4 * 64 + 3] = 2;
+    map.kind[10 * 64 + 3] = TILE_KIND_INDEX.road;
+    map.heightMap[10 * 64 + 3] = 2;
+    const layer = new TerrainLayer();
+    layer.setMap(map);
+    const surface = waterSurfaceHeight(0);
+    const geometry = chunkMesh(layer, 'terrain-0-0').geometry;
+    const positions = geometry.getAttribute('position');
+    const depths = geometry.getAttribute('aDepth');
+    let wet = 0;
+    for (let index = 0; index < positions.count; index += 1) {
+      const y = positions.getY(index);
+      const depth = depths.getX(index);
+      expect(depth).toBeGreaterThanOrEqual(0);
+      expect(depth).toBeLessThanOrEqual(1);
+      if (y > surface + 0.02) {
+        // Tout sommet au-dessus de la surface est sec : aucune teinte de lit.
+        expect(depth).toBe(0);
+      }
+      if (depth > 0.25) wet += 1;
+    }
+    expect(wet).toBeGreaterThan(0);
+    layer.dispose();
+  });
+
+  it('recalcule lit et surface quand type ou hauteur d’eau change', () => {
+    const layer = new TerrainLayer();
+    const base = makeMap(64, 64);
+    layer.setMap(base);
+
+    // La tuile (0,0) est au niveau 2 : elle devient de l'eau sans changer de
+    // hauteur. Le lit doit être creusé malgré l'absence de variation de hauteur.
+    const flooded = makeMap(64, 64);
+    flooded.kind[0] = TILE_KIND_INDEX.water;
+    layer.applyDelta(flooded);
+    let water = waterMeshes(layer).find((mesh) => mesh.name === 'water-0-0');
+    expect(water).toBeDefined();
+    let surfaceY = water?.geometry.getAttribute('position').getY(0);
+    expect(surfaceY).toBeCloseTo(waterSurfaceHeight(2), 6);
+    const groundPositions = chunkMesh(layer, 'terrain-0-0').geometry.getAttribute('position');
+    let bedY = Infinity;
+    for (let index = 0; index < groundPositions.count; index += 1) {
+      if (groundPositions.getX(index) === 0 && groundPositions.getZ(index) === 0) {
+        bedY = groundPositions.getY(index);
+      }
+    }
+    expect(bedY).toBeLessThan((surfaceY ?? 0) - 0.4);
+
+    // Une écluse relève la tuile : la surface doit suivre exactement.
+    const raised = makeMap(64, 64);
+    raised.kind[0] = TILE_KIND_INDEX.water;
+    raised.heightMap[0] = 5;
+    layer.applyDelta(raised);
+    water = waterMeshes(layer).find((mesh) => mesh.name === 'water-0-0');
+    surfaceY = water?.geometry.getAttribute('position').getY(0);
+    expect(surfaceY).toBeCloseTo(waterSurfaceHeight(5), 6);
+    layer.dispose();
+  });
+
+  it('ne couvre que les tuiles d’eau avec le maillage d’eau', () => {
+    const map = makeMap(64, 64, true);
+    const layer = new TerrainLayer();
+    layer.setMap(map);
+    let waterTiles = 0;
+    for (let y = 0; y < map.height; y += 1) {
+      for (let x = 0; x < map.width; x += 1) {
+        if (map.kind[y * map.width + x] === TILE_KIND_INDEX.water) waterTiles += 1;
+      }
+    }
+    let waterTriangles = 0;
+    for (const water of waterMeshes(layer)) {
+      const positions = water.geometry.getAttribute('position');
+      waterTriangles += positions.count / 3;
+      for (let index = 0; index < positions.count; index += 3) {
+        // Centroïde du triangle : doit rester dans une tuile d'eau.
+        let cx = 0;
+        let cz = 0;
+        for (let corner = 0; corner < 3; corner += 1) {
+          cx += positions.getX(index + corner) / 3;
+          cz += positions.getZ(index + corner) / 3;
+        }
+        const tileX = Math.min(map.width - 1, Math.floor(cx));
+        const tileY = Math.min(map.height - 1, Math.floor(cz));
+        expect(map.kind[tileY * map.width + tileX]).toBe(TILE_KIND_INDEX.water);
+      }
+    }
+    expect(waterTriangles).toBe(waterTiles * 2);
     layer.dispose();
   });
 

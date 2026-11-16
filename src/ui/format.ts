@@ -189,10 +189,11 @@ export function formatVehicleSpeed(value: number, language: Language = getLangua
   return t('format.tilesPerDay', { value: formatInt(value, language) });
 }
 
-/** Note de ville 0..100. */
+/** Note de ville normalisée 0..100 (le pont expose parfois 0..1000). */
 export function formatRating(value: number): string {
   if (!isFiniteNumber(value)) return '—';
-  return `${formatInt(value)} / 100`;
+  const normalized = value > 100 ? value / 10 : value;
+  return `${formatInt(Math.max(0, Math.min(100, normalized)))} / 100`;
 }
 
 export function formatPercent(

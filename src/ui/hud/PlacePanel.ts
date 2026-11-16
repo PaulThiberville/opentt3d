@@ -9,12 +9,15 @@
 
 import { button, el } from '../dom';
 import { t } from '../i18n';
+import type { TownActionKind } from '../../engine/protocol';
 import type { PlacePanelAction, PlacePanelItem, PlacePanelView, PlaceTarget } from '../types';
 
 export interface PlacePanelOptions {
   onClose: () => void;
   onFocus: (x: number, y: number) => void;
   onSelect: (target: PlaceTarget) => void;
+  /** Action municipale payante (#166). */
+  onTownAction?: (townId: number, action: TownActionKind) => void;
 }
 
 const PLACE_LABEL_KEYS = {
@@ -194,17 +197,27 @@ export class PlacePanel {
   }
 
   private renderAction(view: PlacePanelView, action: PlacePanelAction): HTMLButtonElement {
-    const supported = action.supported && action.kind === 'focus';
+    const supported =
+      action.supported &&
+      (action.kind === 'focus' || (action.kind === 'town' && action.townAction !== undefined));
     const attrs: Record<string, string> = {
       type: 'button',
       title: action.reason ?? action.label,
     };
     if (!supported) attrs['aria-describedby'] = this.noteId(view, action);
     return button(action.label, {
-      className: 'hud-place-action',
+      className: `hud-place-action${action.kind === 'town' ? ' hud-place-action-town' : ''}`,
       disabled: !supported,
       attrs,
-      onClick: supported ? () => this.options.onFocus(view.x, view.y) : undefined,
+      onClick: supported
+        ? () => {
+            if (action.kind === 'town' && action.townAction) {
+              this.options.onTownAction?.(view.id, action.townAction);
+              return;
+            }
+            this.options.onFocus(view.x, view.y);
+          }
+        : undefined,
     });
   }
 

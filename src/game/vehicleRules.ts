@@ -18,9 +18,16 @@ import {
   type DepotKind,
   type DepotSnapshot,
   type EngineCommand,
+  type OrderAction,
+  type OrderComparator,
+  type OrderCondition,
+  type OrderConditionType,
+  type OrderOptions,
   type OrderTargetKind,
+  type RailType,
   type StationSnapshot,
   type VehicleKind,
+  type VehicleOrderSnapshot,
   type WorldSnapshot,
 } from '../engine/protocol';
 
@@ -31,6 +38,16 @@ export type VehicleOrderKind = OrderTargetKind;
 export interface VehicleOrder {
   target: number;
   kind: VehicleOrderKind;
+  /** Comportement, condition et horaire (#161/#162). */
+  options?: OrderOptions;
+}
+
+/** Cargaison disponible pour un modèle après refit (#160). */
+export interface VehicleRefitOption {
+  /** Slug stable du protocole (`passengers`, `coal`…). */
+  cargo: string;
+  /** Capacité du véhicule une fois reconfiguré pour cette cargaison. */
+  capacity: number;
 }
 
 export interface VehicleModel {
@@ -51,6 +68,16 @@ export interface VehicleModel {
   /** Entretien indicatif en livres par an. */
   maintenance: number;
   description: string;
+  /**
+   * Types de rail compatibles (#157). Absent = tous les types du dépôt.
+   * Une locomotive électrique ne peut pas rouler sur un rail non électrifié.
+   */
+  railTypes?: RailType[];
+  /**
+   * Cargaisons acceptées au refit (#160), capacité comprise. La première
+   * entrée est la cargaison d'achat par défaut.
+   */
+  refits: readonly VehicleRefitOption[];
 }
 
 /** Nombre maximal d'ordres dans une tournée (protège l'UI et le moteur). */
@@ -68,6 +95,7 @@ export const VEHICLE_MODELS: readonly VehicleModel[] = [
     cost: 24_000,
     maintenance: 480,
     description: 'Omnibus compact, idéal pour les centre-villes.',
+    refits: [{ cargo: 'passengers', capacity: 42 }],
   },
   {
     id: 'bus_intercity',
@@ -80,6 +108,7 @@ export const VEHICLE_MODELS: readonly VehicleModel[] = [
     cost: 38_000,
     maintenance: 720,
     description: 'Plus rapide, pour relier deux quartiers éloignés.',
+    refits: [{ cargo: 'passengers', capacity: 58 }],
   },
   {
     id: 'truck_flatbed',
@@ -92,6 +121,13 @@ export const VEHICLE_MODELS: readonly VehicleModel[] = [
     cost: 28_000,
     maintenance: 560,
     description: 'Polyvalent : marchandises, charbon ou céréales.',
+    refits: [
+      { cargo: 'goods', capacity: 30 },
+      { cargo: 'coal', capacity: 34 },
+      { cargo: 'grain', capacity: 32 },
+      { cargo: 'wood', capacity: 28 },
+      { cargo: 'steel', capacity: 24 },
+    ],
   },
   {
     id: 'truck_tanker',
@@ -104,6 +140,10 @@ export const VEHICLE_MODELS: readonly VehicleModel[] = [
     cost: 32_000,
     maintenance: 640,
     description: 'Citerne lourde pour les liquides et le pétrole.',
+    refits: [
+      { cargo: 'oil', capacity: 26 },
+      { cargo: 'water', capacity: 30 },
+    ],
   },
   {
     id: 'rail_autorail',
@@ -116,6 +156,11 @@ export const VEHICLE_MODELS: readonly VehicleModel[] = [
     cost: 160_000,
     maintenance: 2_400,
     description: 'Rame légère pour les lignes voyageurs régulières.',
+    railTypes: ['rail', 'electrified'],
+    refits: [
+      { cargo: 'passengers', capacity: 180 },
+      { cargo: 'mail', capacity: 120 },
+    ],
   },
   {
     id: 'rail_freight',
@@ -128,6 +173,67 @@ export const VEHICLE_MODELS: readonly VehicleModel[] = [
     cost: 145_000,
     maintenance: 2_200,
     description: 'Traction lourde pour le charbon et les marchandises.',
+    railTypes: ['rail', 'electrified'],
+    refits: [
+      { cargo: 'goods', capacity: 140 },
+      { cargo: 'coal', capacity: 150 },
+      { cargo: 'grain', capacity: 145 },
+      { cargo: 'wood', capacity: 130 },
+      { cargo: 'steel', capacity: 120 },
+    ],
+  },
+  {
+    id: 'rail_electric',
+    name: 'Locomotive électrique',
+    depot: 'rail',
+    kind: 'train',
+    cargo: 'passengers',
+    capacity: 220,
+    speed: 44,
+    cost: 210_000,
+    maintenance: 2_900,
+    description: 'Rapide et puissante, exige une voie électrifiée.',
+    railTypes: ['electrified'],
+    refits: [
+      { cargo: 'passengers', capacity: 220 },
+      { cargo: 'mail', capacity: 150 },
+    ],
+  },
+  {
+    id: 'rail_monorail',
+    name: 'Rame monorail',
+    depot: 'rail',
+    kind: 'train',
+    cargo: 'passengers',
+    capacity: 190,
+    speed: 52,
+    cost: 245_000,
+    maintenance: 3_200,
+    description: 'Suspendue à une poutre unique, réservée au monorail.',
+    railTypes: ['monorail'],
+    refits: [
+      { cargo: 'passengers', capacity: 190 },
+      { cargo: 'mail', capacity: 130 },
+    ],
+  },
+  {
+    id: 'rail_maglev',
+    name: 'Rame maglev',
+    depot: 'rail',
+    kind: 'train',
+    cargo: 'goods',
+    capacity: 160,
+    speed: 64,
+    cost: 320_000,
+    maintenance: 4_100,
+    description: 'Sustentation magnétique, la plus rapide du catalogue.',
+    railTypes: ['maglev'],
+    refits: [
+      { cargo: 'goods', capacity: 160 },
+      { cargo: 'coal', capacity: 170 },
+      { cargo: 'grain', capacity: 165 },
+      { cargo: 'steel', capacity: 150 },
+    ],
   },
 ];
 
@@ -146,9 +252,114 @@ export function vehicleModel(id: string | null | undefined): VehicleModel | null
   return VEHICLE_MODELS.find((model) => model.id === id) ?? null;
 }
 
-/** Modèles achetables dans un dépôt route ou rail. */
-export function modelsForDepot(kind: DepotKind): VehicleModel[] {
-  return VEHICLE_MODELS.filter((model) => model.depot === kind);
+/** `true` si le modèle peut circuler sur le type de rail donné (#157). */
+export function modelCompatibleWithRail(
+  model: VehicleModel,
+  railType: RailType | null | undefined,
+): boolean {
+  if (model.depot !== 'rail' || !railType) return true;
+  return model.railTypes === undefined || model.railTypes.includes(railType);
+}
+
+/**
+ * Infère un modèle catalogue quand le snapshot ne fournit pas `model` (pont
+ * antérieur à #160) : premier modèle du même type et de la même cargaison.
+ */
+export function inferVehicleModel(
+  kind: VehicleKind,
+  cargo: string | null | undefined,
+): VehicleModel | null {
+  if (cargo) {
+    return (
+      VEHICLE_MODELS.find(
+        (model) =>
+          model.kind === kind && refitOptions(model).some((option) => option.cargo === cargo),
+      ) ?? null
+    );
+  }
+  return VEHICLE_MODELS.find((model) => model.kind === kind) ?? null;
+}
+
+/**
+ * Modèles achetables dans un dépôt route ou rail. Pour un dépôt ferroviaire
+ * dont le type est connu, seuls les matériels compatibles sont proposés.
+ */
+export function modelsForDepot(kind: DepotKind, railType?: RailType | null): VehicleModel[] {
+  return VEHICLE_MODELS.filter(
+    (model) => model.depot === kind && modelCompatibleWithRail(model, railType),
+  );
+}
+
+/** Cargaisons proposées au refit pour un modèle (#160). */
+export function refitOptions(model: VehicleModel): readonly VehicleRefitOption[] {
+  if (model.refits.length > 0) return model.refits;
+  return [{ cargo: model.cargo, capacity: model.capacity }];
+}
+
+/** Option de refit d'un modèle pour une cargaison, ou `null`. */
+export function refitOption(
+  model: VehicleModel | null,
+  cargo: string | null | undefined,
+): VehicleRefitOption | null {
+  if (!model || !cargo) return null;
+  return refitOptions(model).find((option) => option.cargo === cargo) ?? null;
+}
+
+/**
+ * Coût indicatif d'un refit (#160) : 2 % du prix catalogue, avec un plancher
+ * de 500 £. Le moteur reste seul juge du coût réel ; l'UI affiche cette
+ * estimation avant émission.
+ */
+export function refitCost(model: VehicleModel | null): number {
+  if (!model) return 0;
+  return Math.max(500, Math.round(model.cost * 0.02));
+}
+
+/** Coût indicatif d'un clone (#161) : prix catalogue du modèle. */
+export function cloneCost(model: VehicleModel | null): number {
+  return model ? model.cost : 0;
+}
+
+/** Copie profonde d'un ordre (les options sont des objets imbriqués). */
+export function cloneOrder(order: VehicleOrder): VehicleOrder {
+  return {
+    target: order.target,
+    kind: order.kind,
+    ...(order.options ? { options: cloneOrderOptions(order.options) } : {}),
+  };
+}
+
+export function cloneOrderOptions(options: OrderOptions): OrderOptions {
+  return {
+    ...(options.action ? { action: options.action } : {}),
+    ...(options.condition
+      ? {
+          condition: {
+            type: options.condition.type,
+            comparator: options.condition.comparator,
+            value: options.condition.value,
+            ...(options.condition.cargo !== undefined ? { cargo: options.condition.cargo } : {}),
+            ...(options.condition.month !== undefined ? { month: options.condition.month } : {}),
+          },
+        }
+      : {}),
+    ...(options.jump !== undefined ? { jump: options.jump } : {}),
+    ...(options.timetable
+      ? {
+          timetable: {
+            ...(options.timetable.waitTicks !== undefined
+              ? { waitTicks: options.timetable.waitTicks }
+              : {}),
+            ...(options.timetable.travelTicks !== undefined
+              ? { travelTicks: options.timetable.travelTicks }
+              : {}),
+            ...(options.timetable.autostart !== undefined
+              ? { autostart: options.timetable.autostart }
+              : {}),
+          },
+        }
+      : {}),
+  };
 }
 
 /** Dépôt du snapshot par identifiant stable, ou `null`. */
@@ -201,6 +412,9 @@ export function stationAtTile(
 
 /** Libellé d'une cible d'ordre pour l'éditeur de tournée. */
 export function orderTargetLabel(order: VehicleOrder, snapshot: WorldSnapshot | null): string {
+  if (order.kind === 'conditional') {
+    return 'Ordre conditionnel';
+  }
   if (order.kind === 'station') {
     const station = snapshot?.stations.find((item) => item.id === order.target);
     return station?.name ?? `Gare #${order.target}`;
@@ -213,18 +427,34 @@ export function orderTargetLabel(order: VehicleOrder, snapshot: WorldSnapshot | 
   return depot ? `Dépôt (${depot.x}, ${depot.y})` : `Dépôt #${order.target}`;
 }
 
+function orderFromSpec(order: VehicleOrderSnapshot): VehicleOrder {
+  return {
+    target: order.target,
+    kind: order.kind,
+    ...(order.options ? { options: cloneOrderOptions(order.options) } : {}),
+  };
+}
+
 /**
  * Tournée typée à partir du snapshot.
  *
- * `orderKinds` (fourni par le mock) lève l'ambiguïté entre les pools
- * d'identifiants gares/industries/dépôts. À défaut, on retombe sur l'ordre de
+ * Depuis #161, `orderDetails` porte la tournée complète (conditionnels et
+ * options). À défaut, `orderKinds` (fourni par le mock) lève l'ambiguïté entre
+ * les pools d'identifiants ; en dernier recours on retombe sur l'ordre de
  * résolution historique — gare, industrie, dépôt — car le pont v1 n'expose que
  * des arrêts de gare dans `orderTargets`.
  */
 export function ordersFromSnapshot(
-  vehicle: { orderTargets: readonly number[]; orderKinds?: readonly OrderTargetKind[] },
+  vehicle: {
+    orderTargets: readonly number[];
+    orderKinds?: readonly OrderTargetKind[];
+    orderDetails?: readonly VehicleOrderSnapshot[];
+  },
   snapshot: WorldSnapshot | null,
 ): VehicleOrder[] {
+  if (vehicle.orderDetails && vehicle.orderDetails.length > 0) {
+    return vehicle.orderDetails.map(orderFromSpec);
+  }
   const kinds = vehicle.orderKinds;
   return vehicle.orderTargets.map((target, index) => {
     const declared = kinds?.[index];
@@ -258,7 +488,22 @@ export function validateVehicleOrders(
   if (orders.length > MAX_VEHICLE_ORDERS) {
     return { ok: false, reason: `Tournée trop longue : ${MAX_VEHICLE_ORDERS} ordres maximum.` };
   }
+  let destinations = 0;
   for (const order of orders) {
+    if (order.kind === 'conditional') {
+      if (!order.options?.condition) {
+        return { ok: false, reason: 'Un ordre conditionnel exige une condition.' };
+      }
+      const jump = order.options.jump;
+      if (jump === undefined || !Number.isInteger(jump) || jump < 0 || jump >= orders.length) {
+        return {
+          ok: false,
+          reason: `Conditionnel : la cible du saut doit être un ordre entre 1 et ${orders.length}.`,
+        };
+      }
+      continue;
+    }
+    destinations += 1;
     if (order.kind === 'station') {
       if (!snapshot?.stations.some((station) => station.id === order.target)) {
         return { ok: false, reason: `Gare #${order.target} inconnue.` };
@@ -275,8 +520,67 @@ export function validateVehicleOrders(
       return { ok: false, reason: 'Dépôt cible inconnu : ajoutez-le depuis la carte.' };
     }
   }
+  if (destinations === 0) {
+    return {
+      ok: false,
+      reason: 'Ajoutez au moins un arrêt : les conditions seules ne suffisent pas.',
+    };
+  }
   return { ok: true, reason: null };
 }
+
+/** Libellé français d'un mode d'arrêt (#161), pour les vues et les tests. */
+export const ORDER_ACTION_LABELS: Record<OrderAction, string> = {
+  normal: 'Chargement normal',
+  full_load: 'Plein chargement',
+  no_load: 'Sans chargement',
+  unload: 'Déchargement',
+  transfer: 'Transfert',
+};
+
+/** Libellé court d'une condition (#161). */
+export function orderConditionLabel(
+  condition: OrderCondition | undefined,
+  labelCargo: (cargo: string) => string = (cargo) => cargo,
+): string | null {
+  if (!condition) return null;
+  const symbols: Record<OrderComparator, string> = {
+    equal: '=',
+    not_equal: '≠',
+    less: '<',
+    less_or_equal: '≤',
+    more: '>',
+    more_or_equal: '≥',
+  };
+  const operator = symbols[condition.comparator];
+  if (condition.type === 'date') {
+    const month = `${(condition.month ?? 0) + 1}`.padStart(2, '0');
+    return `Date ${operator} ${condition.value}-${month}`;
+  }
+  if (condition.type === 'cargo') {
+    return `Cargaison ${labelCargo(condition.cargo ?? '?')} ${operator} ${condition.value}`;
+  }
+  if (condition.type === 'money') return `Argent ${operator} ${condition.value} £`;
+  return `Chargement ${operator} ${condition.value} %`;
+}
+
+/** Types de condition proposés par l'éditeur. */
+export const ORDER_CONDITION_TYPES: readonly OrderConditionType[] = [
+  'cargo',
+  'money',
+  'date',
+  'percentage',
+];
+
+/** Comparateurs proposés par l'éditeur. */
+export const ORDER_COMPARATORS: readonly OrderComparator[] = [
+  'equal',
+  'not_equal',
+  'less',
+  'less_or_equal',
+  'more',
+  'more_or_equal',
+];
 
 /** Commande d'achat d'un modèle dans un dépôt identifié par son id stable. */
 export function buyVehicleCommand(
@@ -290,10 +594,47 @@ export function buyVehicleCommand(
 /** Commande de vente, d'arrêt ou de démarrage d'un véhicule existant. */
 export function vehicleActionCommand(
   company: CompanyId,
-  action: 'sell' | 'start' | 'stop',
+  action: 'sell' | 'start' | 'stop' | 'service' | 'send_to_depot',
   vehicle: number,
 ): Extract<EngineCommand, { type: 'vehicle' }> {
   return { type: 'vehicle', action, company, vehicle };
+}
+
+/** Envoie un véhicule au dépôt pour entretien (#163). */
+export function serviceVehicleCommand(
+  company: CompanyId,
+  vehicle: number,
+): Extract<EngineCommand, { type: 'vehicle' }> {
+  return { type: 'vehicle', action: 'service', company, vehicle };
+}
+
+/** Envoie un véhicule au dépôt sans entretien immédiat (#163). */
+export function sendVehicleToDepotCommand(
+  company: CompanyId,
+  vehicle: number,
+): Extract<EngineCommand, { type: 'vehicle' }> {
+  return { type: 'vehicle', action: 'send_to_depot', company, vehicle };
+}
+
+/** Commande de refit vers une cargaison disponible du modèle (#160). */
+export function refitVehicleCommand(
+  company: CompanyId,
+  vehicle: number,
+  cargo: string,
+): Extract<EngineCommand, { type: 'vehicle' }> {
+  return { type: 'vehicle', action: 'refit', company, vehicle, cargo };
+}
+
+/**
+ * Commande de duplication d'un véhicule (#161). Par défaut OpenTTD partage la
+ * tournée (`shareOrders: true`) ; `false` la copie indépendamment.
+ */
+export function cloneVehicleCommand(
+  company: CompanyId,
+  vehicle: number,
+  shareOrders = true,
+): Extract<EngineCommand, { type: 'vehicle' }> {
+  return { type: 'vehicle', action: 'clone', company, vehicle, shareOrders };
 }
 
 /** Commande qui remplace la tournée d'un véhicule. */
@@ -307,6 +648,70 @@ export function orderVehicleCommand(
     action: 'order',
     company,
     vehicle,
-    orders: orders.map((order) => ({ target: order.target, kind: order.kind })),
+    orders: orders.map((order) => ({
+      target: order.target,
+      kind: order.kind,
+      ...(order.options ? { options: cloneOrderOptions(order.options) } : {}),
+    })),
   };
+}
+
+/** Crée un groupe typé (#164). */
+export function createGroupCommand(
+  company: CompanyId,
+  kind: VehicleKind,
+  name: string,
+): Extract<EngineCommand, { type: 'group' }> {
+  return { type: 'group', action: 'create', company, kind, name };
+}
+
+/** Renomme un groupe existant (#164). */
+export function renameGroupCommand(
+  company: CompanyId,
+  group: number,
+  name: string,
+): Extract<EngineCommand, { type: 'group' }> {
+  return { type: 'group', action: 'rename', company, group, name };
+}
+
+/** Supprime un groupe ; ses véhicules redeviennent non groupés (#164). */
+export function deleteGroupCommand(
+  company: CompanyId,
+  group: number,
+): Extract<EngineCommand, { type: 'group' }> {
+  return { type: 'group', action: 'delete', company, group };
+}
+
+/** Affecte des véhicules à un groupe, ou les retire avec `group: null`. */
+export function assignGroupCommand(
+  company: CompanyId,
+  group: number | null,
+  vehicles: readonly number[],
+): Extract<EngineCommand, { type: 'group' }> {
+  return {
+    type: 'group',
+    action: group === null ? 'remove' : 'assign',
+    company,
+    ...(group === null ? {} : { group }),
+    vehicles: [...vehicles],
+  };
+}
+
+/** Action groupée sur tous les véhicules d'un groupe (#164). */
+export function groupActionCommand(
+  company: CompanyId,
+  group: number,
+  action: 'start' | 'stop' | 'send_to_depot' | 'sell',
+): Extract<EngineCommand, { type: 'group' }> {
+  return { type: 'group', action, company, group };
+}
+
+/** Configure ou efface l'autoreplace d'un groupe (#164). */
+export function groupAutoreplaceCommand(
+  company: CompanyId,
+  group: number,
+  model: string | null,
+  whenOld = true,
+): Extract<EngineCommand, { type: 'group' }> {
+  return { type: 'group', action: 'autoreplace', company, group, model, whenOld };
 }

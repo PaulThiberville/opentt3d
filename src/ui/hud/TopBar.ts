@@ -21,6 +21,10 @@ export interface TopBarCallbacks {
   onToggleNews: () => void;
   onToggleHelp: () => void;
   onOpenSettings: () => void;
+  /** Ouvre la modale de rapports sur un onglet donné. */
+  onOpenReports: (tab: 'finance' | 'vehicles' | 'stats') => void;
+  /** Ouvre/ferme le panneau finances détaillé (#165). */
+  onToggleFinances?: () => void;
 }
 
 function localCompany(snapshot: WorldSnapshot | null): CompanySnapshot | null {
@@ -39,6 +43,7 @@ export class TopBar {
   private dateValue: HTMLSpanElement;
   private fpsValue: HTMLSpanElement;
   private qualityButton: HTMLButtonElement;
+  private financeButton: HTMLButtonElement;
   private pauseButton: HTMLButtonElement;
   private newsButton: HTMLButtonElement;
   private newsLabel: HTMLSpanElement;
@@ -46,6 +51,7 @@ export class TopBar {
   private newsLive: HTMLSpanElement;
   private lastUnread = 0;
   private speedButtons: { button: HTMLButtonElement; speed: GameSpeed }[] = [];
+  private reportButtons = new Map<'finance' | 'vehicles' | 'stats', HTMLButtonElement>();
   private cache = new Map<string, string>();
   private lastState: HudState | null = null;
   private stopListening: () => void;
@@ -121,6 +127,20 @@ export class TopBar {
     fpsBlock.append(this.fpsValue);
 
     const tools = el('div', { className: 'hud-tools' });
+    const financeButton = el('button', {
+      className: 'hud-button hud-finance-button',
+      text: '£',
+      attrs: {
+        type: 'button',
+        title: t('finance.open'),
+        'aria-label': t('finance.open'),
+        'aria-expanded': 'false',
+      },
+    });
+    financeButton.addEventListener('click', () => this.callbacks.onToggleFinances?.());
+    this.financeButton = financeButton;
+    bindAttr(financeButton, 'title', 'finance.open');
+    bindAttr(financeButton, 'aria-label', 'finance.open');
     this.qualityButton = el('button', {
       className: 'hud-button hud-quality',
       text: 'Moyenne',
@@ -193,7 +213,47 @@ export class TopBar {
     bindAttr(helpButton, 'title', 'topbar.helpTitle');
     bindAttr(helpButton, 'aria-label', 'topbar.help');
 
-    tools.append(this.qualityButton, this.newsButton, resetButton, settingsButton, helpButton);
+    const reportSpecs = [
+      { tab: 'finance' as const, icon: '£', key: 'reports.tab.finance' as const },
+      { tab: 'vehicles' as const, icon: '▤', key: 'reports.tab.vehicles' as const },
+      { tab: 'stats' as const, icon: '▥', key: 'reports.tab.stats' as const },
+    ];
+    const reportButtons: HTMLButtonElement[] = [];
+    for (const spec of reportSpecs) {
+      const reportButton = el('button', {
+        className: 'hud-button hud-report-button',
+        attrs: {
+          type: 'button',
+          title: t('topbar.reportsTitle'),
+          'aria-label': t(spec.key),
+          'aria-haspopup': 'dialog',
+        },
+        dataset: { reportTab: spec.tab },
+      });
+      reportButton.append(
+        el('span', {
+          className: 'hud-report-icon',
+          text: spec.icon,
+          attrs: { 'aria-hidden': 'true' },
+        }),
+        bindText(el('span', { className: 'hud-report-label' }), spec.key),
+      );
+      bindAttr(reportButton, 'title', 'topbar.reportsTitle');
+      bindAttr(reportButton, 'aria-label', spec.key);
+      reportButton.addEventListener('click', () => this.callbacks.onOpenReports(spec.tab));
+      this.reportButtons.set(spec.tab, reportButton);
+      reportButtons.push(reportButton);
+    }
+
+    tools.append(
+      ...reportButtons,
+      financeButton,
+      this.qualityButton,
+      this.newsButton,
+      resetButton,
+      settingsButton,
+      helpButton,
+    );
 
     this.element.append(
       brand,
@@ -225,9 +285,25 @@ export class TopBar {
     this.newsButton.focus();
   }
 
+  /** Rend le focus au bouton de rapports correspondant. */
+  focusReportButton(tab: 'finance' | 'vehicles' | 'stats'): void {
+    this.reportButtons.get(tab)?.focus();
+  }
+
   /** Reflète l'état ouvert/fermé du panneau d'actualités. */
   setNewsOpen(open: boolean): void {
     this.newsButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  /** Reflète l'état ouvert/fermé du panneau finances (#165). */
+  setFinancesOpen(open: boolean): void {
+    this.financeButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+    this.financeButton.classList.toggle('is-active', open);
+  }
+
+  /** Rend le focus au bouton finances après fermeture. */
+  focusFinancesButton(): void {
+    this.financeButton.focus();
   }
 
   private setText(element: HTMLElement, key: string, value: string): void {

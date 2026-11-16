@@ -6,6 +6,7 @@ import type { RenderVehicle } from '../src/game/vehicleInterpolation';
 import { BuildOverlay } from '../src/render/BuildOverlay';
 import { CityLayer } from '../src/render/CityLayer';
 import { DepotLayer } from '../src/render/DepotLayer';
+import { DisasterLayer } from '../src/render/DisasterLayer';
 import { IndustryLayer } from '../src/render/IndustryLayer';
 import { SignalLayer } from '../src/render/SignalLayer';
 import { VegetationLayer } from '../src/render/VegetationLayer';
@@ -110,6 +111,22 @@ describe('dispose des couches de rendu', () => {
       map,
     );
     const overlay = new BuildOverlay();
+    const disasters = new DisasterLayer();
+    disasters.setDisasters(
+      [
+        {
+          id: 1,
+          kind: 'fire',
+          x: 20.5,
+          y: 20.5,
+          company: 255,
+          severity: 2,
+          startedTick: 10,
+          remainingDays: 3,
+        },
+      ],
+      map,
+    );
 
     const layers = [
       { layer: vegetation, name: 'vegetation' },
@@ -118,6 +135,7 @@ describe('dispose des couches de rendu', () => {
       { layer: vehiclesLayer, name: 'vehicles' },
       { layer: signals, name: 'signals' },
       { layer: depots, name: 'depots' },
+      { layer: disasters, name: 'disasters' },
       { layer: overlay, name: 'overlay' },
     ];
     const meshesBefore: THREE.Object3D[] = [];
