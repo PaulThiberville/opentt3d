@@ -636,6 +636,342 @@ function loopPath(tiles: P2[]): P2[] {
   return forward.concat(backward);
 }
 
+/** Vue minimale du monde nécessaire pour planifier un itinéraire. */
+interface RouteWorld {
+  width: number;
+  height: number;
+  kind: Uint8Array;
+  stations: readonly MockStation[];
+  depots: readonly MockDepot[];
+  structures: readonly MockStructure[];
+}
+
+/**
+ * Coût de traversée d'une tuile pour un type de véhicule.
+ *
+ * L'infrastructure dédiée coûte 1 et une surface incompatible est
+ * infranchissable : un bus ne peut donc jamais traverser une tuile rail, un
+ * train une route, etc. Les terrains neutres sont eux aussi interdits : une
+ * tournée n'est acceptée que si le réseau permet réellement de la parcourir.
+ */
+const SURFACE_ROUTE = 1;
+const SURFACE_GOAL = 0;
+
+const SURFACE_LABELS: Record<VehicleKind, string> = {
+  train: 'ferroviaire',
+  road: 'routier',
+  ship: 'maritime',
+  aircraft: 'aérien',
+};
+
+const VEHICLE_KIND_LABELS: Record<VehicleKind, string> = {
+  train: 'un train',
+  road: 'un véhicule routier',
+  ship: 'un bateau',
+  aircraft: 'un avion',
+};
+
+const STATION_KIND_FOR_VEHICLE: Record<VehicleKind, StationSnapshot['kind']> = {
+  train: 'train',
+  road: 'road',
+  ship: 'ship',
+  aircraft: 'airport',
+};
+
+function stationAtMapTile(world: RouteWorld, x: number, y: number): MockStation | null {
+  for (const station of world.stations) {
+    const left = Math.floor(station.x - station.width / 2);
+    const top = Math.floor(station.y - station.height / 2);
+    if (x >= left && x < left + station.width && y >= top && y < top + station.height) {
+      return station;
+    }
+  }
+  return null;
+}
+
+function structureTransportAt(world: RouteWorld, index: number): BuildTransport | null {
+  for (const structure of world.structures) {
+    if (structure.underlay.some((entry) => entry.index === index)) return structure.transport;
+  }
+  return null;
+}
+
+/**
+ * Coût d'une tuile pour un véhicule. `Infinity` = surface interdite.
+ *
+ * Les ponts et tunnels sans `MockStructure` (routes de démonstration posées
+ * directement sur l'eau) restent franchissables : le mock ne connaît pas leur
+ * réseau, et les interdire casserait les lignes existantes.
+ */
+function surfaceCost(
+  world: RouteWorld,
+  kind: VehicleKind,
+  x: number,
+  y: number,
+  isGoal: boolean,
+): number {
+  if (x < 0 || y < 0 || x >= world.width || y >= world.height) return Infinity;
+  const index = y * world.width + x;
+  const tile = world.kind[index] ?? K.void;
+
+  if (isGoal) {
+    if (tile === K.void) return Infinity;
+    if (kind === 'aircraft') return SURFACE_GOAL;
+    if (tile === K.industry) return SURFACE_GOAL;
+  }
+
+  if (kind === 'aircraft') return SURFACE_GOAL;
+
+  switch (tile) {
+    case K.road:
+      return kind === 'road' ? SURFACE_ROUTE : Infinity;
+    case K.rail:
+      return kind === 'train' ? SURFACE_ROUTE : Infinity;
+    case K.crossing:
+      return kind === 'road' || kind === 'train' ? SURFACE_ROUTE : Infinity;
+    case K.station: {
+      const station = stationAtMapTile(world, x, y);
+      if (!station) return Infinity;
+      const expected = STATION_KIND_FOR_VEHICLE[kind];
+      if (kind === 'ship' && station.kind === 'buoy') return SURFACE_ROUTE;
+      return station.kind === expected ? SURFACE_ROUTE : Infinity;
+    }
+    case K.bridge:
+    case K.tunnel: {
+      const transport = structureTransportAt(world, index);
+      if (transport === null) return kind === 'road' || kind === 'train' ? SURFACE_ROUTE : Infinity;
+      if (kind === 'road') return transport === 'road' ? SURFACE_ROUTE : Infinity;
+      if (kind === 'train') return transport === 'rail' ? SURFACE_ROUTE : Infinity;
+      return Infinity;
+    }
+    case K.water:
+    case K.river:
+    case K.canal:
+    case K.lock:
+    case K.aqueduct:
+      return kind === 'ship' ? SURFACE_ROUTE : Infinity;
+    case K.coast:
+      return kind === 'ship' ? SURFACE_ROUTE : Infinity;
+    case K.dock:
+      return kind === 'ship' ? SURFACE_ROUTE : Infinity;
+    case K.grass:
+    case K.clear:
+    case K.rough:
+    case K.trees:
+      return Infinity;
+    case K.industry:
+      return Infinity;
+    default:
+      return Infinity;
+  }
+}
+
+/** File de priorité binaire minimale, sans allocation par nœud. */
+class MinHeap {
+  private readonly nodes: number[] = [];
+  private readonly priorities: number[] = [];
+
+  get size(): number {
+    return this.nodes.length;
+  }
+
+  push(node: number, priority: number): void {
+    this.nodes.push(node);
+    this.priorities.push(priority);
+    let index = this.nodes.length - 1;
+    while (index > 0) {
+      const parent = (index - 1) >> 1;
+      if ((this.priorities[parent] ?? 0) <= (this.priorities[index] ?? 0)) break;
+      this.swap(parent, index);
+      index = parent;
+    }
+  }
+
+  pop(): number | null {
+    if (this.nodes.length === 0) return null;
+    const first = this.nodes[0] ?? null;
+    const lastNode = this.nodes.pop();
+    const lastPriority = this.priorities.pop();
+    if (this.nodes.length > 0 && lastNode !== undefined && lastPriority !== undefined) {
+      this.nodes[0] = lastNode;
+      this.priorities[0] = lastPriority;
+      let index = 0;
+      for (;;) {
+        const left = index * 2 + 1;
+        const right = left + 1;
+        let best = index;
+        if (
+          left < this.nodes.length &&
+          (this.priorities[left] ?? 0) < (this.priorities[best] ?? 0)
+        ) {
+          best = left;
+        }
+        if (
+          right < this.nodes.length &&
+          (this.priorities[right] ?? 0) < (this.priorities[best] ?? 0)
+        ) {
+          best = right;
+        }
+        if (best === index) break;
+        this.swap(best, index);
+        index = best;
+      }
+    }
+    return first;
+  }
+
+  private swap(a: number, b: number): void {
+    const node = this.nodes[a];
+    const priority = this.priorities[a];
+    this.nodes[a] = this.nodes[b] ?? 0;
+    this.priorities[a] = this.priorities[b] ?? 0;
+    this.nodes[b] = node ?? 0;
+    this.priorities[b] = priority ?? 0;
+  }
+}
+
+/** Itinéraire 4-connexe le moins coûteux respectant les surfaces du véhicule. */
+function findSurfacePath(world: RouteWorld, kind: VehicleKind, start: P2, goal: P2): P2[] | null {
+  const size = world.width * world.height;
+  const startIndex = start.y * world.width + start.x;
+  const goalIndex = goal.y * world.width + goal.x;
+  if (startIndex === goalIndex) return [{ ...start }];
+
+  const costs = new Float64Array(size).fill(Infinity);
+  const cameFrom = new Int32Array(size).fill(-1);
+  const closed = new Uint8Array(size);
+  costs[startIndex] = 0;
+  const heap = new MinHeap();
+  const heuristic = (index: number): number =>
+    Math.abs((index % world.width) - goal.x) + Math.abs(Math.floor(index / world.width) - goal.y);
+  heap.push(startIndex, heuristic(startIndex));
+
+  const neighbours = [-world.width, 1, world.width, -1];
+  let guard = size * 4;
+  while (heap.size > 0 && guard > 0) {
+    guard -= 1;
+    const current = heap.pop();
+    if (current === null) break;
+    if (closed[current]) continue;
+    closed[current] = 1;
+    if (current === goalIndex) break;
+
+    const x = current % world.width;
+    for (let direction = 0; direction < neighbours.length; direction += 1) {
+      const step = neighbours[direction] ?? 0;
+      const next = current + step;
+      if (next < 0 || next >= size) continue;
+      if (direction === 1 && x + 1 >= world.width) continue;
+      if (direction === 3 && x - 1 < 0) continue;
+      if (closed[next]) continue;
+      const nx = next % world.width;
+      const ny = Math.floor(next / world.width);
+      const stepCost = surfaceCost(world, kind, nx, ny, next === goalIndex);
+      if (!Number.isFinite(stepCost)) continue;
+      const tentative = (costs[current] ?? Infinity) + stepCost;
+      if (tentative >= (costs[next] ?? Infinity)) continue;
+      costs[next] = tentative;
+      cameFrom[next] = current;
+      heap.push(next, tentative + heuristic(next));
+    }
+  }
+
+  if (cameFrom[goalIndex] === -1 && startIndex !== goalIndex) return null;
+
+  const tiles: P2[] = [];
+  let cursor = goalIndex;
+  let guardSteps = size;
+  while (cursor !== -1 && cursor !== startIndex && guardSteps > 0) {
+    guardSteps -= 1;
+    tiles.push({ x: cursor % world.width, y: Math.floor(cursor / world.width) });
+    cursor = cameFrom[cursor] ?? -1;
+  }
+  if (cursor !== startIndex) return null;
+  tiles.push({ ...start });
+  tiles.reverse();
+  return tiles;
+}
+
+/**
+ * Tracé d'une tournée respectant l'infrastructure du véhicule.
+ *
+ * Part de la position courante, rejoint chaque cible dans l'ordre puis revient
+ * au départ (boucle aller-retour). Les avions vont en ligne directe ; les
+ * autres types empruntent `findSurfacePath`.
+ */
+function buildRoutePath(
+  world: RouteWorld,
+  start: P2,
+  targets: readonly P2[],
+  kind: VehicleKind,
+): { path: P2[] | null; error: string | null } {
+  const anchor = { x: Math.floor(start.x), y: Math.floor(start.y) };
+  const tiles: P2[] = [anchor];
+  let cursor = anchor;
+  for (const target of targets) {
+    const goal = { x: Math.floor(target.x), y: Math.floor(target.y) };
+    if (goal.x === cursor.x && goal.y === cursor.y) continue;
+    const segment =
+      kind === 'aircraft' ? traceTiles(cursor, goal) : findSurfacePath(world, kind, cursor, goal);
+    if (!segment) {
+      return {
+        path: null,
+        error:
+          `Aucun itinéraire ${SURFACE_LABELS[kind]} compatible entre ` +
+          `(${cursor.x}, ${cursor.y}) et (${goal.x}, ${goal.y}).`,
+      };
+    }
+    for (let index = 1; index < segment.length; index += 1) {
+      const point = segment[index];
+      if (point) tiles.push(point);
+    }
+    cursor = goal;
+  }
+  return { path: loopPath(tiles), error: null };
+}
+
+/** Erreur explicite si un ordre cible une infrastructure incompatible. */
+function orderInfrastructureError(
+  world: RouteWorld,
+  kind: VehicleKind,
+  order: VehicleOrder,
+): string | null {
+  if (order.kind === 'conditional' || order.kind === 'industry') return null;
+
+  if (order.kind === 'station') {
+    const station = world.stations.find((item) => item.id === order.target);
+    if (!station) return `Gare #${order.target} introuvable.`;
+    const expected = STATION_KIND_FOR_VEHICLE[kind];
+    const allowed = station.kind === expected || (kind === 'ship' && station.kind === 'buoy');
+    if (allowed) return null;
+    const expectedLabel =
+      expected === 'airport'
+        ? 'un aéroport'
+        : expected === 'ship'
+          ? 'un port'
+          : `une gare ${expected === 'train' ? 'ferroviaire' : 'routière'}`;
+    return (
+      `Ordre incompatible : ${VEHICLE_KIND_LABELS[kind]} ne peut desservir que ` +
+      `${expectedLabel} (gare #${station.id} de type ${station.kind}).`
+    );
+  }
+
+  const depot = world.depots.find((item) => item.id === order.target);
+  if (!depot) return `Dépôt ${order.target} introuvable ou démoli.`;
+  const expectedDepot: DepotKind | null =
+    kind === 'train' ? 'rail' : kind === 'road' ? 'road' : null;
+  if (expectedDepot === null) {
+    return `Ordre incompatible : ${VEHICLE_KIND_LABELS[kind]} n’utilise pas de dépôt.`;
+  }
+  if (depot.kind !== expectedDepot) {
+    return (
+      `Ordre incompatible : ${VEHICLE_KIND_LABELS[kind]} exige un dépôt ` +
+      `${expectedDepot === 'rail' ? 'ferroviaire' : 'routier'} (dépôt #${depot.id} de type ${depot.kind}).`
+    );
+  }
+  return null;
+}
+
 /** Point d'arrêt résolu sur le tracé d'une tournée. */
 interface StopPoint {
   x: number;
@@ -661,25 +997,6 @@ function segmentsForStopsOnPath(path: P2[], stops: StopPoint[]): (MockStop | nul
     }
   }
   return result;
-}
-
-/**
- * Tracé de tournée : part de la position courante, passe par chaque cible
- * dans l'ordre puis revient au point de départ (boucle aller-retour).
- */
-function buildRoutePath(start: P2, targets: readonly P2[]): P2[] {
-  const anchor = { x: Math.floor(start.x), y: Math.floor(start.y) };
-  const tiles: P2[] = [anchor];
-  let cursor = anchor;
-  for (const target of targets) {
-    const segment = traceTiles(cursor, { x: Math.floor(target.x), y: Math.floor(target.y) });
-    for (let i = 1; i < segment.length; i += 1) {
-      const point = segment[i];
-      if (point) tiles.push(point);
-    }
-    cursor = { x: Math.floor(target.x), y: Math.floor(target.y) };
-  }
-  return loopPath(tiles);
 }
 
 interface ResolvedOrders {
@@ -713,6 +1030,7 @@ function resolveOrderTarget(world: MockWorld, order: VehicleOrder): P2 | null {
 function resolveOrders(
   world: MockWorld,
   orders: readonly VehicleOrder[],
+  kind: VehicleKind,
   startIndex = 0,
 ): ResolvedOrders {
   const targets: P2[] = [];
@@ -724,6 +1042,10 @@ function resolveOrders(
     const index = (start + offset) % orders.length;
     const order = orders[index];
     if (!order || order.kind === 'conditional') continue;
+    const incompatible = orderInfrastructureError(world, kind, order);
+    if (incompatible) {
+      return { targets: [], stops: [], orderIndices: [], error: incompatible };
+    }
     if (order.kind === 'station') {
       const station = world.stations.find((item) => item.id === order.target);
       if (!station) {
@@ -886,7 +1208,7 @@ function rebuildRoute(world: MockWorld, vehicle: MockVehicle): boolean {
     if (vehicle.status !== 3) vehicle.status = 0;
     return false;
   }
-  const resolved = resolveOrders(world, vehicle.orders, vehicle.currentOrder);
+  const resolved = resolveOrders(world, vehicle.orders, vehicle.kind, vehicle.currentOrder);
   if (resolved.error) {
     addNews(world, 'error', `Tournée du véhicule #${vehicle.id} refusée : ${resolved.error}`);
     if (vehicle.status !== 3) vehicle.status = 0;
@@ -901,7 +1223,22 @@ function rebuildRoute(world: MockWorld, vehicle: MockVehicle): boolean {
     if (vehicle.status !== 3) vehicle.status = 0;
     return false;
   }
-  const path = buildRoutePath({ x: vehicle.x, y: vehicle.y }, resolved.targets);
+  const route = buildRoutePath(
+    world,
+    { x: vehicle.x, y: vehicle.y },
+    resolved.targets,
+    vehicle.kind,
+  );
+  if (!route.path) {
+    addNews(
+      world,
+      'error',
+      `Tournée du véhicule #${vehicle.id} refusée : ${route.error ?? 'itinéraire introuvable.'}`,
+    );
+    if (vehicle.status !== 3) vehicle.status = 0;
+    return false;
+  }
+  const path = route.path;
   vehicle.path = path;
   vehicle.pathLengths = computePathLengths(path);
   vehicle.segmentStops = segmentsForStopsOnPath(path, resolved.stops);
@@ -1212,11 +1549,33 @@ class WorldBuilder {
   }
 
   paintRoute(tiles: P2[], kindIndex: number, owner: number): void {
+    const network = kindIndex === K.rail ? 'rail' : 'road';
     for (let i = 0; i < tiles.length; i += 1) {
       const tile = tiles[i];
       if (!tile) continue;
       const index = this.index(tile.x, tile.y);
       const overWater = this.isWater(tile.x, tile.y);
+      const existing = this.kind[index] ?? K.grass;
+      const existingNetwork =
+        existing === K.rail
+          ? 'rail'
+          : existing === K.road
+            ? 'road'
+            : existing === K.crossing
+              ? 'crossing'
+              : null;
+      if (!overWater && existingNetwork !== null && existingNetwork !== network) {
+        // Deux réseaux se croisent : on ne remplace pas la voie existante, on
+        // pose un passage à niveau. Le nibble bas garde l'axe d'origine et le
+        // bit `TRACK_BIT_CROSSING_RAIL` mémorise son réseau (cf. #159).
+        if (existingNetwork !== 'crossing') {
+          const bits = (this.trackBits[index] ?? 0) & 0x0f;
+          this.kind[index] = K.crossing;
+          this.trackBits[index] = bits | (existing === K.rail ? TRACK_BIT_CROSSING_RAIL : 0);
+        }
+        this.owner[index] = owner;
+        continue;
+      }
       this.kind[index] = overWater ? K.bridge : kindIndex;
       if (overWater) this.flags[index] = (this.flags[index] ?? 0) | TILE_FLAG.BRIDGE;
       this.owner[index] = owner;
@@ -1517,6 +1876,40 @@ class WorldBuilder {
     return depot;
   }
 
+  /**
+   * Relie un dépôt de démonstration au réseau de son type le plus proche.
+   *
+   * OpenTTD exige qu'un dépôt soit raccordé pour qu'un véhicule puisse sortir.
+   * Le mock applique désormais la même règle : sans ce raccord, un bus acheté
+   * dans le dépôt de démonstration n'aurait aucun itinéraire routier valide.
+   */
+  private connectDepotToNetwork(depot: MockDepot): void {
+    const network = depot.kind === 'rail' ? K.rail : K.road;
+    let best: P2 | null = null;
+    let bestDistance = Infinity;
+    for (let y = 0; y < this.height; y += 1) {
+      for (let x = 0; x < this.width; x += 1) {
+        if (this.kindAt(x, y) !== network) continue;
+        if (
+          x >= depot.x &&
+          x < depot.x + depot.width &&
+          y >= depot.y &&
+          y < depot.y + depot.height
+        ) {
+          continue;
+        }
+        const distance = Math.abs(x - depot.x) + Math.abs(y - depot.y);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = { x, y };
+        }
+      }
+    }
+    if (!best) return;
+    const path = traceTiles({ x: depot.x, y: depot.y }, best);
+    this.paintRoute(path, network, depot.company);
+  }
+
   private addVehiclesOnLoop(
     path: P2[],
     company: number,
@@ -1676,8 +2069,10 @@ class WorldBuilder {
     // Dépôts de démonstration : un routier près de l'arrêt A, un ferroviaire
     // près de la gare A. Ils rendent l'achat de véhicules immédiatement
     // testable, sans attendre que le joueur en construise un.
-    if (roadA) this.addDepot('road', { x: roadA.x + 4, y: roadA.y + 4 }, 0);
-    if (trainA) this.addDepot('rail', { x: trainA.x + 4, y: trainA.y + 4 }, 0);
+    const roadDepot = roadA ? this.addDepot('road', { x: roadA.x + 4, y: roadA.y + 4 }, 0) : null;
+    const railDepot = trainA
+      ? this.addDepot('rail', { x: trainA.x + 4, y: trainA.y + 4 }, 0)
+      : null;
 
     // Réseau ferroviaire : gare A ↔ gare B.
     if (trainA && trainB) {
@@ -1790,6 +2185,12 @@ class WorldBuilder {
         stops,
       );
     }
+
+    // Les dépôts de démonstration sont raccordés après la pose des réseaux :
+    // un véhicule acheté peut ainsi rejoindre sa tournée sans traverser une
+    // surface incompatible (#203).
+    if (roadDepot) this.connectDepotToNetwork(roadDepot);
+    if (railDepot) this.connectDepotToNetwork(railDepot);
 
     // Bateaux : boucle sur l'eau.
     const shipStops: P2[] = [
@@ -3570,6 +3971,7 @@ function applyGroup(world: MockWorld, command: Extract<EngineCommand, { type: 'g
 /** Valide et normalise une tournée reçue du client (#161). */
 function normalizeOrders(
   world: MockWorld,
+  kind: VehicleKind,
   specs: readonly NonNullable<Extract<EngineCommand, { type: 'vehicle' }>['orders']>[number][],
 ): { orders: VehicleOrder[]; error: string | null } {
   if (specs.length > MAX_VEHICLE_ORDERS) {
@@ -3598,6 +4000,10 @@ function normalizeOrders(
       continue;
     }
     destinations += 1;
+    const incompatible = orderInfrastructureError(world, kind, order);
+    if (incompatible) {
+      return { orders: [], error: `Ordre ${index + 1} : ${incompatible}` };
+    }
     const target = resolveOrderTarget(world, order);
     if (!target) {
       return {
@@ -3780,7 +4186,7 @@ function orderVehicle(
     addNews(world, 'error', 'Tournée refusée : ce véhicule ne vous appartient pas.');
     return;
   }
-  const normalized = normalizeOrders(world, command.orders ?? []);
+  const normalized = normalizeOrders(world, vehicle.kind, command.orders ?? []);
   if (normalized.error) {
     addNews(world, 'error', `Tournée refusée : ${normalized.error}`);
     return;

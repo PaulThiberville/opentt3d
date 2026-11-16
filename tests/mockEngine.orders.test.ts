@@ -214,9 +214,11 @@ describe('MockEngine : ordres avancés (#161)', () => {
       const depot = findDepot(engine);
       const stations = engine.snapshot().stations.filter((item) => item.company === 0);
       if (stations.length < 2) throw new Error('deux gares attendues');
-      const first = stations[0];
-      const second = stations[1];
-      if (!first || !second) throw new Error('deux gares attendues');
+      // Un bus ne peut desservir qu'une gare routière (#203) : le second arrêt
+      // du scénario est une industrie, pas une gare ferroviaire.
+      const first = stations.find((item) => item.kind === 'road');
+      const second = engine.snapshot().industries.find((item) => item.id !== depot.id);
+      if (!first || !second) throw new Error('deux arrêts attendus');
       const id = buy(engine, 'bus_city', depot);
       const orders: VehicleOrder[] = [
         stationOrder(first),
@@ -232,7 +234,7 @@ describe('MockEngine : ordres avancés (#161)', () => {
             jump: 3,
           },
         },
-        stationOrder(second),
+        { target: second.id, kind: 'industry' },
         depotOrder(depot),
       ];
       engine.send(orderVehicleCommand(0, id, orders));

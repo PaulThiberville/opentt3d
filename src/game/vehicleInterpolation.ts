@@ -30,7 +30,7 @@ export interface RenderVehicle {
 export const TELEPORT_DISTANCE_SQUARED = 64;
 
 export function modelKindFor(
-  vehicle: Pick<VehicleSnapshot, 'kind' | 'cargo' | 'id'>,
+  vehicle: Pick<VehicleSnapshot, 'kind' | 'cargo' | 'id' | 'model'>,
 ): VehicleModelKind {
   switch (vehicle.kind) {
     case 'train':
@@ -39,12 +39,18 @@ export function modelKindFor(
       return 'ship';
     case 'aircraft':
       return 'plane';
-    case 'road':
+    case 'road': {
+      // Le modèle catalogue est la source la plus fiable : un bus refité ou
+      // cloné reste visuellement un bus, même si sa cargaison est nulle.
+      const model = vehicle.model?.toLowerCase() ?? '';
+      if (model.startsWith('bus')) return 'bus';
+      if (model.startsWith('truck')) return 'truck';
       // Le contrat regroupe bus et camions : on départage sur la cargaison,
       // puis sur l'identifiant pour rester déterministe.
       if (vehicle.cargo?.type === 'passengers') return 'bus';
       if (vehicle.cargo === null) return vehicle.id % 3 === 0 ? 'bus' : 'truck';
       return 'truck';
+    }
     default:
       return 'truck';
   }

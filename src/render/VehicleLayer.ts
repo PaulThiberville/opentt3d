@@ -536,6 +536,9 @@ export function vehicleSignature(vehicles: readonly RenderVehicle[]): number {
   hash = Math.imul(hash ^ vehicles.length, FNV_PRIME) >>> 0;
   for (const vehicle of vehicles) {
     hash = Math.imul(hash ^ vehicle.id, FNV_PRIME) >>> 0;
+    for (let index = 0; index < vehicle.kind.length; index += 1) {
+      hash = Math.imul(hash ^ vehicle.kind.charCodeAt(index), FNV_PRIME) >>> 0;
+    }
     hash = Math.imul(hash ^ quantize(vehicle.x), FNV_PRIME) >>> 0;
     hash = Math.imul(hash ^ quantize(vehicle.y), FNV_PRIME) >>> 0;
     hash = Math.imul(hash ^ quantize(vehicle.z), FNV_PRIME) >>> 0;
