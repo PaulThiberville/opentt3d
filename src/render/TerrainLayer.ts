@@ -17,21 +17,26 @@
  * La haute qualité subdivise chaque tuile (2×2) pour adoucir la silhouette ;
  * la moyenne garde exactement le budget de triangles d'avant #122.
  *
- * L'eau est un second maillage par chunk. Sa surface est posée just sous le
- * dessus de la tuile et le lit est creusé d'un demi-niveau : l'eau reste donc
- * sous les routes, ponts et quais voisins, sans recouvrement coplanaire ni
- * z-fighting. Le shader mélange la teinte selon la profondeur mesurée à la
- * côte, anime la houle et les reflets, et dessine une écume déterministe sur
- * les berges.
+ * L'eau est un second maillage par chunk : la nappe couvre l'eau et une
+ * couronne de berge, ce qui remplace l'arête rectangulaire des quads par la
+ * vraie intersection avec la pente du terrain (#204). Sa surface est posée
+ * juste sous le dessus de la tuile et le lit est creusé d'un demi-niveau :
+ * l'eau reste donc sous les routes, ponts et quais voisins, sans recouvrement
+ * coplanaire ni z-fighting. Le shader mélange la teinte selon la profondeur
+ * mesurée à la côte, anime la houle et les reflets, et dessine une écume
+ * déterministe sur les berges. Les marches légitimes (écluse, canal haut)
+ * reçoivent une paroi verticale opaque qui ferme le vide sous la surface
+ * (#205).
  */
 
 import * as THREE from 'three';
 import type { MapSnapshot, TileKind } from '../engine/protocol';
-import { clamp, isWaterKind, sampleHeightWorld, tileKindFromIndex } from '../game/mapGrid';
+import { clamp, sampleHeightWorld, tileKindFromIndex } from '../game/mapGrid';
 import { hashUnit2d } from '../game/prng';
 import {
   TERRAIN_SKIN_COLOURS,
   WATER_DEEP_COLOUR,
+  WATER_MID_COLOUR,
   WATER_SHALLOW_COLOUR,
   glslLinearColour,
   hexToLinearRgb,
@@ -56,7 +61,7 @@ import {
   waterBedHeight,
   waterDepthAt,
   waterDepthFactor,
-  waterSurfaceHeight,
+  waterWallForEdge,
   type ShoreFields,
   type WaterHeightFields,
 } from './waterSurface';
@@ -144,6 +149,7 @@ interface Chunk {
   cy: number;
   ground: THREE.Mesh;
   water: THREE.Mesh | null;
+  wall: THREE.Mesh | null;
 }
 
 interface MapArrays {
@@ -185,6 +191,7 @@ export class TerrainLayer {
   private heightSnapshot: Uint8Array | null = null;
   private groundMaterial: THREE.MeshLambertMaterial;
   private waterMaterial: THREE.MeshPhongMaterial;
+  private wallMaterial: THREE.MeshBasicMaterial;
   private waterTime: { value: number } | null = null;
   private nightUniform: { value: number } = { value: 0 };
   private skinUniform: { value: number } = { value: 1 };
@@ -354,6 +361,14 @@ ${SKIN_SHADER_CONSTANTS}`,
     };
     this.groundMaterial.customProgramCacheKey = () => 'opentt3d-terrain-skin-v4';
     this.waterMaterial = this.createWaterMaterial();
+    // Parois de rive (#205) : opaques et non éclairées, elles ferment le vide
+    // sous une nappe plus haute que sa voisine (écluse) ou au-dessus d'une
+    // berge basse sans jamais virer au noir.
+    this.wallMaterial = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      fog: true,
+    });
     // Fond océanique : masque la découpe de la carte et donne une île crédible.
     this.oceanGeometry = new THREE.PlaneGeometry(1, 1);
     this.oceanGeometry.rotateX(-Math.PI / 2);
@@ -415,8 +430,10 @@ ${SKIN_SHADER_CONSTANTS}`,
           `#include <common>
 uniform float uTime;
 attribute float aDepth;
+attribute float aGround;
 varying vec3 vWaterWorld;
 varying float vWaterDepth;
+varying float vWaterGround;
 varying float vWaterDistance;
 ${WATER_SHADER_CONSTANTS}`,
         )
@@ -429,7 +446,8 @@ ${WATER_SHADER_CONSTANTS}`,
            transformed.y += waterWave * WATER_WAVE_AMPLITUDE;
            vWaterWorld = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
            vWaterDistance = -( modelViewMatrix * vec4( transformed, 1.0 ) ).z;
-           vWaterDepth = aDepth;`,
+           vWaterDepth = aDepth;
+           vWaterGround = aGround;`,
         );
       shader.fragmentShader = shader.fragmentShader
         .replace(
@@ -439,6 +457,7 @@ uniform float uTime;
 uniform float uNight;
 varying vec3 vWaterWorld;
 varying float vWaterDepth;
+varying float vWaterGround;
 varying float vWaterDistance;
 ${WATER_SHADER_CONSTANTS}
 ${SKIN_SHADER_CONSTANTS}
@@ -449,17 +468,36 @@ ${SKIN_NOISE_GLSL}`,
           `#include <color_fragment>
            float waveA = sin( uTime * 1.15 + vWaterWorld.x * 0.55 + vWaterWorld.z * 0.45 );
            float waveB = sin( uTime * 0.7 - vWaterWorld.x * 0.2 + vWaterWorld.z * 0.35 );
+           // Hauteur libre réelle au-dessus du terrain : c'est elle qui définit
+           // la rive, indépendamment de l'arête des quads (#204).
+           float shoreClearance = vWaterWorld.y - vWaterGround;
+           float physicalDepth = clamp( shoreClearance / WATER_DEPTH_SPAN, 0.0, 1.0 );
+           // La profondeur physique prend le relais dans les canaux étroits, où
+           // la distance à la terre reste nulle même au milieu de l'eau.
+           float waterDepth = clamp( max( vWaterDepth, physicalDepth ), 0.0, 1.0 );
+           // Léger bruit sur la ligne de rive : casse les dents de scie alignées
+           // sur la grille sans jamais déborder sur le terrain sec.
+           float shoreNoise = skinNoise( vWaterWorld.xz * 2.3 + 6.1 ) - 0.5;
+           float shoreFade = smoothstep(
+             0.0,
+             WATER_SHORE_FADE,
+             shoreClearance + shoreNoise * WATER_SHORE_FADE * 0.35
+           );
            // Teinte par profondeur : turquoise au bord, bleu nuit au large.
            vec3 depthTint = mix(
              WATER_SHALLOW,
              WATER_DEEP,
-             smoothstep( 0.05, 0.9, vWaterDepth )
+             smoothstep( 0.05, 0.9, waterDepth )
            );
            diffuseColor.rgb = mix( diffuseColor.rgb, depthTint, 0.55 );
            diffuseColor.rgb *= 1.0 + waveA * 0.045 + waveB * 0.03;
+           float tintNoise = skinNoise( vWaterWorld.xz * 0.17 + 11.0 ) - 0.5;
+           diffuseColor.rgb *= 1.0 + tintNoise * 0.05;
 
-           // Écume de côte : bruit animé, atténué avec la distance.
-           float shoreFoam = 1.0 - smoothstep( 0.0, WATER_FOAM_DEPTH, vWaterDepth );
+           // Écume de côte : uniquement au ras du terrain, bruit animé atténué
+           // avec la distance. La profondeur physique évite d'écumer tout un
+           // canal étroit comme le faisait la distance à la terre.
+           float shoreFoam = 1.0 - smoothstep( 0.06, 0.34, physicalDepth );
            float foamNoise = skinNoise( vec2(
              vWaterWorld.x * WATER_RIPPLE_SCALE + uTime * 0.35,
              vWaterWorld.z * WATER_RIPPLE_SCALE - uTime * 0.27
@@ -471,8 +509,11 @@ ${SKIN_NOISE_GLSL}`,
            );
            float foam = shoreFoam * smoothstep( 0.42, 0.78, foamNoise + 0.18 ) * foamFade;
            diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.72, 0.82, 0.84 ), foam * 0.38 );
-           diffuseColor.a = mix( 0.78, 0.93, smoothstep( 0.0, 0.7, vWaterDepth ) );
-           diffuseColor.a = mix( diffuseColor.a, 0.97, foam );`,
+           // L'eau s'efface au contact de la berge : la rive visible devient la
+           // pente du terrain, pas le bord rectangulaire du quad.
+           diffuseColor.a = mix( 0.58, 0.93, smoothstep( 0.0, 0.45, waterDepth ) );
+           diffuseColor.a = mix( diffuseColor.a, 0.97, foam );
+           diffuseColor.a *= shoreFade;`,
         )
         .replace(
           '#include <normal_fragment_begin>',
@@ -505,7 +546,7 @@ ${SKIN_NOISE_GLSL}`,
            totalEmissiveRadiance += vec3( 0.035, 0.075, 0.13 ) * uNight;`,
         );
     };
-    material.customProgramCacheKey = () => 'opentt3d-water-depth-v2';
+    material.customProgramCacheKey = () => 'opentt3d-water-depth-v3';
     return material;
   }
 
@@ -560,24 +601,18 @@ ${SKIN_NOISE_GLSL}`,
     const previousHeights = this.heightSnapshot;
     let kindsSame = previousKinds !== null && previousKinds.length === map.kind.length;
     let heightsSame = previousHeights !== null && previousHeights.length === map.heightMap.length;
-    let waterChanged = false;
     if (kindsSame || heightsSame) {
       for (let index = 0; index < map.kind.length; index += 1) {
-        const kind = map.kind[index] ?? 0;
-        if (kindsSame && kind !== previousKinds?.[index]) {
-          kindsSame = false;
-          const wasWater = isWaterKind(tileKindFromIndex(previousKinds?.[index] ?? 0));
-          const isWater = isWaterKind(tileKindFromIndex(kind));
-          if (wasWater !== isWater) waterChanged = true;
-        }
+        if (kindsSame && (map.kind[index] ?? 0) !== previousKinds?.[index]) kindsSame = false;
         if (heightsSame && map.heightMap[index] !== previousHeights?.[index]) heightsSame = false;
-        if (!kindsSame && !heightsSame && waterChanged) break;
+        if (!kindsSame && !heightsSame) break;
       }
     }
     if (kindsSame && heightsSame) return;
-    // Le lit dépend des types (eau ou sec) autant que des hauteurs ; une route
-    // posée sur la terre ferme ne doit pas réallouer trois champs.
-    if (waterChanged || !heightsSame || !this.heightFields) {
+    // Le lit, la couverture de berge et les surfaces dépendent des types (eau,
+    // vide, terre) autant que des hauteurs : un type modifié peut ajouter ou
+    // retirer une couronne d'eau sans qu'aucune hauteur ne bouge.
+    if (!kindsSame || !heightsSame || !this.heightFields) {
       this.heightFields = buildWaterHeightFields(map);
     }
     if (!kindsSame) {
@@ -641,6 +676,10 @@ ${SKIN_NOISE_GLSL}`,
       if (existing.water) {
         this.group.remove(existing.water);
         existing.water.geometry.dispose();
+      }
+      if (existing.wall) {
+        this.group.remove(existing.wall);
+        existing.wall.geometry.dispose();
       }
       this.chunks.delete(key);
     }
@@ -839,12 +878,12 @@ ${SKIN_NOISE_GLSL}`,
     ground.receiveShadow = true;
     this.group.add(ground);
 
-    // --- Surcouche d'eau animée, uniquement sur les tuiles en eau.
+    // --- Surcouche d'eau animée : tuiles d'eau et couronne de berge (#204).
     let waterTiles = 0;
     for (let ty = 0; ty < height; ty += 1) {
       for (let tx = 0; tx < width; tx += 1) {
         const index = (y0 + ty) * map.width + (x0 + tx);
-        if (isWaterKind(tileKindFromIndex(map.kind[index] ?? 0))) waterTiles += 1;
+        if (heightFields.coverage[index] === 1) waterTiles += 1;
       }
     }
 
@@ -853,6 +892,7 @@ ${SKIN_NOISE_GLSL}`,
       const waterPositions = new Float32Array(waterTiles * 6 * 3);
       const waterColours = new Float32Array(waterTiles * 6 * 3);
       const waterDepthValues = new Float32Array(waterTiles * 6);
+      const waterGroundValues = new Float32Array(waterTiles * 6);
       let waterVertex = 0;
       const waterRgb = { r: 0, g: 0, b: 0 };
       for (let ty = 0; ty < height; ty += 1) {
@@ -860,22 +900,16 @@ ${SKIN_NOISE_GLSL}`,
           const wx = x0 + tx;
           const wy = y0 + ty;
           const index = wy * map.width + wx;
-          if (!isWaterKind(tileKindFromIndex(map.kind[index] ?? 0))) continue;
-          const surface = waterSurfaceHeight(map.heightMap[index] ?? 0);
+          if (heightFields.coverage[index] !== 1) continue;
+          const surface = heightFields.shoreSurface[index] ?? 0;
           const write = (x: number, z: number): void => {
             const depth = waterDepthFactor(
               sampleField(shoreFields.waterDistance, map.width, map.height, x, z),
             );
-            const base = waterColourAtDepth(depth, wx * 31 + wy);
-            const shimmer = 0.975 + hashUnit2d(wx, wy, 91) * 0.05;
-            hexToLinearRgb(
-              rgbToHex(
-                ((base >> 16) & 0xff) * shimmer,
-                ((base >> 8) & 0xff) * shimmer,
-                (base & 0xff) * shimmer,
-              ),
-              waterRgb,
-            );
+            // Teinte indexée sur la profondeur uniquement : plus de graine par
+            // tuile, donc plus de coutures rectangulaires entre deux quads.
+            const base = waterColourAtDepth(depth);
+            hexToLinearRgb(base, waterRgb);
             waterPositions[waterVertex * 3] = x;
             waterPositions[waterVertex * 3 + 1] = surface;
             waterPositions[waterVertex * 3 + 2] = z;
@@ -883,6 +917,9 @@ ${SKIN_NOISE_GLSL}`,
             waterColours[waterVertex * 3 + 1] = waterRgb.g;
             waterColours[waterVertex * 3 + 2] = waterRgb.b;
             waterDepthValues[waterVertex] = depth;
+            // Hauteur du terrain sous le sommet : le shader en déduit la ligne
+            // de rive réelle et le fondu d'opacité.
+            waterGroundValues[waterVertex] = bedAt(x, z);
             waterVertex += 1;
           };
           write(wx, wy);
@@ -897,6 +934,7 @@ ${SKIN_NOISE_GLSL}`,
       waterGeometry.setAttribute('position', new THREE.BufferAttribute(waterPositions, 3));
       waterGeometry.setAttribute('color', new THREE.BufferAttribute(waterColours, 3));
       waterGeometry.setAttribute('aDepth', new THREE.BufferAttribute(waterDepthValues, 1));
+      waterGeometry.setAttribute('aGround', new THREE.BufferAttribute(waterGroundValues, 1));
       waterGeometry.computeVertexNormals();
       waterGeometry.computeBoundingSphere();
       water = new THREE.Mesh(waterGeometry, this.waterMaterial);
@@ -906,7 +944,86 @@ ${SKIN_NOISE_GLSL}`,
       this.group.add(water);
     }
 
-    this.chunks.set(key, { cx, cy, ground, water });
+    // --- Parois de rive (#205) : une face verticale par arête de niveau.
+    const wall = this.buildWaterWalls(map, heightFields, x0, y0, width, height, cx, cy);
+    this.chunks.set(key, { cx, cy, ground, water, wall });
+  }
+
+  /**
+   * Construit les parois verticales d'un chunk : écluses (eau/eau) et berges
+   * hautes (eau/terre). Le chunk propriétaire de la tuile d'eau haute est le
+   * seul à émettre la face, d'où l'absence de doublon aux jonctions.
+   */
+  private buildWaterWalls(
+    map: MapSnapshot,
+    heightFields: WaterHeightFields,
+    x0: number,
+    y0: number,
+    width: number,
+    height: number,
+    cx: number,
+    cy: number,
+  ): THREE.Mesh | null {
+    const positions: number[] = [];
+    const colours: number[] = [];
+    const waterTop = { r: 0, g: 0, b: 0 };
+    const waterBottom = { r: 0, g: 0, b: 0 };
+    const bankTop = { r: 0, g: 0, b: 0 };
+    const bankBottom = { r: 0, g: 0, b: 0 };
+    hexToLinearRgb(WATER_MID_COLOUR, waterTop);
+    hexToLinearRgb(WATER_DEEP_COLOUR, waterBottom);
+    hexToLinearRgb(TERRAIN_SKIN_COLOURS.wetSand, bankTop);
+    hexToLinearRgb(TERRAIN_SKIN_COLOURS.rockDark, bankBottom);
+
+    const push = (
+      x: number,
+      z: number,
+      y: number,
+      colour: { r: number; g: number; b: number },
+    ): void => {
+      positions.push(x, y, z);
+      colours.push(colour.r, colour.g, colour.b);
+    };
+
+    for (let ty = 0; ty < height; ty += 1) {
+      for (let tx = 0; tx < width; tx += 1) {
+        const wx = x0 + tx;
+        const wy = y0 + ty;
+        const index = wy * map.width + wx;
+        if (heightFields.weight[index] !== 1) continue;
+        for (const [dx, dy] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const segment = waterWallForEdge(map, heightFields, wx, wy, dx, dy);
+          if (!segment) continue;
+          const top = segment.water ? waterTop : bankTop;
+          const bottom = segment.water ? waterBottom : bankBottom;
+          const { x0: ax, z0: az, x1: bx, z1: bz, bottom: low, top: high } = segment;
+          push(ax, az, low, bottom);
+          push(bx, bz, low, bottom);
+          push(bx, bz, high, top);
+          push(ax, az, low, bottom);
+          push(bx, bz, high, top);
+          push(ax, az, high, top);
+        }
+      }
+    }
+
+    if (positions.length === 0) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colours, 3));
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geometry, this.wallMaterial);
+    mesh.name = `shore-wall-${cx}-${cy}`;
+    mesh.receiveShadow = true;
+    mesh.renderOrder = 1;
+    this.group.add(mesh);
+    return mesh;
   }
 
   /**
@@ -1031,6 +1148,9 @@ ${SKIN_NOISE_GLSL}`,
     this.nightAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
     this.nightUniform.value = this.nightAmount;
     this.oceanMaterial.color.copy(this.oceanDayColor).lerp(this.oceanNightColor, this.nightAmount);
+    // Parois non éclairées : on les assombrit avec la nuit pour rester dans
+    // l'ambiance, sans jamais les laisser virer au noir absolu.
+    this.wallMaterial.color.setScalar(1 - this.nightAmount * 0.55);
   }
 
   get night(): number {
@@ -1051,6 +1171,10 @@ ${SKIN_NOISE_GLSL}`,
         this.group.remove(chunk.water);
         chunk.water.geometry.dispose();
       }
+      if (chunk.wall) {
+        this.group.remove(chunk.wall);
+        chunk.wall.geometry.dispose();
+      }
     }
     this.chunks.clear();
   }
@@ -1063,6 +1187,7 @@ ${SKIN_NOISE_GLSL}`,
     this.oceanMaterial.dispose();
     this.groundMaterial.dispose();
     this.waterMaterial.dispose();
+    this.wallMaterial.dispose();
     this.map = null;
     this.previous = null;
     this.shoreFields = null;

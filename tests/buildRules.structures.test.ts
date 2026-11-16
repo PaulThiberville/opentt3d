@@ -6,6 +6,7 @@ import {
   commandFromPlan,
   createBuildSettings,
   planBridge,
+  planLinkedRoute,
   planTunnel,
   type BridgeMaterial,
 } from '../src/game/buildRules';
@@ -62,6 +63,86 @@ describe('planBridge', () => {
     expect(plan.cost).toBe(2 * 460 + 4 * BRIDGE_MATERIALS.wood.railCost);
     expect(plan.bridge?.maintenance).toBe(Math.round(6 * BRIDGE_MATERIALS.wood.railMaintenance));
     expect(plan.tiles.every((tile) => tile.elevation !== undefined)).toBe(true);
+  });
+
+  it('refuse un tablier sur du terrain plat sans obstacle réel', () => {
+    const plan = planBridge({
+      map: makeMap(),
+      from: { x: 2, y: 4 },
+      to: { x: 7, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(plan.valid).toBe(false);
+    expect(plan.reason).toContain('obstacle réel');
+  });
+
+  it('accepte une vallée et un croisement de voie, refuse un tablier qui déborde', () => {
+    const valley = makeMap();
+    for (let x = 4; x <= 6; x += 1) setTile(valley, x, 4, TILE_KIND_INDEX.grass, 2);
+    const overValley = planBridge({
+      map: valley,
+      from: { x: 3, y: 4 },
+      to: { x: 7, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(overValley.valid).toBe(true);
+
+    const crossing = makeMap();
+    setTile(crossing, 5, 4, TILE_KIND_INDEX.road);
+    const overRoad = planBridge({
+      map: crossing,
+      from: { x: 3, y: 4 },
+      to: { x: 7, y: 4 },
+      settings: { kind: 'rail', material: 'steel' },
+      budget: 1_000_000,
+    });
+    expect(overRoad.valid).toBe(true);
+
+    const overhang = makeMap();
+    setTile(overhang, 7, 4, TILE_KIND_INDEX.water, 0);
+    setTile(overhang, 8, 4, TILE_KIND_INDEX.water, 0);
+    const tooMuchLand = planBridge({
+      map: overhang,
+      from: { x: 2, y: 4 },
+      to: { x: 12, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(tooMuchLand.valid).toBe(false);
+    expect(tooMuchLand.reason).toContain('Portée incohérente');
+  });
+
+  it('refuse une rampe en falaise ou posée sur l’eau', () => {
+    const cliff = makeMap();
+    setTile(cliff, 5, 4, TILE_KIND_INDEX.water, 0);
+    setTile(cliff, 6, 4, TILE_KIND_INDEX.water, 0);
+    setTile(cliff, 1, 4, TILE_KIND_INDEX.grass, 6);
+    setTile(cliff, 2, 4, TILE_KIND_INDEX.grass, 6);
+    const cliffPlan = planBridge({
+      map: cliff,
+      from: { x: 3, y: 4 },
+      to: { x: 8, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(cliffPlan.valid).toBe(false);
+    expect(cliffPlan.reason).toContain('rampe');
+
+    const flooded = makeMap();
+    setTile(flooded, 5, 4, TILE_KIND_INDEX.water, 0);
+    setTile(flooded, 6, 4, TILE_KIND_INDEX.water, 0);
+    setTile(flooded, 2, 4, TILE_KIND_INDEX.water, 0);
+    const floodedPlan = planBridge({
+      map: flooded,
+      from: { x: 3, y: 4 },
+      to: { x: 8, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(floodedPlan.valid).toBe(false);
+    expect(floodedPlan.reason).toContain('rampe');
   });
 
   it('refuse une diagonale, des culées à des hauteurs différentes et une portée trop longue', () => {
@@ -147,10 +228,13 @@ describe('planBridge', () => {
     expect(steelLong.valid).toBe(false);
     expect(steelLong.reason).toContain('ne dépasse pas 5');
 
+    const expensiveMap = makeMap();
+    setTile(expensiveMap, 5, 4, TILE_KIND_INDEX.water, 0);
+    setTile(expensiveMap, 6, 4, TILE_KIND_INDEX.water, 0);
     const expensive = planBridge({
-      map,
-      from: { x: 1, y: 4 },
-      to: { x: 10, y: 4 },
+      map: expensiveMap,
+      from: { x: 3, y: 4 },
+      to: { x: 8, y: 4 },
       settings: { kind: 'rail', material: 'wood' },
       budget: 100,
     });
@@ -174,6 +258,69 @@ describe('planBridge', () => {
       length: 7,
       direction: 'x',
     });
+  });
+});
+
+describe('planLinkedRoute', () => {
+  it('ne pose un pont que si le trajet rencontre un cours d’eau étroit', () => {
+    const dry = planLinkedRoute({
+      map: makeMap(24, 12),
+      from: { x: 2, y: 5 },
+      to: { x: 12, y: 5 },
+      kind: 'road',
+      company: 0,
+      budget: 1_000_000,
+    });
+    expect(dry?.pieces).toHaveLength(1);
+    expect(dry?.pieces[0]?.tool).toBe('road');
+
+    const map = makeMap(24, 12);
+    for (const x of [7, 8]) setTile(map, x, 5, TILE_KIND_INDEX.water, 0);
+    const crossed = planLinkedRoute({
+      map,
+      from: { x: 2, y: 5 },
+      to: { x: 12, y: 5 },
+      kind: 'road',
+      company: 0,
+      budget: 1_000_000,
+    });
+    expect(crossed?.pieces.map((piece) => piece.tool)).toEqual(['road', 'bridge', 'road']);
+    expect(crossed?.pieces[1]).toMatchObject({
+      tool: 'bridge',
+      from: { x: 6, y: 5 },
+      to: { x: 9, y: 5 },
+      material: 'steel',
+    });
+    expect(crossed?.cost ?? 0).toBeGreaterThan(0);
+  });
+
+  it('refuse un lac trop large ou une berge en falaise', () => {
+    const wide = makeMap(24, 12);
+    for (let x = 3; x <= 10; x += 1) setTile(wide, x, 5, TILE_KIND_INDEX.water, 0);
+    expect(
+      planLinkedRoute({
+        map: wide,
+        from: { x: 2, y: 5 },
+        to: { x: 12, y: 5 },
+        kind: 'road',
+        company: 0,
+        budget: 1_000_000,
+      }),
+    ).toBeNull();
+
+    const cliff = makeMap(24, 12);
+    for (const x of [7, 8]) setTile(cliff, x, 5, TILE_KIND_INDEX.water, 0);
+    setTile(cliff, 6, 5, TILE_KIND_INDEX.grass, 6);
+    expect(
+      planLinkedRoute({
+        map: cliff,
+        from: { x: 2, y: 5 },
+        to: { x: 12, y: 5 },
+        kind: 'road',
+        company: 0,
+        budget: 1_000_000,
+      }),
+    ).toBeNull();
   });
 });
 

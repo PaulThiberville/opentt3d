@@ -1151,12 +1151,30 @@ function buildCivic(variant: number, detail: BuildingDetail): THREE.BufferGeomet
 }
 
 /**
- * Garantit qu'une géométrie unitaire ne dépasse pas l'empreinte de tuile.
- * Les volumes sont déjà dessinés dans cette marge ; ce garde-fou couvre les
- * détails ajoutés (auvents, enseignes, escaliers) sans déformer le reste.
+ * Garantit qu'une géométrie unitaire est centrée sur sa tuile et ne dépasse
+ * pas son empreinte.
+ *
+ * Les volumes sont dessinés autour de l'origine, mais un auvent, un escalier
+ * ou une enseigne décale la boîte englobante : on recentre d'abord l'empreinte
+ * sur zéro, puis on la ramène dans la marge si un détail dépasse. La base reste
+ * à y = 0.
  */
-function fitFootprint(geometry: THREE.BufferGeometry, limit = 0.49): THREE.BufferGeometry {
+function fitFootprint(
+  geometry: THREE.BufferGeometry,
+  limit = 0.49,
+  centre = true,
+): THREE.BufferGeometry {
   geometry.computeBoundingBox();
+  const initial = geometry.boundingBox;
+  if (!initial) return geometry;
+  if (centre) {
+    const centreX = (initial.min.x + initial.max.x) / 2;
+    const centreZ = (initial.min.z + initial.max.z) / 2;
+    if (Math.abs(centreX) > 1e-6 || Math.abs(centreZ) > 1e-6) {
+      geometry.translate(-centreX, 0, -centreZ);
+      geometry.computeBoundingBox();
+    }
+  }
   const box = geometry.boundingBox;
   if (!box) return geometry;
   const extent = Math.max(
@@ -1427,7 +1445,9 @@ export function createTownPropGeometry(
       builder.box(0, 0, 0, 0.2, 0.2, 0.2, 0xc9b9a4);
     }
   }
-  return fitFootprint(builder.build(), 0.47);
+  // Les props gardent leur asymétrie voulue (tête de lampadaire, enseigne) :
+  // seule leur empreinte est ramenée dans la tuile, pas leur centre visuel.
+  return fitFootprint(builder.build(), 0.47, false);
 }
 
 // ---------------------------------------------------------------------------

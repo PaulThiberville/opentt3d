@@ -42,9 +42,15 @@ const MAX_RADIUS = 10;
 const MAX_STATION_TILES = 2048;
 const LOD_HYSTERESIS_RATIO = 1.18;
 
+/** Cible de picking résolue depuis une instance de la couche ville. */
+export type CityPickInfo =
+  | { kind: 'building'; townId: number; x: number; y: number }
+  | { kind: 'station'; stationId: number; x: number; y: number };
+
 export interface CityPickTarget {
   mesh: THREE.InstancedMesh;
-  townForInstance(instanceId: number): number | null;
+  /** Bâtiment (ville) ou gare, avec la tuile réelle de l'instance. */
+  infoForInstance(instanceId: number): CityPickInfo | null;
 }
 
 interface Placement {
@@ -53,6 +59,9 @@ interface Placement {
   variant: number;
   x: number;
   z: number;
+  /** Tuile logique de l'instance (jamais déduite du point d'impact). */
+  tileX: number;
+  tileY: number;
   ground: number;
   yaw: number;
   scaleX: number;
@@ -80,8 +89,11 @@ interface TownState {
 }
 
 interface StationPlacement {
+  stationId: number;
   x: number;
   z: number;
+  tileX: number;
+  tileY: number;
   ground: number;
   yaw: number;
   width: number;
@@ -105,6 +117,11 @@ export class CityLayer {
   private allDirty = true;
   private bucketSignatures = new Map<THREE.InstancedMesh, number>();
   private bucketTownIds = new Map<THREE.InstancedMesh, number[]>();
+  private bucketTiles = new Map<THREE.InstancedMesh, { x: number; y: number }[]>();
+  private stationPickInfo = new Map<
+    THREE.InstancedMesh,
+    { stationId: number; x: number; y: number }[]
+  >();
   private geometryCache = new Map<string, THREE.BufferGeometry>();
   private distantGeometry: THREE.BufferGeometry | null = null;
   private hallGeometry: THREE.BufferGeometry | null = null;
@@ -213,6 +230,8 @@ export class CityLayer {
             variant,
             x: worldX,
             z: worldZ,
+            tileX: x,
+            tileY: y,
             ground: sampleHeightWorld(map, worldX, worldZ),
             yaw: (rng.int(0, 3) * Math.PI) / 2,
             scaleX: rng.float(0.92, 1),
@@ -460,6 +479,7 @@ export class CityLayer {
   private removeBucketMesh(mesh: THREE.InstancedMesh): void {
     this.group.remove(mesh);
     this.bucketTownIds.delete(mesh);
+    this.bucketTiles.delete(mesh);
     this.bucketSignatures.delete(mesh);
     mesh.dispose();
   }
@@ -470,6 +490,7 @@ export class CityLayer {
     this.removeFarBucket();
     this.buckets = [];
     this.bucketTownIds.clear();
+    this.bucketTiles.clear();
     this.bucketSignatures.clear();
   }
 
@@ -485,6 +506,7 @@ export class CityLayer {
     mesh.receiveShadow = true;
     mesh.frustumCulled = true;
     const townIds: number[] = [];
+    const tiles: { x: number; y: number }[] = [];
     for (let index = 0; index < placements.length; index += 1) {
       const placement = placements[index];
       if (!placement) continue;
@@ -500,12 +522,14 @@ export class CityLayer {
       );
       mesh.setColorAt(index, this.colour);
       townIds.push(placement.townId);
+      tiles.push({ x: placement.tileX, y: placement.tileY });
     }
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
     this.group.add(mesh);
     this.bucketTownIds.set(mesh, townIds);
+    this.bucketTiles.set(mesh, tiles);
     return mesh;
   }
 
@@ -551,43 +575,78 @@ export class CityLayer {
     const platforms: StationPlacement[] = [];
     const bases: StationPlacement[] = [];
     for (const station of visible) {
-      const width = Math.max(1, station.width);
-      const height = Math.max(1, station.height);
+      const width = Math.max(1, Math.round(station.width));
+      const height = Math.max(1, Math.round(station.height));
       const yaw = width >= height ? 0 : Math.PI / 2;
       const colour = stationColour(station.company);
-      // La halle tient sur UNE tuile : elle ne couvre jamais toute l'emprise.
-      const hallX = station.x + 0.5;
-      const hallZ = station.y + 0.5;
+      // `station.x/y` est le CENTRE de l'emprise (contrat du snapshot) : la
+      // tuile nord-ouest se déduit de la moitié de l'emprise, jamais de x/y.
+      const left = Math.floor(station.x - width / 2);
+      const top = Math.floor(station.y - height / 2);
+      // La halle tient sur UNE tuile : on vise la tuile du centre, ramenée
+      // dans l'emprise pour ne jamais sortir de la gare.
+      const hallTileX = Math.max(left, Math.min(left + width - 1, Math.floor(station.x)));
+      const hallTileY = Math.max(top, Math.min(top + height - 1, Math.floor(station.y)));
+      const hallX = hallTileX + 0.5;
+      const hallZ = hallTileY + 0.5;
       const hallGround = sampleHeightWorld(map, hallX, hallZ);
       halls.push({
+        stationId: station.id,
         x: hallX,
         z: hallZ,
+        tileX: hallTileX,
+        tileY: hallTileY,
         ground: hallGround,
         yaw,
         width: 0.95,
         height: 0.95,
         colour,
       });
-      this.pushStationBase(bases, map, hallX, hallZ, hallGround, 0.82, yaw);
+      this.pushStationBase(
+        bases,
+        map,
+        station.id,
+        hallTileX,
+        hallTileY,
+        hallX,
+        hallZ,
+        hallGround,
+        0.82,
+        yaw,
+      );
       // Les aéroports gardent leur tarmac dessiné par le terrain : pas de
       // canopée de quai sur 3×3 tuiles. Seul le terminal est posé.
       if (station.kind === 'airport') continue;
       for (let tileY = 0; tileY < height; tileY += 1) {
         for (let tileX = 0; tileX < width; tileX += 1) {
           if (platforms.length >= MAX_STATION_TILES) break;
-          const x = station.x + tileX + 0.5;
-          const z = station.y + tileY + 0.5;
+          const x = left + tileX + 0.5;
+          const z = top + tileY + 0.5;
           const ground = sampleHeightWorld(map, x, z);
           platforms.push({
+            stationId: station.id,
             x,
             z,
+            tileX: left + tileX,
+            tileY: top + tileY,
             ground,
             yaw,
             width: 0.95,
             height: 0.95,
             colour,
           });
-          this.pushStationBase(bases, map, x, z, ground, 0.9, yaw);
+          this.pushStationBase(
+            bases,
+            map,
+            station.id,
+            left + tileX,
+            top + tileY,
+            x,
+            z,
+            ground,
+            0.9,
+            yaw,
+          );
         }
       }
     }
@@ -619,14 +678,15 @@ export class CityLayer {
   private pushStationBase(
     bases: StationPlacement[],
     map: MapSnapshot,
+    stationId: number,
+    tileX: number,
+    tileY: number,
     x: number,
     z: number,
     ground: number,
     footprint: number,
     yaw: number,
   ): void {
-    const tileX = Math.floor(x);
-    const tileY = Math.floor(z);
     const minCorner = Math.min(
       cornerHeightWorld(map, tileX, tileY),
       cornerHeightWorld(map, tileX + 1, tileY),
@@ -636,8 +696,11 @@ export class CityLayer {
     const gap = ground - minCorner;
     if (gap <= 0.02) return;
     bases.push({
+      stationId,
       x,
       z,
+      tileX,
+      tileY,
       ground: minCorner,
       yaw,
       width: footprint,
@@ -657,6 +720,7 @@ export class CityLayer {
     mesh.name = name;
     mesh.castShadow = this.shadows;
     mesh.receiveShadow = true;
+    const pickInfo: { stationId: number; x: number; y: number }[] = [];
     for (let index = 0; index < placements.length; index += 1) {
       const placement = placements[index];
       if (!placement) continue;
@@ -668,11 +732,13 @@ export class CityLayer {
       hexToRgb(placement.colour, this.rgb);
       this.colour.setRGB(this.rgb.r, this.rgb.g, this.rgb.b);
       mesh.setColorAt(index, this.colour);
+      pickInfo.push({ stationId: placement.stationId, x: placement.tileX, y: placement.tileY });
     }
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
     this.group.add(mesh);
+    this.stationPickInfo.set(mesh, pickInfo);
     return mesh;
   }
 
@@ -754,11 +820,33 @@ export class CityLayer {
     return total;
   }
 
+  /**
+   * Cibles de picking : bâtiments des villes ET gares. Les props décoratifs
+   * (`TownPropsLayer`) n'y figurent jamais : ils ne doivent pas voler le clic
+   * d'un bâtiment, et une gare doit rester sélectionnable.
+   */
   pickTargets(): CityPickTarget[] {
-    return this.buckets.map((mesh) => ({
+    const targets: CityPickTarget[] = this.buckets.map((mesh) => ({
       mesh,
-      townForInstance: (instanceId: number) => this.bucketTownIds.get(mesh)?.[instanceId] ?? null,
+      infoForInstance: (instanceId: number): CityPickInfo | null => {
+        const townId = this.bucketTownIds.get(mesh)?.[instanceId];
+        const tile = this.bucketTiles.get(mesh)?.[instanceId];
+        if (townId === undefined || !tile) return null;
+        return { kind: 'building', townId, x: tile.x, y: tile.y };
+      },
     }));
+    for (const mesh of [this.stationHalls, this.stationPlatforms, this.stationBases]) {
+      if (!mesh) continue;
+      targets.push({
+        mesh,
+        infoForInstance: (instanceId: number): CityPickInfo | null => {
+          const info = this.stationPickInfo.get(mesh)?.[instanceId];
+          if (!info) return null;
+          return { kind: 'station', stationId: info.stationId, x: info.x, y: info.y };
+        },
+      });
+    }
+    return targets;
   }
 
   private clear(): void {
@@ -772,19 +860,23 @@ export class CityLayer {
   private clearStations(): void {
     if (this.stationHalls) {
       this.group.remove(this.stationHalls);
+      this.stationPickInfo.delete(this.stationHalls);
       this.stationHalls.dispose();
       this.stationHalls = null;
     }
     if (this.stationPlatforms) {
       this.group.remove(this.stationPlatforms);
+      this.stationPickInfo.delete(this.stationPlatforms);
       this.stationPlatforms.dispose();
       this.stationPlatforms = null;
     }
     if (this.stationBases) {
       this.group.remove(this.stationBases);
+      this.stationPickInfo.delete(this.stationBases);
       this.stationBases.dispose();
       this.stationBases = null;
     }
+    this.stationPickInfo.clear();
     this.stationBaseCountValue = 0;
     this.stationCount = 0;
     this.stationSignature = 0;
@@ -944,12 +1036,14 @@ function computeStationSignature(
     }
     // Les terrassements sous la gare doivent aussi déclencher une reconstruction.
     if (map) {
-      const width = Math.max(1, station.width);
-      const height = Math.max(1, station.height);
+      const width = Math.max(1, Math.round(station.width));
+      const height = Math.max(1, Math.round(station.height));
+      const left = Math.floor(station.x - width / 2);
+      const top = Math.floor(station.y - height / 2);
       for (let dy = 0; dy < height; dy += 1) {
         for (let dx = 0; dx < width; dx += 1) {
-          const x = Math.floor(station.x) + dx;
-          const y = Math.floor(station.y) + dy;
+          const x = left + dx;
+          const y = top + dy;
           if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
           mix(map.heightMap[y * map.width + x] ?? 0);
         }

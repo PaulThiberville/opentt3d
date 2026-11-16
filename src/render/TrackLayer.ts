@@ -21,6 +21,7 @@ import type { MapSnapshot, RailType, StationSnapshot } from '../engine/protocol'
 import { TILE_KIND_INDEX } from '../engine/protocol';
 import { cornerHeightWorld } from '../game/mapGrid';
 import { qualitySettings, type QualityLevel } from './quality';
+import { buildRoadSurface, type RoadSurface } from './roadSurface';
 import { hexToRgb } from './tileVisuals';
 import {
   TRACK_CONNECT,
@@ -40,10 +41,10 @@ export const TRACK_CHUNK_SIZE = 32;
  * la même arête, sans trou ni couture aux carrefours.
  */
 const SIDEWALK_WIDTH = 0.11;
-const SIDEWALK_LIFT = 0.07;
-const ROAD_LIFT = 0.032;
+export const SIDEWALK_LIFT = 0.07;
+export const ROAD_LIFT = 0.032;
 const MARK_WIDTH = 0.03;
-const MARK_LIFT = ROAD_LIFT + 0.008;
+export const MARK_LIFT = ROAD_LIFT + 0.008;
 const MARK_PERIOD = 0.62;
 const MARK_DASH = 0.3;
 
@@ -566,33 +567,60 @@ export function roadTileLayout(plan: TrackTilePlan): RoadTileLayout {
   return { asphalt: { x0, z0, x1, z1 }, sidewalks, arms: connectionBits(plan.connections) };
 }
 
+/** Point de chaussée à la hauteur imposée par le profil longitudinal. */
+function roadPoint(surface: RoadSurface, x: number, z: number, lift: number): Pt3 {
+  return { x, y: surface.heightAt(x, z) + lift, z };
+}
+
 /** Joue verticale de la chaussée (version allégée, sans trottoir). */
 function addRoadEdgeWall(
   writer: GeometryWriter,
   map: MapSnapshot,
+  surface: RoadSurface,
+  bit: number,
   a: Pt2,
   b: Pt2,
   colour: Rgb,
 ): void {
-  const topA = pointAt(map, a.x, a.z, ROAD_LIFT);
-  const topB = pointAt(map, b.x, b.z, ROAD_LIFT);
+  // Sur un carrefour, le bord est plat : on utilise sa hauteur de référence
+  // pour que la joue ne redescende pas vers un coin hors profil. Sur une
+  // route droite, la joue suit la pente longitudinale.
+  const flat = surface.mode === 'junction' ? surface.sideHeight(bit) : null;
+  const topA =
+    flat === null
+      ? roadPoint(surface, a.x, a.z, ROAD_LIFT)
+      : { x: a.x, y: flat + ROAD_LIFT, z: a.z };
+  const topB =
+    flat === null
+      ? roadPoint(surface, b.x, b.z, ROAD_LIFT)
+      : { x: b.x, y: flat + ROAD_LIFT, z: b.z };
   const bottomA = pointAt(map, a.x, a.z, 0);
   const bottomB = pointAt(map, b.x, b.z, 0);
   addWall(writer, topA, topB, bottomB, bottomA, colour, ROAD_NIGHT);
+}
+
+/** Hauteur du dessus d'un trottoir, alignée sur la règle de la chaussée. */
+function sidewalkTop(surface: RoadSurface, strip: RoadSidewalkStrip, x: number, z: number): number {
+  // Un carrefour a des bords plats : le trottoir l'est aussi pour ne pas
+  // réintroduire de dévers au raccord. Une route droite suit sa pente
+  // longitudinale, constante dans la largeur du trottoir.
+  const base = surface.mode === 'junction' ? surface.sideHeight(strip.bit) : surface.heightAt(x, z);
+  return base + SIDEWALK_LIFT;
 }
 
 /** Trottoir surélevé d'un bord non connecté, avec ses joues et ses bouts. */
 function emitSidewalk(
   writer: GeometryWriter,
   map: MapSnapshot,
+  surface: RoadSurface,
   strip: RoadSidewalkStrip,
   variant: number,
 ): void {
   const { x0, z0, x1, z1 } = strip.rect;
-  const topNw = pointAt(map, x0, z0, SIDEWALK_LIFT);
-  const topNe = pointAt(map, x1, z0, SIDEWALK_LIFT);
-  const topSe = pointAt(map, x1, z1, SIDEWALK_LIFT);
-  const topSw = pointAt(map, x0, z1, SIDEWALK_LIFT);
+  const topNw: Pt3 = { x: x0, y: sidewalkTop(surface, strip, x0, z0), z: z0 };
+  const topNe: Pt3 = { x: x1, y: sidewalkTop(surface, strip, x1, z0), z: z0 };
+  const topSe: Pt3 = { x: x1, y: sidewalkTop(surface, strip, x1, z1), z: z1 };
+  const topSw: Pt3 = { x: x0, y: sidewalkTop(surface, strip, x0, z1), z: z1 };
   addQuad(writer, topNw, topNe, topSe, topSw, tint(CURB_COLOUR, variant), CURB_NIGHT);
 
   const side = tint(CURB_COLOUR, variant, 0.86);
@@ -606,6 +634,57 @@ function emitSidewalk(
   if (strip.walls.west) addWall(writer, topSw, topNw, bottomNw, bottomSw, side, CURB_NIGHT);
 }
 
+/**
+ * Dalle d'un carrefour : quatre bras à bords plats réunis au centre.
+ *
+ * Chaque triangle va du centre à un bord de tuile. Sa hauteur ne dépend que
+ * de la coordonnée perpendiculaire au bord : le bras est donc horizontal dans
+ * sa largeur. Aux quatre coins, deux bords de hauteurs différentes laissent un
+ * triangle vertical (aire nulle vue de dessus) qui referme exactement la
+ * couture.
+ */
+function emitJunctionSlab(
+  writer: GeometryWriter,
+  plan: TrackTilePlan,
+  surface: RoadSurface,
+  colour: Rgb,
+): void {
+  const { x, y } = plan;
+  const x0 = x;
+  const z0 = y;
+  const x1 = x + 1;
+  const z1 = y + 1;
+  const centre = { x: x + 0.5, y: surface.heights.centre + ROAD_LIFT, z: y + 0.5 };
+  const corner = (px: number, pz: number, height: number): Pt3 => ({
+    x: px,
+    y: height + ROAD_LIFT,
+    z: pz,
+  });
+  const nwN = corner(x0, z0, surface.heights.north);
+  const neN = corner(x1, z0, surface.heights.north);
+  const neE = corner(x1, z0, surface.heights.east);
+  const seE = corner(x1, z1, surface.heights.east);
+  const seS = corner(x1, z1, surface.heights.south);
+  const swS = corner(x0, z1, surface.heights.south);
+  const swW = corner(x0, z1, surface.heights.west);
+  const nwW = corner(x0, z0, surface.heights.west);
+
+  addTriangle(writer, centre, nwN, neN, colour, ROAD_NIGHT);
+  addTriangle(writer, centre, neE, seE, colour, ROAD_NIGHT);
+  addTriangle(writer, centre, seS, swS, colour, ROAD_NIGHT);
+  addTriangle(writer, centre, swW, nwW, colour, ROAD_NIGHT);
+
+  const side = tint(ROAD_SIDE_COLOUR, plan.variation);
+  const seam = (a: Pt3, b: Pt3): void => {
+    if (Math.abs(a.y - b.y) < 1e-6) return;
+    addTriangle(writer, centre, a, b, side, ROAD_NIGHT);
+  };
+  seam(nwN, nwW);
+  seam(neN, neE);
+  seam(seE, seS);
+  seam(swS, swW);
+}
+
 function emitRoadSurface(
   writer: GeometryWriter,
   map: MapSnapshot,
@@ -615,14 +694,23 @@ function emitRoadSurface(
   const variant = plan.variation;
   const layout = roadTileLayout(plan);
   const { x0, z0, x1, z1 } = layout.asphalt;
-  const a = pointAt(map, x0, z0, ROAD_LIFT);
-  const b = pointAt(map, x1, z0, ROAD_LIFT);
-  const c = pointAt(map, x1, z1, ROAD_LIFT);
-  const d = pointAt(map, x0, z1, ROAD_LIFT);
-  addQuad(writer, a, b, c, d, tint(ROAD_COLOUR, variant), ROAD_NIGHT);
+  const surface = buildRoadSurface(map, plan);
+  const colour = tint(ROAD_COLOUR, variant);
+
+  if (surface.mode === 'straight') {
+    // Un seul plan : les deux bords de la largeur ont exactement la même
+    // hauteur à chaque abscisse longitudinale (aucun dévers).
+    const a = roadPoint(surface, x0, z0, ROAD_LIFT);
+    const b = roadPoint(surface, x1, z0, ROAD_LIFT);
+    const c = roadPoint(surface, x1, z1, ROAD_LIFT);
+    const d = roadPoint(surface, x0, z1, ROAD_LIFT);
+    addQuad(writer, a, b, c, d, colour, ROAD_NIGHT);
+  } else {
+    emitJunctionSlab(writer, plan, surface, colour);
+  }
 
   if (detail >= 1) {
-    for (const strip of layout.sidewalks) emitSidewalk(writer, map, strip, variant);
+    for (const strip of layout.sidewalks) emitSidewalk(writer, map, surface, strip, variant);
     return;
   }
 
@@ -630,16 +718,48 @@ function emitRoadSurface(
   // dalle. Les trottoirs (3,8 cm) sont invisibles à cette distance.
   const sideColour = tint(ROAD_SIDE_COLOUR, variant);
   if (!(plan.connections & TRACK_CONNECT.north)) {
-    addRoadEdgeWall(writer, map, { x: x0, z: z0 }, { x: x1, z: z0 }, sideColour);
+    addRoadEdgeWall(
+      writer,
+      map,
+      surface,
+      TRACK_CONNECT.north,
+      { x: x0, z: z0 },
+      { x: x1, z: z0 },
+      sideColour,
+    );
   }
   if (!(plan.connections & TRACK_CONNECT.east)) {
-    addRoadEdgeWall(writer, map, { x: x1, z: z0 }, { x: x1, z: z1 }, sideColour);
+    addRoadEdgeWall(
+      writer,
+      map,
+      surface,
+      TRACK_CONNECT.east,
+      { x: x1, z: z0 },
+      { x: x1, z: z1 },
+      sideColour,
+    );
   }
   if (!(plan.connections & TRACK_CONNECT.south)) {
-    addRoadEdgeWall(writer, map, { x: x1, z: z1 }, { x: x0, z: z1 }, sideColour);
+    addRoadEdgeWall(
+      writer,
+      map,
+      surface,
+      TRACK_CONNECT.south,
+      { x: x1, z: z1 },
+      { x: x0, z: z1 },
+      sideColour,
+    );
   }
   if (!(plan.connections & TRACK_CONNECT.west)) {
-    addRoadEdgeWall(writer, map, { x: x0, z: z1 }, { x: x0, z: z0 }, sideColour);
+    addRoadEdgeWall(
+      writer,
+      map,
+      surface,
+      TRACK_CONNECT.west,
+      { x: x0, z: z1 },
+      { x: x0, z: z0 },
+      sideColour,
+    );
   }
 }
 
@@ -694,7 +814,11 @@ export function roadMarkingPaths(plan: TrackTilePlan): Pt2[][] {
 }
 
 /** Marquage continu qui suit une polyligne (axe d'un virage ou tiret). */
-function addMarkingRibbon(writer: GeometryWriter, map: MapSnapshot, path: readonly Pt2[]): void {
+function addMarkingRibbon(
+  writer: GeometryWriter,
+  surface: RoadSurface,
+  path: readonly Pt2[],
+): void {
   if (path.length < 2) return;
   const normals = pathNormals(path);
   const half = MARK_WIDTH / 2;
@@ -705,16 +829,26 @@ function addMarkingRibbon(writer: GeometryWriter, map: MapSnapshot, path: readon
     const normalA = normals[i];
     const normalB = normals[i + 1];
     if (!pointA || !pointB || !normalA || !normalB) continue;
-    const minusA = pointAt(
-      map,
+    const minusA = roadPoint(
+      surface,
       pointA.x - normalA.x * half,
       pointA.z - normalA.z * half,
       MARK_LIFT,
     );
-    const plusA = pointAt(map, pointA.x + normalA.x * half, pointA.z + normalA.z * half, MARK_LIFT);
-    const plusB = pointAt(map, pointB.x + normalB.x * half, pointB.z + normalB.z * half, MARK_LIFT);
-    const minusB = pointAt(
-      map,
+    const plusA = roadPoint(
+      surface,
+      pointA.x + normalA.x * half,
+      pointA.z + normalA.z * half,
+      MARK_LIFT,
+    );
+    const plusB = roadPoint(
+      surface,
+      pointB.x + normalB.x * half,
+      pointB.z + normalB.z * half,
+      MARK_LIFT,
+    );
+    const minusB = roadPoint(
+      surface,
       pointB.x - normalB.x * half,
       pointB.z - normalB.z * half,
       MARK_LIFT,
@@ -724,7 +858,8 @@ function addMarkingRibbon(writer: GeometryWriter, map: MapSnapshot, path: readon
 }
 
 function emitRoadMarkings(writer: GeometryWriter, map: MapSnapshot, plan: TrackTilePlan): void {
-  for (const path of roadMarkingPaths(plan)) addMarkingRibbon(writer, map, path);
+  const surface = buildRoadSurface(map, plan);
+  for (const path of roadMarkingPaths(plan)) addMarkingRibbon(writer, surface, path);
 }
 
 function emitRoadTile(

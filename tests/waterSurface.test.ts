@@ -6,12 +6,16 @@ import {
   SHORE_MAX_DISTANCE,
   WATER_BED_DROP,
   WATER_DEPTH_RANGE,
+  WATER_DEPTH_SPAN,
   WATER_FOAM_DEPTH,
   WATER_LEVEL_OFFSET,
   WATER_RIPPLE_FADE_FAR,
   WATER_RIPPLE_FADE_NEAR,
   WATER_RIPPLE_SCALE,
   WATER_SHADER_CONSTANTS,
+  WATER_SHORE_FADE,
+  WATER_SHORE_OVERLAP,
+  WATER_WALL_EPSILON,
   WATER_WAVE_AMPLITUDE,
   buildShoreFields,
   buildWaterHeightFields,
@@ -21,7 +25,10 @@ import {
   waterDepthAt,
   waterDepthFactor,
   waterFoamAmount,
+  waterPhysicalDepth,
+  waterShoreFade,
   waterSurfaceHeight,
+  waterWallForEdge,
   waterWaveHeight,
 } from '../src/render/waterSurface';
 
@@ -322,5 +329,249 @@ describe('bornes du shader d’eau', () => {
     expect(WATER_SHADER_CONSTANTS).toContain('WATER_FOAM_DEPTH');
     expect(WATER_SHADER_CONSTANTS).not.toContain('NaN');
     expect(WATER_SHADER_CONSTANTS).not.toContain('Infinity');
+  });
+});
+
+describe('rive adoucie et recouvrement (#204)', () => {
+  function makeFlatCanal(): MapSnapshot {
+    const width = 16;
+    const height = 12;
+    const size = width * height;
+    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.grass);
+    const heightMap = new Uint8Array(size).fill(4);
+    // Canal de 3 tuiles de large, au même niveau que la berge.
+    for (let y = 3; y < 9; y += 1) {
+      for (let x = 6; x < 9; x += 1) {
+        const index = y * width + x;
+        kind[index] = TILE_KIND_INDEX.canal;
+      }
+    }
+    return {
+      width,
+      height,
+      kind,
+      heightMap,
+      owner: new Uint8Array(size).fill(255),
+      slope: new Uint8Array(size),
+      flags: new Uint8Array(size),
+      trackBits: new Uint8Array(size),
+    };
+  }
+
+  it('étend la nappe d’une couronne, jamais de deux', () => {
+    const map = makeFlatCanal();
+    const fields = buildWaterHeightFields(map);
+    const covered = (x: number, y: number): boolean => fields.coverage[y * map.width + x] === 1;
+    expect(WATER_SHORE_OVERLAP).toBe(1);
+    // Eau.
+    expect(covered(7, 5)).toBe(true);
+    // Première couronne (bord et coin diagonal).
+    expect(covered(5, 5)).toBe(true);
+    expect(covered(5, 2)).toBe(true);
+    expect(covered(9, 2)).toBe(true);
+    // Deuxième couronne : exclue.
+    expect(covered(4, 5)).toBe(false);
+    expect(covered(4, 2)).toBe(false);
+    expect(covered(10, 9)).toBe(false);
+    // Toute berge recouverte reste sous le dessus de sa tuile.
+    for (let y = 0; y < map.height; y += 1) {
+      for (let x = 0; x < map.width; x += 1) {
+        const index = y * map.width + x;
+        if (fields.coverage[index] !== 1 || fields.weight[index] === 1) continue;
+        const top = (map.heightMap[index] ?? 0) * 0.5;
+        expect(fields.shoreSurface[index] ?? 0).toBeLessThanOrEqual(top);
+      }
+    }
+  });
+
+  it('n’étend pas une nappe haute sur une terre plus basse', () => {
+    const width = 8;
+    const height = 8;
+    const size = width * height;
+    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.grass);
+    const heightMap = new Uint8Array(size).fill(2);
+    // Canal haut (niveau 6) longé par une terre basse (niveau 2).
+    kind[3 * width + 3] = TILE_KIND_INDEX.canal;
+    heightMap[3 * width + 3] = 6;
+    const map: MapSnapshot = {
+      width,
+      height,
+      kind,
+      heightMap,
+      owner: new Uint8Array(size).fill(255),
+      slope: new Uint8Array(size),
+      flags: new Uint8Array(size),
+      trackBits: new Uint8Array(size),
+    };
+    const fields = buildWaterHeightFields(map);
+    expect(fields.coverage[3 * width + 4]).toBe(0);
+    expect(fields.coverage[4 * width + 3]).toBe(0);
+  });
+
+  it('prend le niveau bas quand deux nappes se touchent', () => {
+    const width = 8;
+    const height = 8;
+    const size = width * height;
+    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.grass);
+    const heightMap = new Uint8Array(size).fill(4);
+    kind[3 * width + 3] = TILE_KIND_INDEX.canal;
+    heightMap[3 * width + 3] = 7;
+    kind[3 * width + 4] = TILE_KIND_INDEX.water;
+    heightMap[3 * width + 4] = 0;
+    const map: MapSnapshot = {
+      width,
+      height,
+      kind,
+      heightMap,
+      owner: new Uint8Array(size).fill(255),
+      slope: new Uint8Array(size),
+      flags: new Uint8Array(size),
+      trackBits: new Uint8Array(size),
+    };
+    const fields = buildWaterHeightFields(map);
+    // La terre mitoyenne est recouverte avec la surface la plus basse.
+    expect(fields.coverage[2 * width + 3]).toBe(1);
+    expect(fields.shoreSurface[2 * width + 3]).toBeCloseTo(waterSurfaceHeight(0), 6);
+  });
+
+  it('suit la profondeur réelle sans seuil rectangulaire', () => {
+    const map = makeFlatCanal();
+    const fields = buildWaterHeightFields(map);
+    const bed = (x: number, z: number): number =>
+      sampleCornerField(fields.bed, map.width, map.height, x, z);
+    const depth = (x: number, z: number): number =>
+      waterDepthAt(fields, map.width, map.height, x, z, bed(x, z));
+    // Au bord du canal, l'ancien seuil « poids d'eau = 1 » renvoyait 0 et
+    // peignait une bande de sable rectangulaire ; la profondeur suit
+    // maintenant la pente du lit.
+    expect(depth(6, 5.5)).toBeGreaterThan(0);
+    expect(depth(7, 5.5)).toBeGreaterThan(depth(6, 5.5));
+    // Au centre, le lit est franchement immergé.
+    expect(depth(7.5, 5.5)).toBeGreaterThan(0.5);
+    // Sur la terre ferme, aucune teinte de fond.
+    expect(depth(3, 5.5)).toBe(0);
+    expect(depth(12, 5.5)).toBe(0);
+    // Le fondu de rive s'annule sous le sol et sature au large.
+    expect(waterShoreFade(-0.1)).toBe(0);
+    expect(waterShoreFade(0)).toBe(0);
+    expect(waterShoreFade(WATER_SHORE_FADE)).toBe(1);
+    expect(waterPhysicalDepth(WATER_DEPTH_SPAN)).toBe(1);
+    expect(waterPhysicalDepth(-1)).toBe(0);
+  });
+
+  it('garde des hauteurs et un fondu bornés avec des entrées invalides', () => {
+    expect(Number.isFinite(waterShoreFade(Number.NaN))).toBe(true);
+    expect(waterShoreFade(Number.NaN)).toBe(0);
+    expect(waterPhysicalDepth(Number.NaN)).toBe(0);
+    expect(WATER_SHORE_FADE).toBeGreaterThan(0.1);
+    expect(WATER_SHORE_FADE).toBeLessThan(0.5);
+    expect(WATER_DEPTH_SPAN).toBeCloseTo(WATER_BED_DROP + WATER_LEVEL_OFFSET, 8);
+  });
+});
+
+describe('parois de rive (#205)', () => {
+  function stepMap(): MapSnapshot {
+    const width = 12;
+    const height = 12;
+    const size = width * height;
+    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.grass);
+    const heightMap = new Uint8Array(size).fill(2);
+    // Bief bas à gauche, écluse au milieu (niveau haut), bief haut à droite.
+    for (let y = 4; y < 8; y += 1) {
+      kind[y * width + 4] = TILE_KIND_INDEX.water;
+      heightMap[y * width + 4] = 0;
+      kind[y * width + 5] = TILE_KIND_INDEX.lock;
+      heightMap[y * width + 5] = 4;
+      kind[y * width + 6] = TILE_KIND_INDEX.water;
+      heightMap[y * width + 6] = 4;
+    }
+    return {
+      width,
+      height,
+      kind,
+      heightMap,
+      owner: new Uint8Array(size).fill(255),
+      slope: new Uint8Array(size),
+      flags: new Uint8Array(size),
+      trackBits: new Uint8Array(size),
+    };
+  }
+
+  it('ferme la marche entre deux biefs de niveaux différents', () => {
+    const map = stepMap();
+    const fields = buildWaterHeightFields(map);
+    // Côté écluse (haut) vers le bief bas : paroi d'eau.
+    const wall = waterWallForEdge(map, fields, 5, 5, -1, 0);
+    expect(wall).not.toBeNull();
+    expect(wall?.water).toBe(true);
+    expect(wall?.bottom).toBeCloseTo(waterSurfaceHeight(0), 6);
+    expect(wall?.top).toBeCloseTo(waterSurfaceHeight(4) + WATER_WAVE_AMPLITUDE, 6);
+    expect((wall?.top ?? 0) - (wall?.bottom ?? 0)).toBeGreaterThan(1.9);
+    // Pas de doublon depuis le bief bas, qui regarde une surface plus haute.
+    expect(waterWallForEdge(map, fields, 4, 5, 1, 0)).toBeNull();
+    // Le bief haut est aussi plus haut que la berge sèche (niveau 2).
+    const bank = waterWallForEdge(map, fields, 6, 5, 1, 0);
+    expect(bank).not.toBeNull();
+    expect(bank?.water).toBe(false);
+    expect(bank?.bottom).toBeLessThan(waterSurfaceHeight(4));
+  });
+
+  it('ne crée aucune paroi quand la berge atteint la surface', () => {
+    const width = 8;
+    const height = 8;
+    const size = width * height;
+    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.grass);
+    const heightMap = new Uint8Array(size).fill(4);
+    kind[3 * width + 3] = TILE_KIND_INDEX.canal;
+    const map: MapSnapshot = {
+      width,
+      height,
+      kind,
+      heightMap,
+      owner: new Uint8Array(size).fill(255),
+      slope: new Uint8Array(size),
+      flags: new Uint8Array(size),
+      trackBits: new Uint8Array(size),
+    };
+    const fields = buildWaterHeightFields(map);
+    for (const [dx, dy] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const) {
+      expect(waterWallForEdge(map, fields, 3, 3, dx, dy)).toBeNull();
+    }
+    expect(WATER_WALL_EPSILON).toBeGreaterThan(0);
+  });
+
+  it('raccorde une nappe haute au bord de carte sans vide', () => {
+    const width = 4;
+    const height = 4;
+    const size = width * height;
+    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.water);
+    const heightMap = new Uint8Array(size).fill(0);
+    const map: MapSnapshot = {
+      width,
+      height,
+      kind,
+      heightMap,
+      owner: new Uint8Array(size).fill(255),
+      slope: new Uint8Array(size),
+      flags: new Uint8Array(size),
+      trackBits: new Uint8Array(size),
+    };
+    const fields = buildWaterHeightFields(map);
+    // Au niveau de la mer, le décor hors-limites prend le relais.
+    expect(waterWallForEdge(map, fields, 0, 1, -1, 0)).toBeNull();
+    expect(waterWallForEdge(map, fields, 1, 0, 0, -1)).toBeNull();
+
+    // Un canal haut au bord ferme sa paroi jusqu'au niveau de la mer.
+    const raised = buildWaterHeightFields({ ...map, heightMap: new Uint8Array(size).fill(4) });
+    const wall = waterWallForEdge(map, raised, 0, 1, -1, 0);
+    expect(wall).not.toBeNull();
+    expect(wall?.water).toBe(true);
+    expect(wall?.bottom).toBeCloseTo(waterSurfaceHeight(0), 6);
+    expect(wall?.top).toBeCloseTo(waterSurfaceHeight(4) + WATER_WAVE_AMPLITUDE, 6);
   });
 });

@@ -2057,6 +2057,85 @@ function bridgeMiddleReason(map: MapSnapshot, x: number, y: number): string | nu
   return null;
 }
 
+/** Eau franchie par un pont : lacs, rivières et canaux. */
+const BRIDGE_WATER_KINDS: readonly TileKind[] = ['water', 'river', 'canal', 'lock'];
+
+/** Voie déjà posée que le tablier peut surplomber (pont-route, viaduc). */
+const BRIDGE_TRACK_KINDS: readonly TileKind[] = ['road', 'rail', 'crossing'];
+
+/** Dénivelé minimal (en demi-niveaux) pour qu'un creux soit une vraie vallée. */
+export const BRIDGE_MIN_VALLEY_DROP = 2;
+
+/** Longueur minimale (en tuiles) d'une approche plane derrière chaque culée. */
+export const BRIDGE_APPROACH_TILES = 1;
+
+/**
+ * Nombre maximal de tuiles de terre ferme tolérées sous le tablier, à chaque
+ * extrémité, avant de considérer que le pont déborde de son obstacle.
+ */
+export const BRIDGE_MAX_APPROACH_LAND = 1;
+
+/** Nature réelle de l'obstacle franchi par une tuile de tablier. */
+export type BridgeObstacle = 'water' | 'valley' | 'crossing';
+
+function bridgeObstacleAt(
+  map: MapSnapshot,
+  index: number,
+  abutmentHeight: number,
+): BridgeObstacle | null {
+  const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+  if (BRIDGE_WATER_KINDS.includes(kind)) return 'water';
+  if (BRIDGE_TRACK_KINDS.includes(kind)) return 'crossing';
+  const ground = map.heightMap[index] ?? 0;
+  if (abutmentHeight - ground >= BRIDGE_MIN_VALLEY_DROP) return 'valley';
+  return null;
+}
+
+/**
+ * Motif de refus de l'accès à une rampe. Une culée posée au bord d'une falaise
+ * ou d'un autre niveau produit un pont visuellement impossible : la rampe doit
+ * rejoindre la terre ferme, à la même hauteur que la culée.
+ */
+function bridgeApproachReason(
+  map: MapSnapshot,
+  x: number,
+  y: number,
+  abutmentHeight: number,
+): string | null {
+  if (!inBounds(map, x, y)) {
+    return 'La rampe sort de la carte : reculez la culée d’une tuile.';
+  }
+  const index = tileIndex(x, y, map.width);
+  const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+  if (
+    kind === 'water' ||
+    kind === 'river' ||
+    kind === 'canal' ||
+    kind === 'lock' ||
+    kind === 'void'
+  ) {
+    return 'La rampe doit reposer sur la terre ferme, pas sur l’eau.';
+  }
+  if (
+    kind === 'house' ||
+    kind === 'industry' ||
+    kind === 'station' ||
+    kind === 'airport' ||
+    kind === 'dock' ||
+    kind === 'object' ||
+    kind === 'bridge' ||
+    kind === 'tunnel' ||
+    kind === 'aqueduct'
+  ) {
+    return 'L’accès à la rampe est occupé : dégagez une tuile devant la culée.';
+  }
+  const height = map.heightMap[index] ?? 0;
+  if (height !== abutmentHeight) {
+    return 'La rampe ne rejoint pas le sol : culée en falaise ou à un autre niveau.';
+  }
+  return null;
+}
+
 function structureTile(
   map: MapSnapshot,
   point: BuildPoint,
@@ -2149,9 +2228,24 @@ export function planBridge(options: BridgePlanOptions): BuildPlan {
     structureEndReason(map, to.x, to.y, options.settings.kind, 'culée', options.company);
   reason = reason ?? endReason;
 
+  // Les deux rampes doivent rejoindre une tuile de terre ferme au même
+  // niveau, puis disposer d'une approche plane. Sans cela, la culée est posée
+  // sur une falaise ou au bord de l'eau et le tablier flotte sans accès.
+  const stepX = Math.sign(to.x - from.x);
+  const stepY = Math.sign(to.y - from.y);
+  let approachReason: string | null = null;
+  for (let distance = 1; distance <= BRIDGE_APPROACH_TILES; distance += 1) {
+    approachReason =
+      approachReason ??
+      bridgeApproachReason(map, from.x - stepX * distance, from.y - stepY * distance, fromHeight) ??
+      bridgeApproachReason(map, to.x + stepX * distance, to.y + stepY * distance, toHeight);
+  }
+  reason = reason ?? approachReason;
+
   const deckElevation = deckHeight * 0.5 + 0.32;
   const costPerTile = options.settings.kind === 'rail' ? spec.railCost : spec.roadCost;
   let cost = BRIDGE_RAMP_COST[options.settings.kind] * 2;
+  const obstacles: (BridgeObstacle | null)[] = [];
   for (let i = 0; i < traced.points.length; i += 1) {
     const point = traced.points[i];
     if (!point) continue;
@@ -2164,9 +2258,34 @@ export function planBridge(options: BridgePlanOptions): BuildPlan {
       if (!reason && ground > fromHeight) {
         reason = 'Terrain trop haut sous le tablier : rehaussez le pont ou changez de tracé.';
       }
+      obstacles.push(bridgeObstacleAt(map, index, fromHeight));
       cost += costPerTile;
     }
     plan.tiles.push(structureTile(map, point, kind, 0, deckElevation));
+  }
+
+  // Un pont doit franchir quelque chose : eau, vallée marquée, route ou voie.
+  // Sur du terrain plat, une route ou une voie suffit et le tablier serait
+  // une structure massive inutile.
+  if (!reason) {
+    const firstObstacle = obstacles.findIndex((obstacle) => obstacle !== null);
+    if (firstObstacle < 0) {
+      const replacement = options.settings.kind === 'rail' ? 'une voie' : 'une route';
+      reason = `Un pont doit franchir un obstacle réel (eau, vallée, route ou voie ferrée). Sur terrain plat, construisez ${replacement}.`;
+    } else {
+      let lastObstacle = firstObstacle;
+      for (let i = obstacles.length - 1; i >= 0; i -= 1) {
+        if (obstacles[i] !== null) {
+          lastObstacle = i;
+          break;
+        }
+      }
+      const leadingLand = firstObstacle;
+      const trailingLand = obstacles.length - 1 - lastObstacle;
+      if (leadingLand > BRIDGE_MAX_APPROACH_LAND || trailingLand > BRIDGE_MAX_APPROACH_LAND) {
+        reason = `Portée incohérente : ${leadingLand + trailingLand} tuile(s) de terre ferme sous le tablier. Placez les culées au bord de l’obstacle.`;
+      }
+    }
   }
   // Coût réparti pour l'aperçu (le total reste la somme exacte).
   if (plan.tiles.length > 0) {
@@ -2184,6 +2303,148 @@ export function planBridge(options: BridgePlanOptions): BuildPlan {
     reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
   }
   return { ...plan, cost, valid: reason === null, reason };
+}
+
+/** Une pièce d'une liaison routière ou ferroviaire : approche ou pont. */
+export interface LinkedRoutePiece {
+  tool: 'road' | 'rail' | 'bridge';
+  from: BuildPoint;
+  to: BuildPoint;
+  axis: BuildAxis;
+  material?: BridgeMaterial;
+}
+
+export interface LinkedRoutePlan {
+  pieces: LinkedRoutePiece[];
+  cost: number;
+}
+
+export interface LinkedRouteOptions {
+  map: MapSnapshot;
+  from: BuildPoint;
+  to: BuildPoint;
+  axis?: BuildAxis;
+  kind: BuildTransport;
+  company?: number;
+  budget?: number;
+  /** Largeur maximale d'un cours d'eau franchie par un pont. */
+  maxBridgeSpan?: number;
+}
+
+function linkBridgeMaterial(kind: BuildTransport, span: number): BridgeMaterial {
+  if (kind === 'rail') return span <= 5 ? 'steel' : 'tubular';
+  return span <= 2 ? 'concrete' : span <= 5 ? 'steel' : 'tubular';
+}
+
+/**
+ * Découpe une liaison en approches terrestres et ponts. Un pont n'est planifié
+ * que si le trajet droit rencontre un cours d'eau étroit, avec deux berges au
+ * même niveau et des rampes valides. Un lac trop large, une berge en falaise ou
+ * un tablier qui déborde rendent la liaison impossible (#201).
+ */
+export function planLinkedRoute(options: LinkedRouteOptions): LinkedRoutePlan | null {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const to = buildTile(options.to);
+  const axis = options.axis ?? axisForDrag(from, to);
+  const maxBridgeSpan = Math.max(1, options.maxBridgeSpan ?? 5);
+  const path = traceBuildPath(from, to, axis);
+  if (path.length < 3) return null;
+
+  const waterAt = (point: BuildPoint): boolean => {
+    const kind = TILE_KINDS[map.kind[tileIndex(point.x, point.y, map.width)] ?? 0] ?? 'void';
+    return kind === 'water' || kind === 'river' || kind === 'canal' || kind === 'lock';
+  };
+
+  const runs: { start: number; end: number }[] = [];
+  for (let i = 0; i < path.length; i += 1) {
+    const point = path[i];
+    if (!point || !waterAt(point)) continue;
+    let end = i;
+    while (end + 1 < path.length) {
+      const next = path[end + 1];
+      if (!next || !waterAt(next)) break;
+      end += 1;
+    }
+    runs.push({ start: i, end });
+    i = end;
+  }
+
+  if (runs.length === 0) {
+    const plan = planBuild({
+      map,
+      tool: options.kind,
+      from,
+      to,
+      axis,
+      company: options.company,
+      budget: options.budget,
+    });
+    if (!plan.valid) return null;
+    return { pieces: [{ tool: options.kind, from, to, axis }], cost: plan.cost };
+  }
+
+  for (const run of runs) {
+    if (run.start < 2 || run.end > path.length - 3) return null;
+    if (run.end - run.start + 1 > maxBridgeSpan) return null;
+    const bankA = path[run.start - 1];
+    const bankB = path[run.end + 1];
+    if (!bankA || !bankB) return null;
+    if (
+      (map.heightMap[tileIndex(bankA.x, bankA.y, map.width)] ?? 0) !==
+      (map.heightMap[tileIndex(bankB.x, bankB.y, map.width)] ?? 0)
+    ) {
+      return null;
+    }
+  }
+
+  const pieces: LinkedRoutePiece[] = [];
+  let cost = 0;
+  let cursor = 0;
+  const pushRoad = (startIndex: number, endIndex: number): boolean => {
+    if (startIndex > endIndex) return true;
+    const start = path[startIndex];
+    const end = path[endIndex];
+    if (!start || !end) return false;
+    const plan = planBuild({
+      map,
+      tool: options.kind,
+      from: start,
+      to: end,
+      axis,
+      company: options.company,
+      budget: options.budget,
+    });
+    if (!plan.valid) return false;
+    cost += plan.cost;
+    pieces.push({ tool: options.kind, from: start, to: end, axis });
+    return true;
+  };
+
+  for (const run of runs) {
+    if (!pushRoad(cursor, run.start - 2)) return null;
+    const bridgeFrom = path[run.start - 1];
+    const bridgeTo = path[run.end + 1];
+    if (!bridgeFrom || !bridgeTo) return null;
+    const span = Math.abs(bridgeTo.x - bridgeFrom.x) + Math.abs(bridgeTo.y - bridgeFrom.y);
+    const material = linkBridgeMaterial(options.kind, span);
+    const plan = planBridge({
+      map,
+      from: bridgeFrom,
+      to: bridgeTo,
+      settings: { kind: options.kind, material },
+      company: options.company,
+      budget: options.budget,
+    });
+    if (!plan.valid) return null;
+    cost += plan.cost;
+    pieces.push({ tool: 'bridge', from: bridgeFrom, to: bridgeTo, axis, material });
+    cursor = run.end + 2;
+  }
+  if (!pushRoad(cursor, path.length - 1)) return null;
+  if (pieces.length === 0) return null;
+  if (options.budget !== undefined && cost > options.budget) return null;
+  return { pieces, cost };
 }
 
 /** Plan d'un tunnel rectiligne entre deux portails (#155). */

@@ -5,8 +5,8 @@
  * il n'y a jamais un mesh par segment d'ouvrage. Deux niveaux de détail sont
  * construits une fois :
  *
- * - base : tablier, rampes, encadrements de portails — visible de loin ;
- * - détail : garde-corps, piles et claveaux — visible à courte distance.
+ * - base : tablier, rampes, garde-corps et piles — visible de loin ;
+ * - détail : poteaux, chapiteaux, pylônes et claveaux — visible de près.
  *
  * Le snapshot fournit `structures[]` quand le moteur les expose ; sinon la
  * couche infère des ouvrages rectilignes à partir des types de tuiles, ce qui
@@ -16,12 +16,14 @@
 import * as THREE from 'three';
 import {
   COMPANY_NONE,
+  TILE_FLAG,
   TILE_KIND_INDEX,
   type BridgeMaterial,
   type MapSnapshot,
   type StructureSnapshot,
+  type StructureTransport,
 } from '../engine/protocol';
-import { sampleHeightWorld, tileIndex } from '../game/mapGrid';
+import { isWaterKind, sampleHeightWorld, tileIndex, tileKindAt } from '../game/mapGrid';
 import type { QualityLevel } from './quality';
 
 const TILE_KIND_BRIDGE = TILE_KIND_INDEX.bridge;
@@ -38,9 +40,13 @@ const MATERIAL_COLOURS: Record<BridgeMaterial, { deck: number; side: number; rai
 
 const PORTAL_COLOUR = 0x6b655b;
 const PORTAL_DARK = 0x1f2226;
-const DECK_THICKNESS = 0.18;
-const RAIL_HEIGHT = 0.34;
+const DECK_THICKNESS = 0.13;
+const RAIL_HEIGHT = 0.24;
 const PILLAR_INTERVAL = 3;
+/** Longueur d'une rampe, en tuiles (approche validée sur une tuile). */
+const RAMP_RUN = 1.45;
+/** Rampe allongée quand la tuile suivante est plate et constructible. */
+const RAMP_RUN_LONG = 2;
 const DETAIL_RANGE_MEDIUM = 48;
 const DETAIL_RANGE_HIGH = 76;
 
@@ -166,6 +172,36 @@ function triangleCount(geometry: THREE.BufferGeometry | null): number {
   return position ? Math.floor(position.count / 3) : 0;
 }
 
+/** Tuile de terre ferme sur laquelle une rampe peut se raccorder. */
+function isBridgeApproachTile(map: MapSnapshot, x: number, y: number): boolean {
+  if (x < 0 || y < 0 || x >= map.width || y >= map.height) return false;
+  const kind = tileKindAt(map, x, y);
+  if (isWaterKind(kind) || kind === 'void') return false;
+  if (kind === 'bridge' || kind === 'tunnel' || kind === 'aqueduct') return false;
+  if (
+    kind === 'house' ||
+    kind === 'industry' ||
+    kind === 'station' ||
+    kind === 'airport' ||
+    kind === 'dock' ||
+    kind === 'object'
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Matériau crédible pour un ouvrage hérité qui n'expose pas `structures[]`.
+ * Le bois reste réservé aux très courtes portées routières : une traversée
+ * de lac ne doit pas devenir une pile de planches surdimensionnée.
+ */
+function inferredBridgeMaterial(transport: StructureTransport, span: number): BridgeMaterial {
+  if (transport === 'rail') return span <= 6 ? 'steel' : 'tubular';
+  if (span <= 3) return 'wood';
+  return span <= 6 ? 'steel' : 'concrete';
+}
+
 /** Lit un tableau `structures[]` absent en inférant les ouvrages de la carte. */
 export function inferStructures(map: MapSnapshot): StructureSnapshot[] {
   const structures: StructureSnapshot[] = [];
@@ -214,22 +250,60 @@ export function inferStructures(map: MapSnapshot): StructureSnapshot[] {
         }
         // Un ouvrage est rectiligne : on ignore une composante en L.
         if (minX !== maxX && minY !== maxY) continue;
-        const from = { x: minX, y: minY };
-        const to = { x: maxX, y: maxY };
-        const first = tileIndex(from.x, from.y, map.width);
-        const last = tileIndex(to.x, to.y, map.width);
+        let from = { x: minX, y: minY };
+        let to = { x: maxX, y: maxY };
+        let first = tileIndex(from.x, from.y, map.width);
+        let last = tileIndex(to.x, to.y, map.width);
         const company = map.owner[first] ?? COMPANY_NONE;
         if (kind === 'bridge') {
+          const dx = Math.sign(maxX - minX);
+          const dy = Math.sign(maxY - minY);
+          // Anciens réseaux de démonstration : le moteur ne marquait que les
+          // tuiles d'eau, sans culées. On rend la rampe crédible en étendant
+          // l'ouvrage jusqu'à la terre ferme de chaque côté.
+          if ((map.flags[first] ?? 0) & TILE_FLAG.WATER) {
+            const nx = from.x - dx;
+            const ny = from.y - dy;
+            if (isBridgeApproachTile(map, nx, ny)) {
+              from = { x: nx, y: ny };
+              first = tileIndex(nx, ny, map.width);
+            }
+          }
+          if ((map.flags[last] ?? 0) & TILE_FLAG.WATER) {
+            const nx = to.x + dx;
+            const ny = to.y + dy;
+            if (isBridgeApproachTile(map, nx, ny)) {
+              to = { x: nx, y: ny };
+              last = tileIndex(nx, ny, map.width);
+            }
+          }
+          let maxGround = Math.max(map.heightMap[first] ?? 0, map.heightMap[last] ?? 0);
+          for (const index of tiles) {
+            maxGround = Math.max(maxGround, map.heightMap[index] ?? 0);
+          }
+          const span = Math.abs(to.x - from.x) + Math.abs(to.y - from.y);
+          const nearby = [
+            { x: from.x - dx, y: from.y - dy },
+            { x: to.x + dx, y: to.y + dy },
+          ];
+          let rail = 0;
+          let road = 0;
+          for (const point of nearby) {
+            const neighbour = tileKindAt(map, point.x, point.y);
+            if (neighbour === 'rail') rail += 1;
+            else if (neighbour === 'road' || neighbour === 'crossing') road += 1;
+          }
+          const transport: StructureTransport = rail > road ? 'rail' : road > 0 ? 'road' : 'rail';
           structures.push({
             id: nextId,
             kind: 'bridge',
             company,
-            transport: 'rail',
-            material: 'wood',
+            transport,
+            material: inferredBridgeMaterial(transport, span),
             from,
             to,
-            length: tiles.length,
-            deckHeight: Math.max(map.heightMap[first] ?? 0, map.heightMap[last] ?? 0) + 2,
+            length: span + 1,
+            deckHeight: maxGround + 2,
           });
         } else {
           structures.push({
@@ -433,80 +507,284 @@ export class StructureLayer {
     const deckColour = new THREE.Color(palette.deck);
     const sideColour = new THREE.Color(palette.side);
     const railColour = new THREE.Color(palette.rail);
+    const trackColour = new THREE.Color(0x3a3a35);
     const dir = directionOf(structure);
     const perp = { x: -dir.y, y: dir.x };
-    const deckY = structure.deckHeight * 0.5 + 0.34;
-    const halfWidth = 0.42;
     const span =
       Math.abs(structure.to.x - structure.from.x) + Math.abs(structure.to.y - structure.from.y);
     const tiles = span + 1;
+    const halfWidth = structure.transport === 'road' ? 0.4 : 0.33;
+
+    // Le tablier doit rester au-dessus du relief hérité (anciennes cartes)
+    // comme du niveau OpenTTD exposé par le moteur.
+    let highestGround = 0;
+    for (let i = 0; i < tiles; i += 1) {
+      const cx = structure.from.x + dir.x * i + 0.5;
+      const cz = structure.from.y + dir.y * i + 0.5;
+      highestGround = Math.max(highestGround, sampleHeightWorld(map, cx, cz));
+    }
+    const deckY = Math.max(structure.deckHeight * 0.5 + 0.34, highestGround + 0.55);
+    const bottomY = deckY - DECK_THICKNESS;
+    const alongX = dir.x !== 0;
+
+    const pointAt = (
+      cx: number,
+      cz: number,
+      side: 1 | -1,
+      along: number,
+      height: number,
+    ): Point3 => ({
+      x: cx + dir.x * along + perp.x * halfWidth * side,
+      y: height,
+      z: cz + dir.y * along + perp.y * halfWidth * side,
+    });
 
     for (let i = 0; i < tiles; i += 1) {
       const cx = structure.from.x + dir.x * i + 0.5;
       const cz = structure.from.y + dir.y * i + 0.5;
       const ground = sampleHeightWorld(map, cx, cz);
-      const rampSide = i === 0 ? -1 : i === tiles - 1 ? 1 : 0;
-      const bottomY = deckY - DECK_THICKNESS;
-      const lateral = (side: 1 | -1, along: number, height: number): Point3 => ({
-        x: cx + dir.x * along + perp.x * halfWidth * side,
-        y: height,
-        z: cz + dir.y * along + perp.y * halfWidth * side,
-      });
+      const kind = tileKindAt(map, structure.from.x + dir.x * i, structure.from.y + dir.y * i);
+      const tileIndexNow = tileIndex(
+        structure.from.x + dir.x * i,
+        structure.from.y + dir.y * i,
+        map.width,
+      );
+      const waterBelow =
+        isWaterKind(kind) || ((map.flags[tileIndexNow] ?? 0) & TILE_FLAG.WATER) !== 0;
+      const isEnd = i === 0 || i === tiles - 1;
 
-      if (rampSide === 0) {
-        const outerEdge = 0.5;
-        const leftTopFront = lateral(1, -outerEdge, deckY);
-        const rightTopFront = lateral(-1, -outerEdge, deckY);
-        const leftTopBack = lateral(1, outerEdge, deckY);
-        const rightTopBack = lateral(-1, outerEdge, deckY);
-        const leftBottomFront = lateral(1, -outerEdge, bottomY);
-        const rightBottomFront = lateral(-1, -outerEdge, bottomY);
-        const leftBottomBack = lateral(1, outerEdge, bottomY);
-        const rightBottomBack = lateral(-1, outerEdge, bottomY);
-        quad(base, leftTopFront, leftTopBack, rightTopBack, rightTopFront, deckColour);
-        quad(base, rightBottomFront, rightBottomBack, leftBottomBack, leftBottomFront, sideColour);
-        quad(base, leftTopFront, rightTopFront, rightBottomFront, leftBottomFront, sideColour);
-        quad(base, rightTopBack, leftTopBack, leftBottomBack, rightBottomBack, sideColour);
-        quad(base, leftTopBack, leftTopFront, leftBottomFront, leftBottomBack, sideColour);
-        quad(base, rightTopFront, rightTopBack, rightBottomBack, rightBottomFront, sideColour);
-      } else {
-        // Rampe : la face extérieure rejoint le sol, la face intérieure est
-        // au niveau du tablier.
-        const outer = 0.5 * rampSide;
-        const inner = -0.5 * rampSide;
-        const outerY = ground + 0.06;
-        const leftOuter = lateral(1, outer, outerY);
-        const rightOuter = lateral(-1, outer, outerY);
-        const leftInner = lateral(1, inner, deckY);
-        const rightInner = lateral(-1, inner, deckY);
-        const leftOuterBottom = lateral(1, outer, outerY - 0.12);
-        const rightOuterBottom = lateral(-1, outer, outerY - 0.12);
-        const leftInnerBottom = lateral(1, inner, bottomY);
-        const rightInnerBottom = lateral(-1, inner, bottomY);
-        quad(base, leftOuter, leftInner, rightInner, rightOuter, deckColour);
-        quad(base, leftOuterBottom, leftOuter, leftInner, leftInnerBottom, sideColour);
-        quad(base, rightOuter, rightOuterBottom, rightInnerBottom, rightInner, sideColour);
-        quad(base, leftInner, rightInner, rightInnerBottom, leftInnerBottom, sideColour);
-        quad(base, leftOuter, leftOuterBottom, rightOuterBottom, rightOuter, sideColour);
+      // Dalle : dessus, dessous et chants latéraux. Épaisseur faible pour
+      // éviter l'effet « structure massive » des anciens tabliers.
+      const leftTopFront = pointAt(cx, cz, 1, -0.5, deckY);
+      const rightTopFront = pointAt(cx, cz, -1, -0.5, deckY);
+      const leftTopBack = pointAt(cx, cz, 1, 0.5, deckY);
+      const rightTopBack = pointAt(cx, cz, -1, 0.5, deckY);
+      const leftBottomFront = pointAt(cx, cz, 1, -0.5, bottomY);
+      const rightBottomFront = pointAt(cx, cz, -1, -0.5, bottomY);
+      const leftBottomBack = pointAt(cx, cz, 1, 0.5, bottomY);
+      const rightBottomBack = pointAt(cx, cz, -1, 0.5, bottomY);
+      quad(base, leftTopFront, leftTopBack, rightTopBack, rightTopFront, deckColour);
+      quad(base, rightBottomFront, rightBottomBack, leftBottomBack, leftBottomFront, sideColour);
+      quad(base, leftTopFront, rightTopFront, rightBottomFront, leftBottomFront, sideColour);
+      quad(base, rightTopBack, leftTopBack, leftBottomBack, rightBottomBack, sideColour);
+      if (isEnd) {
+        const topLeft = i === 0 ? leftTopFront : leftTopBack;
+        const topRight = i === 0 ? rightTopFront : rightTopBack;
+        const bottomLeft = i === 0 ? leftBottomFront : leftBottomBack;
+        const bottomRight = i === 0 ? rightBottomFront : rightBottomBack;
+        quad(base, topLeft, topRight, bottomRight, bottomLeft, sideColour);
       }
 
-      // Garde-corps : uniquement en détail proche.
-      const railTop = deckY + RAIL_HEIGHT;
+      // Garde-corps visibles à tous les niveaux de détail.
       for (const side of [1, -1] as const) {
         box(
-          detail,
-          cx + perp.x * halfWidth * side * 0.92,
-          (deckY + railTop) / 2,
-          cz + perp.y * halfWidth * side * 0.92,
-          0.06,
+          base,
+          cx + perp.x * halfWidth * side * 0.94,
+          deckY + RAIL_HEIGHT / 2,
+          cz + perp.y * halfWidth * side * 0.94,
+          alongX ? 1 : 0.055,
           RAIL_HEIGHT,
-          0.06,
+          alongX ? 0.055 : 1,
           railColour,
         );
+        if (!isEnd && i % 2 === 0) {
+          box(
+            detail,
+            cx + perp.x * halfWidth * side * 0.94,
+            deckY + RAIL_HEIGHT / 2,
+            cz + perp.y * halfWidth * side * 0.94,
+            alongX ? 0.06 : 0.075,
+            RAIL_HEIGHT + 0.08,
+            alongX ? 0.075 : 0.06,
+            railColour,
+          );
+        }
       }
-      if (rampSide === 0 && i % PILLAR_INTERVAL === 0) {
-        const pillarHeight = Math.max(0.2, bottomY - ground);
-        box(detail, cx, ground + pillarHeight / 2, cz, 0.24, pillarHeight, 0.24, sideColour);
+
+      // Voie ou chaussée posée sur le tablier : le rendu des voies ignore les
+      // tuiles `bridge`, il faut donc la dessiner ici.
+      if (structure.transport === 'rail') {
+        for (const offset of [-0.16, 0.16] as const) {
+          box(
+            base,
+            cx + perp.x * offset,
+            deckY + 0.015,
+            cz + perp.y * offset,
+            alongX ? 1 : 0.065,
+            0.03,
+            alongX ? 0.065 : 1,
+            trackColour,
+          );
+        }
+      }
+
+      if (!isEnd && i % PILLAR_INTERVAL === 0) {
+        const drop = bottomY - ground;
+        const naturalValley =
+          kind === 'grass' ||
+          kind === 'clear' ||
+          kind === 'rough' ||
+          kind === 'trees' ||
+          kind === 'coast';
+        const canSupport = waterBelow || naturalValley;
+        // Jamais de pile sur une route, une voie, une gare ou un ouvrage :
+        // seules l'eau et les vallées portent des appuis.
+        if (canSupport && drop > 0.45) {
+          for (const side of [1, -1] as const) {
+            const px = cx + perp.x * halfWidth * 0.55 * side;
+            const pz = cz + perp.y * halfWidth * 0.55 * side;
+            box(base, px, ground + drop / 2, pz, 0.15, drop, 0.15, sideColour);
+          }
+          box(
+            detail,
+            cx,
+            bottomY - 0.055,
+            cz,
+            alongX ? 0.22 : halfWidth * 2,
+            0.11,
+            alongX ? halfWidth * 2 : 0.22,
+            sideColour,
+          );
+        }
+      }
+    }
+
+    // Rampes continues : le tablier descend sur deux tuiles d'approche au lieu
+    // de finir par une falaise verticale à l'aplomb de la culée.
+    for (const end of [0, tiles - 1] as const) {
+      if (tiles < 3) break;
+      const outward = end === 0 ? -1 : 1;
+      const cx = structure.from.x + dir.x * end + 0.5;
+      const cz = structure.from.y + dir.y * end + 0.5;
+      const edgeX = cx + dir.x * outward * 0.5;
+      const edgeZ = cz + dir.y * outward * 0.5;
+      const approachGround = sampleHeightWorld(
+        map,
+        cx + dir.x * outward * 1,
+        cz + dir.y * outward * 1,
+      );
+      const farGround = sampleHeightWorld(map, cx + dir.x * outward * 2, cz + dir.y * outward * 2);
+      const farKind = tileKindAt(
+        map,
+        Math.floor(cx + dir.x * outward * 2),
+        Math.floor(cz + dir.y * outward * 2),
+      );
+      const canExtend =
+        Math.abs(farGround - approachGround) < 0.05 &&
+        !isWaterKind(farKind) &&
+        farKind !== 'void' &&
+        farKind !== 'bridge' &&
+        farKind !== 'tunnel' &&
+        farKind !== 'aqueduct' &&
+        farKind !== 'house' &&
+        farKind !== 'industry' &&
+        farKind !== 'station';
+      const drop = Math.max(0.12, deckY - approachGround);
+      const run = Math.max(1.05, Math.min(canExtend ? RAMP_RUN_LONG : RAMP_RUN, drop * 1.7));
+      const endX = cx + dir.x * outward * (0.5 + run);
+      const endZ = cz + dir.y * outward * (0.5 + run);
+      const endTop = approachGround + 0.07;
+      const endBottom = approachGround + 0.02;
+      const topLeftEdge = pointAt(edgeX, edgeZ, 1, 0, deckY);
+      const topRightEdge = pointAt(edgeX, edgeZ, -1, 0, deckY);
+      const topLeftEnd = pointAt(endX, endZ, 1, 0, endTop);
+      const topRightEnd = pointAt(endX, endZ, -1, 0, endTop);
+      const bottomLeftEdge = pointAt(edgeX, edgeZ, 1, 0, bottomY);
+      const bottomRightEdge = pointAt(edgeX, edgeZ, -1, 0, bottomY);
+      const bottomLeftEnd = pointAt(endX, endZ, 1, 0, endBottom);
+      const bottomRightEnd = pointAt(endX, endZ, -1, 0, endBottom);
+      quad(base, topLeftEdge, topLeftEnd, topRightEnd, topRightEdge, deckColour);
+      quad(base, topLeftEdge, bottomLeftEdge, bottomLeftEnd, topLeftEnd, sideColour);
+      quad(base, topRightEdge, topRightEnd, bottomRightEnd, bottomRightEdge, sideColour);
+      quad(base, bottomLeftEdge, bottomRightEdge, bottomRightEnd, bottomLeftEnd, sideColour);
+      quad(base, topLeftEnd, bottomLeftEnd, bottomRightEnd, topRightEnd, sideColour);
+    }
+
+    // Détails propres au matériau : pas de poutres massives en bois sur les
+    // longues portées, mais des appuis et un tablier lisible.
+    if (structure.material === 'tubular') {
+      for (let i = 1; i < tiles - 1; i += 1) {
+        const cx = structure.from.x + dir.x * i + 0.5;
+        const cz = structure.from.y + dir.y * i + 0.5;
+        for (const side of [1, -1] as const) {
+          box(
+            detail,
+            cx + perp.x * (halfWidth + 0.06) * side,
+            deckY - 0.16,
+            cz + perp.y * (halfWidth + 0.06) * side,
+            alongX ? 1 : 0.16,
+            0.18,
+            alongX ? 0.16 : 1,
+            sideColour,
+          );
+        }
+      }
+    } else if (structure.material === 'steel' || structure.material === 'concrete') {
+      for (let i = 1; i < tiles - 1; i += 2) {
+        const cx = structure.from.x + dir.x * i + 0.5;
+        const cz = structure.from.y + dir.y * i + 0.5;
+        for (const side of [1, -1] as const) {
+          box(
+            detail,
+            cx + perp.x * (halfWidth + 0.02) * side,
+            bottomY - 0.14,
+            cz + perp.y * (halfWidth + 0.02) * side,
+            0.09,
+            0.28,
+            0.09,
+            sideColour,
+          );
+        }
+      }
+    } else if (
+      (structure.material === 'suspension' || structure.material === 'cantilever') &&
+      tiles >= 5
+    ) {
+      for (const i of [1, tiles - 2] as const) {
+        const cx = structure.from.x + dir.x * i + 0.5;
+        const cz = structure.from.y + dir.y * i + 0.5;
+        const towerHeight = 1.35;
+        for (const side of [1, -1] as const) {
+          box(
+            detail,
+            cx + perp.x * (halfWidth + 0.08) * side,
+            deckY + towerHeight / 2,
+            cz + perp.y * (halfWidth + 0.08) * side,
+            0.14,
+            towerHeight,
+            0.14,
+            sideColour,
+          );
+        }
+        box(
+          detail,
+          cx,
+          deckY + towerHeight,
+          cz,
+          alongX ? 0.12 : halfWidth * 2 + 0.3,
+          0.1,
+          alongX ? halfWidth * 2 + 0.3 : 0.12,
+          sideColour,
+        );
+        if (structure.material === 'suspension') {
+          for (let j = 1; j < tiles - 1; j += 2) {
+            const hx = structure.from.x + dir.x * j + 0.5;
+            const hz = structure.from.y + dir.y * j + 0.5;
+            for (const side of [1, -1] as const) {
+              const height = 0.75;
+              box(
+                detail,
+                hx + perp.x * (halfWidth + 0.02) * side,
+                deckY + height / 2 + 0.1,
+                hz + perp.y * (halfWidth + 0.02) * side,
+                0.025,
+                height,
+                0.025,
+                railColour,
+              );
+            }
+          }
+        }
       }
     }
   }

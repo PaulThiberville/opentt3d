@@ -135,6 +135,21 @@ describe('interpolation des véhicules', () => {
         vehicle({ id: 5, kind: 'road', cargo: { type: 'coal', amount: 0, capacity: 1 } }),
       ),
     ).toBe('truck');
+    // Le modèle catalogue prime sur la cargaison : un bus refité ou dont la
+    // cargaison est momentanément nulle reste visuellement un bus (#203).
+    expect(
+      modelKindFor(
+        vehicle({
+          id: 6,
+          kind: 'road',
+          model: 'bus_city',
+          cargo: { type: 'coal', amount: 0, capacity: 1 },
+        }),
+      ),
+    ).toBe('bus');
+    expect(modelKindFor(vehicle({ id: 7, kind: 'road', model: 'truck_tanker', cargo: null }))).toBe(
+      'truck',
+    );
   });
 
   it('interpole la direction avec rebouclage', () => {
