@@ -27,11 +27,13 @@ import { WasmEngine } from '../engine/WasmEngine';
 import { engineBuildId, resolveEngineModuleUrl, type EngineMode } from '../engine/loadEngine';
 import { Game, type GameSpeed, type Selection } from '../game/Game';
 import {
+  BRIDGE_MATERIAL_ORDER,
   cloneBuildSettings,
   commandFromPlan,
   createBuildSettings,
   nextDirection,
   planBuild,
+  type BridgeMaterial,
   type BuildPlan,
   type BuildSettings,
   type BuildTool,
@@ -252,6 +254,8 @@ const BUILD_TOOL_INTROS: Record<BuildTool, string> = {
   lock: 'Écluses : cliquez sur un canal relié à un bief voisin',
   aqueduct: 'Aqueducs : glissez d’une rive à l’autre au-dessus du val',
   crossing: 'Passage à niveau : cliquez sur une voie droite',
+  bridge: 'Ponts : glissez d’une culée à l’autre, M change le matériau',
+  tunnel: 'Tunnels : glissez entre deux portails à la même hauteur',
 };
 
 /** Touches 1/2/3 du mode photo, alignées sur `PHOTO_PRESET_IDS`. */
@@ -1235,6 +1239,23 @@ export class GameSession {
       this.undoLastBuild();
       return;
     }
+    if (!event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (event.code === 'KeyB') {
+        event.preventDefault();
+        this.setBuildTool('bridge');
+        return;
+      }
+      if (event.code === 'KeyT') {
+        event.preventDefault();
+        this.setBuildTool('tunnel');
+        return;
+      }
+      if (event.code === 'KeyM' && this.buildTool === 'bridge') {
+        event.preventDefault();
+        this.cycleBridgeMaterial();
+        return;
+      }
+    }
     if ((event.key === 'r' || event.key === 'R') && this.buildTool) {
       if (this.rotateBuild()) {
         event.preventDefault();
@@ -2146,6 +2167,18 @@ export class GameSession {
     this.hud?.setBuildOptions(this.buildTool, this.buildSettings);
   }
 
+  /** Change la famille de pont active (touche M). */
+  private cycleBridgeMaterial(): void {
+    const current = this.buildSettings.bridge.material;
+    const index = BRIDGE_MATERIAL_ORDER.indexOf(current);
+    const material: BridgeMaterial =
+      BRIDGE_MATERIAL_ORDER[(index + 1) % BRIDGE_MATERIAL_ORDER.length] ?? 'wood';
+    this.applyBuildSettings({
+      ...this.buildSettings,
+      bridge: { ...this.buildSettings.bridge, material },
+    });
+  }
+
   /** Pivote l'outil actif (R ou bouton « Pivoter »). */
   private rotateBuild(): boolean {
     if (
@@ -2298,6 +2331,16 @@ export class GameSession {
           tileKindAt(map, tile.x, tile.y) === 'crossing' && map.owner[tile.index] === company,
       );
     }
+    if (plan.tool === 'bridge') {
+      return plan.tiles.every((tile) => ((map.flags[tile.index] ?? 0) & TILE_FLAG.BRIDGE) !== 0);
+    }
+    if (plan.tool === 'tunnel') {
+      // OpenTTD ne marque que les deux portails ; le relief intermédiaire
+      // n'est pas une tuile de tunnel.
+      return [plan.tiles[0], plan.tiles[plan.tiles.length - 1]].every(
+        (tile) => tile !== undefined && ((map.flags[tile.index] ?? 0) & TILE_FLAG.TUNNEL) !== 0,
+      );
+    }
     const expected = plan.tool === 'station' ? 'station' : plan.depot?.kind;
     if (!expected) {
       return plan.tiles.every(
@@ -2400,6 +2443,38 @@ export class GameSession {
       }
       for (const command of commands) game.issueCommand(command);
       for (const command of restores) game.issueCommand(command);
+      this.lastBuild = null;
+      if (this.isNetwork) {
+        this.hud?.notify('info', 'Annulation envoyée : démolition au prochain tour.');
+        return;
+      }
+      game.refresh();
+      this.refreshHud();
+      return;
+    }
+
+    // Pont/tunnel : démolir une culée ou un portail suffit à retirer tout
+    // l'ouvrage dans OpenTTD ; les tuiles intermédiaires (eau, relief) ne
+    // doivent pas être « démolies » séparément.
+    if (last.tool === 'bridge' || last.tool === 'tunnel') {
+      const commands: EngineCommand[] = [];
+      for (const point of [last.from, last.to]) {
+        const clear = planBuild({
+          map,
+          tool: 'clear',
+          from: point,
+          company,
+          ...(money !== undefined ? { budget: money } : {}),
+        });
+        if (!clear.valid) continue;
+        commands.push(commandFromPlan(clear, company));
+      }
+      if (commands.length === 0) {
+        this.hud?.notify('warning', 'Démolition impossible : aucune extrémité accessible.');
+        this.lastBuild = null;
+        return;
+      }
+      for (const command of commands) game.issueCommand(command);
       this.lastBuild = null;
       if (this.isNetwork) {
         this.hud?.notify('info', 'Annulation envoyée : démolition au prochain tour.');

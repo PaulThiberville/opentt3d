@@ -15,7 +15,9 @@
 
 import {
   COMPANY_NONE,
+  TILE_FLAG,
   TILE_KIND_INDEX,
+  type BridgeMaterial,
   type EngineCommand,
   type MapSnapshot,
   type RailType,
@@ -29,6 +31,10 @@ import { RAIL_TYPE_SURCHARGE, RAIL_TYPE_CONVERT_COST, parseRailType } from './ra
 import { SIGNAL_CONVERT_COST, SIGNAL_KIND_COST, SIGNAL_REMOVE_COST } from './signalRules';
 
 export type { SignalTrack };
+export type { BridgeMaterial } from '../engine/protocol';
+
+/** Outils qui posent un ouvrage d'art (pont ou tunnel). */
+export type StructureBuildTool = 'bridge' | 'tunnel';
 
 export type BuildTool =
   | 'road'
@@ -44,7 +50,9 @@ export type BuildTool =
   | 'canal'
   | 'lock'
   | 'aqueduct'
-  | 'crossing';
+  | 'crossing'
+  | 'bridge'
+  | 'tunnel';
 
 /** Outils qui tracent un chemin de tuiles (route, rail, canal, démolition). */
 export type PathBuildTool = 'road' | 'rail' | 'clear' | 'canal';
@@ -113,6 +121,15 @@ export interface LockSettings {
   direction: BuildDirection | null;
 }
 
+export interface BridgeSettings {
+  kind: BuildTransport;
+  material: BridgeMaterial;
+}
+
+export interface TunnelSettings {
+  kind: BuildTransport;
+}
+
 export interface BuildSettings {
   station: StationSettings;
   depot: DepotSettings;
@@ -121,7 +138,148 @@ export interface BuildSettings {
   tree: TreeSettings;
   lock: LockSettings;
   rail: RailSettings;
+  bridge: BridgeSettings;
+  tunnel: TunnelSettings;
 }
+
+export interface BridgeMaterialSpec {
+  id: BridgeMaterial;
+  /** Portée minimale entre culées, en tuiles (0 = ponts accolés). */
+  minSpan: number;
+  /** Portée maximale entre culées, en tuiles. */
+  maxSpan: number;
+  /** Coût du tablier par tuile, réseau routier. */
+  roadCost: number;
+  /** Coût du tablier par tuile, réseau ferroviaire. */
+  railCost: number;
+  /** Entretien annuel par tuile, réseau routier. */
+  roadMaintenance: number;
+  /** Entretien annuel par tuile, réseau ferroviaire. */
+  railMaintenance: number;
+  /** Hauteur du tablier au-dessus des culées, en demi-niveaux. */
+  deckLift: number;
+  /** Teinte du tablier pour le rendu procédural. */
+  colour: number;
+}
+
+/**
+ * Familles exposées à l'UI. Les valeurs restent volontairement synthétiques :
+ * le moteur WASM choisit la spec OpenTTD réelle (année, portée, prix) et le
+ * mock reproduit ces invariants pour que l'aperçu soit juste.
+ */
+export const BRIDGE_MATERIALS: Record<BridgeMaterial, BridgeMaterialSpec> = {
+  wood: {
+    id: 'wood',
+    minSpan: 0,
+    maxSpan: 46,
+    roadCost: 110,
+    railCost: 150,
+    roadMaintenance: 14,
+    railMaintenance: 20,
+    deckLift: 2,
+    colour: 0x8a6a43,
+  },
+  concrete: {
+    id: 'concrete',
+    minSpan: 0,
+    maxSpan: 2,
+    roadCost: 150,
+    railCost: 205,
+    roadMaintenance: 18,
+    railMaintenance: 25,
+    deckLift: 2,
+    colour: 0xa8a49b,
+  },
+  steel: {
+    id: 'steel',
+    minSpan: 0,
+    maxSpan: 5,
+    roadCost: 195,
+    railCost: 265,
+    roadMaintenance: 22,
+    railMaintenance: 30,
+    deckLift: 2,
+    colour: 0x7d8b99,
+  },
+  suspension: {
+    id: 'suspension',
+    minSpan: 3,
+    maxSpan: 10,
+    roadCost: 265,
+    railCost: 355,
+    roadMaintenance: 28,
+    railMaintenance: 38,
+    deckLift: 3,
+    colour: 0xb06a45,
+  },
+  cantilever: {
+    id: 'cantilever',
+    minSpan: 3,
+    maxSpan: 9,
+    roadCost: 235,
+    railCost: 315,
+    roadMaintenance: 26,
+    railMaintenance: 35,
+    deckLift: 3,
+    colour: 0x9a5a4a,
+  },
+  tubular: {
+    id: 'tubular',
+    minSpan: 2,
+    maxSpan: 45,
+    roadCost: 305,
+    railCost: 410,
+    roadMaintenance: 32,
+    railMaintenance: 44,
+    deckLift: 3,
+    colour: 0x5f8f8a,
+  },
+};
+
+export const BRIDGE_MATERIAL_ORDER: readonly BridgeMaterial[] = [
+  'wood',
+  'concrete',
+  'steel',
+  'suspension',
+  'cantilever',
+  'tubular',
+];
+
+export const BRIDGE_MATERIAL_LABELS: Record<BridgeMaterial, string> = {
+  wood: 'bois',
+  concrete: 'béton',
+  steel: 'acier',
+  suspension: 'suspendu',
+  cantilever: 'cantilever',
+  tubular: 'tubulaire',
+};
+
+/** Coût fixe d'une culée (rampe), hors tablier. */
+export const BRIDGE_RAMP_COST: Record<BuildTransport, number> = {
+  road: 280,
+  rail: 460,
+};
+
+/** Longueur maximale d'un pont, culées comprises. */
+export const MAX_BRIDGE_TILES = 48;
+
+/** Coût d'un tunnel par tuile (portails et section enterrée). */
+export const TUNNEL_COST_PER_TILE: Record<BuildTransport, number> = {
+  road: 340,
+  rail: 580,
+};
+
+/** Surcoût par demi-niveau de profondeur d'un tunnel. */
+export const TUNNEL_DEPTH_COST = 120;
+
+/** Entretien annuel d'un tunnel par tuile. */
+export const TUNNEL_MAINTENANCE_PER_TILE: Record<BuildTransport, number> = {
+  road: 24,
+  rail: 34,
+};
+
+export const TUNNEL_MIN_TILES = 3;
+export const TUNNEL_MAX_TILES = 40;
 
 export const STATION_MAX_PLATFORMS = 8;
 export const STATION_MAX_LENGTH = 16;
@@ -235,6 +393,8 @@ export function createBuildSettings(): BuildSettings {
     tree: { size: 1 },
     lock: { direction: null },
     rail: { type: 'rail' },
+    bridge: { kind: 'rail', material: 'wood' },
+    tunnel: { kind: 'rail' },
   };
 }
 
@@ -248,6 +408,8 @@ export function cloneBuildSettings(settings: BuildSettings): BuildSettings {
     tree: { ...settings.tree },
     lock: { ...settings.lock },
     rail: { ...settings.rail },
+    bridge: { ...settings.bridge },
+    tunnel: { ...settings.tunnel },
   };
 }
 
@@ -293,6 +455,8 @@ export const BUILD_TOOL_LABELS: Record<BuildTool, string> = {
   crossing: 'Passage à niveau',
   unsignal: 'Retirer signal',
   convert: 'Type de rail',
+  bridge: 'Pont',
+  tunnel: 'Tunnel',
 };
 
 export interface BuildPlanTile {
@@ -309,6 +473,32 @@ export interface BuildPlanTile {
   connections: number;
   /** Coût de cette tuile, terrassement compris. */
   cost: number;
+  /**
+   * Hauteur monde de l'élément d'aperçu, en unités 3D. Les ponts la fixent au
+   * tablier ; les autres outils retombent sur `ground`.
+   */
+  elevation?: number;
+}
+
+export interface BridgePlanInfo {
+  kind: BuildTransport;
+  material: BridgeMaterial;
+  /** Distance entre les deux culées, en tuiles. */
+  span: number;
+  /** Rampes comprises. */
+  length: number;
+  /** Hauteur du tablier en demi-niveaux OpenTTD. */
+  deckHeight: number;
+  /** Entretien annuel estimé. */
+  maintenance: number;
+}
+
+export interface TunnelPlanInfo {
+  kind: BuildTransport;
+  length: number;
+  /** Épaisseur de terrain traversée, en demi-niveaux. */
+  depth: number;
+  maintenance: number;
 }
 
 export interface BuildPlan {
@@ -340,6 +530,8 @@ export interface BuildPlan {
   waterLevel?: number;
   /** Type de rail posé ou visé par une conversion (#157). */
   railType?: RailType;
+  bridge?: BridgePlanInfo;
+  tunnel?: TunnelPlanInfo;
 }
 
 export interface BuildPlanOptions {
@@ -424,18 +616,20 @@ export function axisForDrag(from: BuildPoint, to: BuildPoint): BuildAxis {
   return dx >= dy ? 'x' : 'y';
 }
 
-function occupancyReason(kind: TileKind, tool: BuildTool): string | null {
+function occupancyReason(kind: TileKind, tool: BuildTool, flags = 0): string | null {
   if (tool === 'clear') {
     if (
       kind === 'road' ||
       kind === 'rail' ||
       kind === 'bridge' ||
+      kind === 'tunnel' ||
       kind === 'station' ||
       kind === 'trees' ||
       kind === 'canal' ||
       kind === 'lock' ||
       kind === 'aqueduct' ||
-      kind === 'crossing'
+      kind === 'crossing' ||
+      (flags & (TILE_FLAG.BRIDGE | TILE_FLAG.TUNNEL)) !== 0
     ) {
       return null;
     }
@@ -448,7 +642,7 @@ function occupancyReason(kind: TileKind, tool: BuildTool): string | null {
     case 'river':
     case 'canal':
     case 'lock':
-      return 'Impossible de construire sur l’eau (ponts à venir).';
+      return 'Impossible de construire sur l’eau : utilisez un pont, un tunnel, un canal ou un aqueduc.';
     case 'house':
       return 'Impossible de construire sur un bâtiment.';
     case 'industry':
@@ -545,7 +739,7 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     const costOfTile = tileCost(tool, heightDelta, railType);
     cost += costOfTile;
 
-    let tileReason = occupancyReason(kind, tool);
+    let tileReason = occupancyReason(kind, tool, map.flags[index] ?? 0);
     if (
       !tileReason &&
       tool === 'clear' &&
@@ -681,6 +875,27 @@ export function commandFromPlan(
       },
     };
   }
+  if (plan.tool === 'bridge') {
+    return {
+      ...base,
+      options: {
+        kind: plan.bridge?.kind ?? 'rail',
+        material: plan.bridge?.material ?? 'wood',
+        length: plan.bridge?.length ?? pathLength(plan.from, plan.to),
+        direction: plan.axis,
+      },
+    };
+  }
+  if (plan.tool === 'tunnel') {
+    return {
+      ...base,
+      options: {
+        kind: plan.tunnel?.kind ?? 'rail',
+        length: plan.tunnel?.length ?? pathLength(plan.from, plan.to),
+        direction: plan.axis,
+      },
+    };
+  }
   if (plan.tool === 'unsignal') {
     return { ...base, options: {} };
   }
@@ -701,10 +916,11 @@ export function commandFromPlan(
 
 /** `true` si la tuile peut recevoir une voie du type demandé. */
 export function isBuildableTile(map: MapSnapshot, x: number, y: number, tool: BuildTool): boolean {
+  if (tool === 'bridge' || tool === 'tunnel') return false;
   if (!inBounds(map, x, y)) return false;
   const index = tileIndex(x, y, map.width);
   const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
-  return occupancyReason(kind, tool) === null;
+  return occupancyReason(kind, tool, map.flags[index] ?? 0) === null;
 }
 
 // ---------------------------------------------------------------------------
@@ -834,7 +1050,7 @@ export interface SignalPlanOptions extends InfrastructureOptions {
 }
 
 function emptyInfrastructurePlan(
-  tool: 'station' | 'depot' | 'signal' | 'unsignal' | 'convert',
+  tool: 'station' | 'depot' | 'signal' | 'unsignal' | 'convert' | 'bridge' | 'tunnel',
   from: BuildPoint,
   to: BuildPoint,
   axis: BuildAxis,
@@ -1757,6 +1973,295 @@ export function planCrossing(options: CrossingPlanOptions): BuildPlan {
     cost: CROSSING_COST,
   });
   return { ...plan, axis, cost: CROSSING_COST, valid: reason === null, reason };
+}
+
+/** Tracé rectiligne entre deux tuiles, culées/portails compris. */
+function straightStructurePoints(
+  from: BuildPoint,
+  to: BuildPoint,
+): { points: BuildPoint[]; axis: BuildAxis } | null {
+  if (from.x !== to.x && from.y !== to.y) return null;
+  const axis: BuildAxis = from.x !== to.x ? 'x' : 'y';
+  const points: BuildPoint[] = [];
+  const stepX = Math.sign(to.x - from.x);
+  const stepY = Math.sign(to.y - from.y);
+  let x = from.x;
+  let y = from.y;
+  points.push({ x, y });
+  while (x !== to.x || y !== to.y) {
+    if (axis === 'x') x += stepX;
+    else y += stepY;
+    points.push({ x, y });
+  }
+  return { points, axis };
+}
+
+/** Motif de refus d'une culée ou d'un portail, hors alignement et hauteur. */
+function structureEndReason(
+  map: MapSnapshot,
+  x: number,
+  y: number,
+  transport: BuildTransport,
+  label: 'culée' | 'portail',
+  company?: number,
+): string | null {
+  if (!inBounds(map, x, y)) return `Une ${label} est hors de la carte.`;
+  const index = tileIndex(x, y, map.width);
+  const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+  const owner = map.owner[index] ?? COMPANY_NONE;
+  if (kind === 'water' || kind === 'river' || kind === 'canal' || kind === 'void') {
+    return `Impossible de poser une ${label} sur l’eau ou le vide.`;
+  }
+  if (
+    kind === 'house' ||
+    kind === 'industry' ||
+    kind === 'station' ||
+    kind === 'airport' ||
+    kind === 'dock' ||
+    kind === 'object'
+  ) {
+    return `Impossible de poser une ${label} sur cet équipement.`;
+  }
+  if (kind === 'bridge' || kind === 'tunnel' || kind === 'aqueduct')
+    return 'Un ouvrage occupe déjà cette tuile.';
+  const ownKind: TileKind = transport === 'rail' ? 'rail' : 'road';
+  const otherKind: TileKind = transport === 'rail' ? 'road' : 'rail';
+  if (kind === otherKind) {
+    return transport === 'rail'
+      ? 'Une route occupe cette tuile : choisissez un pont routier.'
+      : 'Une voie ferrée occupe cette tuile : choisissez un pont ferroviaire.';
+  }
+  if (
+    kind === ownKind &&
+    company !== undefined &&
+    company !== COMPANY_NONE &&
+    owner !== COMPANY_NONE &&
+    owner !== company
+  ) {
+    return 'La voie appartient à une autre entreprise.';
+  }
+  return null;
+}
+
+/** Motif de refus d'une tuile traversée par un pont (au-dessus du sol). */
+function bridgeMiddleReason(map: MapSnapshot, x: number, y: number): string | null {
+  const index = tileIndex(x, y, map.width);
+  const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+  if (kind === 'house' || kind === 'industry' || kind === 'airport' || kind === 'dock') {
+    return 'Le tablier ne peut pas passer au-dessus de cet équipement.';
+  }
+  if (kind === 'station' || kind === 'object') return 'Le tablier ne peut pas passer ici.';
+  if (kind === 'bridge' || kind === 'tunnel' || kind === 'aqueduct')
+    return 'Un ouvrage croise déjà ce tracé.';
+  if (kind === 'void') return 'Le tablier sort de la carte.';
+  return null;
+}
+
+function structureTile(
+  map: MapSnapshot,
+  point: BuildPoint,
+  kind: TileKind,
+  cost: number,
+  elevation?: number,
+): BuildPlanTile {
+  const index = tileIndex(point.x, point.y, map.width);
+  const height = map.heightMap[index] ?? 0;
+  return {
+    x: point.x,
+    y: point.y,
+    index,
+    kind,
+    height,
+    ground: height * 0.5,
+    connections: 0,
+    cost,
+    ...(elevation !== undefined ? { elevation } : {}),
+  };
+}
+
+export interface BridgePlanOptions extends InfrastructureOptions {
+  settings: BridgeSettings;
+  to: BuildPoint;
+}
+
+export interface TunnelPlanOptions extends InfrastructureOptions {
+  settings: TunnelSettings;
+  to: BuildPoint;
+}
+
+/** Plan d'un pont rectiligne entre deux culées (#154). */
+export function planBridge(options: BridgePlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const to = buildTile(options.to);
+  const traced = straightStructurePoints(from, to);
+  const axis = traced?.axis ?? 'x';
+  const spec = BRIDGE_MATERIALS[options.settings.material] ?? BRIDGE_MATERIALS.wood;
+  const plan = emptyInfrastructurePlan('bridge', from, to, axis);
+  const span = Math.abs(to.x - from.x) + Math.abs(to.y - from.y);
+  const length = span + 1;
+  const deckHeight = (map.heightMap[tileIndex(from.x, from.y, map.width)] ?? 0) + spec.deckLift;
+  const maintenancePerTile =
+    options.settings.kind === 'rail' ? spec.railMaintenance : spec.roadMaintenance;
+  plan.bridge = {
+    kind: options.settings.kind,
+    material: spec.id,
+    span,
+    length,
+    deckHeight,
+    maintenance: Math.round(length * maintenancePerTile),
+  };
+
+  if (!traced) {
+    return { ...plan, reason: 'Un pont doit être droit, sur un axe X ou Y.' };
+  }
+  if (span === 0) return { ...plan, reason: 'Un pont relie deux tuiles distinctes.' };
+  if (length > MAX_BRIDGE_TILES) {
+    return {
+      ...plan,
+      reason: `Pont trop long (${length} tuiles, ${MAX_BRIDGE_TILES} maximum).`,
+    };
+  }
+  if (span < spec.minSpan) {
+    return {
+      ...plan,
+      reason: `Le pont ${BRIDGE_MATERIAL_LABELS[spec.id]} exige une portée d’au moins ${spec.minSpan} tuiles.`,
+    };
+  }
+  if (span > spec.maxSpan) {
+    return {
+      ...plan,
+      reason: `Le pont ${BRIDGE_MATERIAL_LABELS[spec.id]} ne dépasse pas ${spec.maxSpan} tuiles de portée.`,
+    };
+  }
+  if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
+    return { ...plan, reason: 'Pont hors de la carte.' };
+  }
+
+  const fromHeight = map.heightMap[tileIndex(from.x, from.y, map.width)] ?? 0;
+  const toHeight = map.heightMap[tileIndex(to.x, to.y, map.width)] ?? 0;
+  let reason: string | null = null;
+  if (fromHeight !== toHeight) {
+    reason = 'Les deux culées d’un pont doivent être à la même hauteur.';
+  }
+  const endReason =
+    structureEndReason(map, from.x, from.y, options.settings.kind, 'culée', options.company) ??
+    structureEndReason(map, to.x, to.y, options.settings.kind, 'culée', options.company);
+  reason = reason ?? endReason;
+
+  const deckElevation = deckHeight * 0.5 + 0.32;
+  const costPerTile = options.settings.kind === 'rail' ? spec.railCost : spec.roadCost;
+  let cost = BRIDGE_RAMP_COST[options.settings.kind] * 2;
+  for (let i = 0; i < traced.points.length; i += 1) {
+    const point = traced.points[i];
+    if (!point) continue;
+    const index = tileIndex(point.x, point.y, map.width);
+    const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    const middle = i > 0 && i < traced.points.length - 1;
+    if (middle) {
+      reason = reason ?? bridgeMiddleReason(map, point.x, point.y);
+      const ground = map.heightMap[index] ?? 0;
+      if (!reason && ground > fromHeight) {
+        reason = 'Terrain trop haut sous le tablier : rehaussez le pont ou changez de tracé.';
+      }
+      cost += costPerTile;
+    }
+    plan.tiles.push(structureTile(map, point, kind, 0, deckElevation));
+  }
+  // Coût réparti pour l'aperçu (le total reste la somme exacte).
+  if (plan.tiles.length > 0) {
+    const first = plan.tiles[0];
+    if (first) first.cost = BRIDGE_RAMP_COST[options.settings.kind];
+    const last = plan.tiles[plan.tiles.length - 1];
+    if (last && last !== first) last.cost = BRIDGE_RAMP_COST[options.settings.kind];
+    for (let i = 1; i < plan.tiles.length - 1; i += 1) {
+      const tile = plan.tiles[i];
+      if (tile) tile.cost = costPerTile;
+    }
+  }
+
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  return { ...plan, cost, valid: reason === null, reason };
+}
+
+/** Plan d'un tunnel rectiligne entre deux portails (#155). */
+export function planTunnel(options: TunnelPlanOptions): BuildPlan {
+  const map = options.map;
+  const from = buildTile(options.from);
+  const to = buildTile(options.to);
+  const traced = straightStructurePoints(from, to);
+  const axis = traced?.axis ?? 'x';
+  const plan = emptyInfrastructurePlan('tunnel', from, to, axis);
+  const length = Math.abs(to.x - from.x) + Math.abs(to.y - from.y) + 1;
+  const portalHeight = map.heightMap[tileIndex(from.x, from.y, map.width)] ?? 0;
+  plan.tunnel = {
+    kind: options.settings.kind,
+    length,
+    depth: 0,
+    maintenance: Math.round(length * TUNNEL_MAINTENANCE_PER_TILE[options.settings.kind]),
+  };
+
+  if (!traced) {
+    return { ...plan, reason: 'Un tunnel doit être droit, sur un axe X ou Y.' };
+  }
+  if (length < TUNNEL_MIN_TILES) {
+    return {
+      ...plan,
+      reason: `Un tunnel traverse au moins ${TUNNEL_MIN_TILES} tuiles (deux portails et du relief).`,
+    };
+  }
+  if (length > TUNNEL_MAX_TILES) {
+    return {
+      ...plan,
+      reason: `Tunnel trop long (${length} tuiles, ${TUNNEL_MAX_TILES} maximum).`,
+    };
+  }
+  if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
+    return { ...plan, reason: 'Tunnel hors de la carte.' };
+  }
+
+  const toHeight = map.heightMap[tileIndex(to.x, to.y, map.width)] ?? 0;
+  let reason: string | null = null;
+  if (portalHeight !== toHeight) {
+    reason = 'Les deux portails d’un tunnel doivent être à la même hauteur.';
+  }
+  reason =
+    reason ??
+    structureEndReason(map, from.x, from.y, options.settings.kind, 'portail', options.company) ??
+    structureEndReason(map, to.x, to.y, options.settings.kind, 'portail', options.company);
+
+  let maxMiddleHeight = portalHeight;
+  const costPerTile = TUNNEL_COST_PER_TILE[options.settings.kind];
+  let cost = 0;
+  for (let i = 0; i < traced.points.length; i += 1) {
+    const point = traced.points[i];
+    if (!point) continue;
+    const index = tileIndex(point.x, point.y, map.width);
+    const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    const height = map.heightMap[index] ?? 0;
+    const middle = i > 0 && i < traced.points.length - 1;
+    if (middle) {
+      maxMiddleHeight = Math.max(maxMiddleHeight, height);
+      if (kind === 'bridge' || kind === 'tunnel') {
+        reason = reason ?? 'Un ouvrage occupe déjà ce tracé.';
+      }
+    }
+    cost += costPerTile;
+    plan.tiles.push(structureTile(map, point, kind, costPerTile));
+  }
+  const depth = Math.max(0, maxMiddleHeight - portalHeight);
+  if (!reason && depth === 0) {
+    reason = 'Un tunnel doit traverser un relief plus haut que ses portails.';
+  }
+  cost += depth * TUNNEL_DEPTH_COST;
+  plan.tunnel.depth = depth;
+
+  if (!reason && options.budget !== undefined && cost > options.budget) {
+    reason = `Trésorerie insuffisante : ${Math.round(cost)} £ requis.`;
+  }
+  return { ...plan, cost, valid: reason === null, reason };
 }
 
 /** Type brut d'une tuile (helper de tests et de debug). */

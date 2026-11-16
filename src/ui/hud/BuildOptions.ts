@@ -9,6 +9,7 @@
 import { RAIL_TYPES, type RailType } from '../../game/railRules';
 import { SIGNAL_KINDS, type SignalDirection, type SignalKind } from '../../game/signalRules';
 import {
+  BRIDGE_MATERIAL_ORDER,
   STATION_MAX_LENGTH,
   STATION_MAX_PLATFORMS,
   TERRAFORM_MAX_SIZE,
@@ -19,6 +20,7 @@ import {
   type BuildDirection,
   type BuildSettings,
   type BuildTool,
+  type BridgeMaterial,
 } from '../../game/buildRules';
 import { el } from '../dom';
 import { formatInt } from '../format';
@@ -108,7 +110,9 @@ export class BuildOptions {
       tool !== 'convert' &&
       tool !== 'terraform' &&
       tool !== 'tree' &&
-      tool !== 'lock'
+      tool !== 'lock' &&
+      tool !== 'bridge' &&
+      tool !== 'tunnel'
     ) {
       this.element.hidden = true;
       return;
@@ -132,7 +136,11 @@ export class BuildOptions {
                     ? t('build.title.terraform')
                     : tool === 'tree'
                       ? t('build.title.tree')
-                      : t('build.title.lock');
+                      : tool === 'lock'
+                        ? t('build.title.lock')
+                        : tool === 'bridge'
+                          ? t('build.title.bridge')
+                          : t('build.title.tunnel');
     this.element.append(el('span', { className: 'hud-build-options-title', text: title }));
 
     if (tool === 'station') this.renderStation();
@@ -143,7 +151,9 @@ export class BuildOptions {
     else if (tool === 'convert') this.renderRailType(true);
     else if (tool === 'terraform') this.renderTerraform();
     else if (tool === 'tree') this.renderTree();
-    else this.renderLock();
+    else if (tool === 'lock') this.renderLock();
+    else if (tool === 'bridge') this.renderBridge();
+    else this.renderTunnel();
   }
 
   private renderTerraform(): void {
@@ -352,6 +362,65 @@ export class BuildOptions {
           type: t(RAIL_TYPE_LABEL_KEYS[current]),
           cost: formatInt(convert ? railConvertCost(current) : railBuildCost(current)),
         }),
+      }),
+    );
+  }
+
+  private renderBridge(): void {
+    const bridge = this.settings.bridge;
+    this.element.append(
+      this.segmented(
+        [
+          { id: 'rail', label: t('build.rail') },
+          { id: 'road', label: t('build.route') },
+        ],
+        bridge.kind,
+        (kind) => {
+          this.commit({ ...this.settings, bridge: { ...bridge, kind: kind as 'rail' | 'road' } });
+        },
+        'bridge-kind',
+        'build.bridgeKind',
+      ),
+      this.segmented(
+        BRIDGE_MATERIAL_ORDER.map((material: BridgeMaterial) => ({
+          id: material,
+          label: t(`build.material.${material}` as TranslationKey),
+        })),
+        bridge.material,
+        (material) => {
+          this.commit({
+            ...this.settings,
+            bridge: { ...bridge, material: material as BridgeMaterial },
+          });
+        },
+        'bridge-material',
+        'build.bridgeMaterial',
+      ),
+      el('span', {
+        className: 'hud-build-options-note',
+        text: t('build.bridgeNote'),
+      }),
+    );
+  }
+
+  private renderTunnel(): void {
+    const tunnel = this.settings.tunnel;
+    this.element.append(
+      this.segmented(
+        [
+          { id: 'rail', label: t('build.rail') },
+          { id: 'road', label: t('build.route') },
+        ],
+        tunnel.kind,
+        (kind) => {
+          this.commit({ ...this.settings, tunnel: { ...tunnel, kind: kind as 'rail' | 'road' } });
+        },
+        'tunnel-kind',
+        'build.tunnelKind',
+      ),
+      el('span', {
+        className: 'hud-build-options-note',
+        text: t('build.tunnelNote'),
       }),
     );
   }

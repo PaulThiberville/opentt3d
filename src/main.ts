@@ -1179,7 +1179,9 @@ function exposeDebug(current: GameSession): void {
         | 'canal'
         | 'lock'
         | 'aqueduct'
-        | 'crossing',
+        | 'crossing'
+        | 'bridge'
+        | 'tunnel',
     ) => current.setBuildTool(tool),
     session: current,
     screens,

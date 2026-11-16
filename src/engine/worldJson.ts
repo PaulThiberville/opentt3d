@@ -60,6 +60,7 @@ import {
   type OrderTimetable,
   type SnapshotMeta,
   type StationSnapshot,
+  type StructureSnapshot,
   type SubsidySnapshot,
   type TownActionKind,
   type TownActionSnapshot,
@@ -422,6 +423,58 @@ export function parseDepot(value: unknown): DepotSnapshot | null {
   };
 }
 
+const BRIDGE_MATERIALS = [
+  'wood',
+  'concrete',
+  'steel',
+  'suspension',
+  'cantilever',
+  'tubular',
+] as const;
+
+function bridgeMaterial(value: unknown): (typeof BRIDGE_MATERIALS)[number] {
+  return typeof value === 'string' && (BRIDGE_MATERIALS as readonly string[]).includes(value)
+    ? (value as (typeof BRIDGE_MATERIALS)[number])
+    : 'wood';
+}
+
+/** Pont ou tunnel exposé par le pont ; `null` si le type est inconnu. */
+export function parseStructure(value: unknown): StructureSnapshot | null {
+  const raw = record(value);
+  const kind = str(raw.kind, '');
+  const from = record(raw.from);
+  const to = record(raw.to);
+  const transport = raw.transport === 'road' ? 'road' : 'rail';
+  const id = Math.max(0, int(raw.id, 0));
+  const length = Math.max(1, int(raw.length, 1));
+  if (kind === 'bridge') {
+    return {
+      id,
+      kind: 'bridge',
+      company: companyId(raw.company),
+      transport,
+      material: bridgeMaterial(raw.material),
+      from: { x: int(from.x, 0), y: int(from.y, 0) },
+      to: { x: int(to.x, 0), y: int(to.y, 0) },
+      length,
+      deckHeight: Math.max(0, int(raw.deckHeight, 0)),
+    };
+  }
+  if (kind === 'tunnel') {
+    return {
+      id,
+      kind: 'tunnel',
+      company: companyId(raw.company),
+      transport,
+      from: { x: int(from.x, 0), y: int(from.y, 0) },
+      to: { x: int(to.x, 0), y: int(to.y, 0) },
+      length,
+      portalHeight: Math.max(0, int(raw.portalHeight, 0)),
+    };
+  }
+  return null;
+}
+
 /** Renvoie `null` pour un véhicule dont le type n'a pas de représentation 3D. */
 export function parseVehicle(value: unknown): VehicleSnapshot | null {
   const raw = record(value);
@@ -689,6 +742,11 @@ export function parseWorldJson(input: unknown): WorldSnapshot {
     const vehicle = parseVehicle(entry);
     if (vehicle) vehicles.push(vehicle);
   }
+  const structures: StructureSnapshot[] = [];
+  for (const entry of list(root.structures)) {
+    const structure = parseStructure(entry);
+    if (structure) structures.push(structure);
+  }
 
   return {
     meta,
@@ -699,6 +757,7 @@ export function parseWorldJson(input: unknown): WorldSnapshot {
     industries: list(root.industries).map(parseIndustry),
     stations: list(root.stations).map(parseStation),
     depots,
+    structures,
     vehicles,
     subsidies: parseSubsidies(root.subsidies),
     news: parseNews(root.news, meta.tick),

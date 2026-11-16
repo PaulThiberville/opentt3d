@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MockEngine } from '../src/engine/MockEngine';
-import { TILE_KIND_INDEX, type MapSnapshot } from '../src/engine/protocol';
-import { planBuild, type BuildPoint } from '../src/game/buildRules';
+import { TILE_FLAG, TILE_KIND_INDEX, type MapSnapshot } from '../src/engine/protocol';
+import { planBridge, planBuild, type BuildPoint } from '../src/game/buildRules';
 import { tileIndex } from '../src/game/mapGrid';
 
 async function createEngine(seed = 1234, size = 128): Promise<MockEngine> {
@@ -117,13 +117,59 @@ describe('MockEngine : construction', () => {
     expect(cleared.trackBits[tileIndex(from.x, from.y, cleared.width)]).toBe(0);
   });
 
-  it('annonce les outils non encore branchés', async () => {
+  it('construit un pont et le démolit', async () => {
     const engine = await createEngine();
-    mapOf(engine);
-    engine.send({ type: 'build', tool: 'bridge', company: 0, from: { x: 4, y: 4 } });
-    const snapshot = engine.snapshot();
-    expect(snapshot.news.some((item) => item.kind === 'error' && item.text.includes('Ponts'))).toBe(
-      true,
+    const map = mapOf(engine);
+    // Première paire de culées acceptée par les règles partagées.
+    let spot: { from: { x: number; y: number }; to: { x: number; y: number } } | null = null;
+    for (let y = 2; y < map.height - 2 && !spot; y += 1) {
+      for (let x = 2; x < map.width - 6 && !spot; x += 1) {
+        for (let span = 2; span <= 8 && !spot; span += 1) {
+          const plan = planBridge({
+            map,
+            from: { x, y },
+            to: { x: x + span, y },
+            settings: { kind: 'rail', material: 'wood' },
+            budget: 10_000_000,
+          });
+          if (plan.valid) {
+            spot = { from: { x, y }, to: { x: x + span, y } };
+          }
+        }
+      }
+    }
+    if (!spot) throw new Error('aucun site de pont dans la carte de test');
+    const moneyBefore = engine.snapshot().companies[0]?.money ?? 0;
+    engine.send({
+      type: 'build',
+      tool: 'bridge',
+      company: 0,
+      from: spot.from,
+      to: spot.to,
+      options: { kind: 'rail', material: 'wood' },
+    });
+    const after = engine.snapshot();
+    const built = after.map;
+    if (!built) throw new Error('le pont doit invalider la carte');
+    for (let x = spot.from.x; x <= spot.to.x; x += 1) {
+      const index = tileIndex(x, spot.from.y, built.width);
+      expect((built.flags[index] ?? 0) & TILE_FLAG.BRIDGE).toBe(TILE_FLAG.BRIDGE);
+    }
+    expect(built.kind[tileIndex(spot.from.x, spot.from.y, built.width)]).toBe(
+      TILE_KIND_INDEX.bridge,
+    );
+    expect(built.kind[tileIndex(spot.to.x, spot.to.y, built.width)]).toBe(TILE_KIND_INDEX.bridge);
+    expect(after.structures?.[0]).toMatchObject({ kind: 'bridge', material: 'wood', company: 0 });
+    expect((after.companies[0]?.money ?? 0) - moneyBefore).toBeLessThan(0);
+    expect(after.news.some((item) => item.text.includes('Pont en bois construit'))).toBe(true);
+
+    engine.send({ type: 'build', tool: 'clear', company: 0, from: spot.from, to: spot.to });
+    const cleared = engine.snapshot();
+    expect(cleared.structures).toEqual([]);
+    const restored = cleared.map;
+    if (!restored) throw new Error('la démolition doit invalider la carte');
+    expect(restored.kind[tileIndex(spot.from.x, spot.from.y, restored.width)]).toBe(
+      map.kind[tileIndex(spot.from.x, spot.from.y, map.width)],
     );
   });
 

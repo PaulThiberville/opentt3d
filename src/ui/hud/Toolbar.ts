@@ -98,6 +98,18 @@ const TOOLS: ToolDefinition[] = [
     labelKey: 'toolbar.crossing.label',
     hintKey: 'toolbar.crossing.hint',
   },
+  {
+    id: 'bridge',
+    icon: '⌁',
+    labelKey: 'toolbar.bridge.label',
+    hintKey: 'toolbar.bridge.hint',
+  },
+  {
+    id: 'tunnel',
+    icon: '◍',
+    labelKey: 'toolbar.tunnel.label',
+    hintKey: 'toolbar.tunnel.hint',
+  },
 ];
 
 const SHORT_LABELS: Record<BuildToolId, TranslationKey> = {
@@ -108,6 +120,8 @@ const SHORT_LABELS: Record<BuildToolId, TranslationKey> = {
   signal: 'toolbar.short.signal',
   unsignal: 'toolbar.short.unsignal',
   convert: 'toolbar.short.convert',
+  bridge: 'toolbar.short.bridge',
+  tunnel: 'toolbar.short.tunnel',
   clear: 'toolbar.short.road',
   terraform: 'toolbar.short.terraform',
   tree: 'toolbar.short.tree',

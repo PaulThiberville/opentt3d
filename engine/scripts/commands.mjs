@@ -848,7 +848,16 @@ async function runScenario(label) {
     ['JSON tronqué', '{', 2],
     ['outil inconnu', { type: 'build', tool: 'inconnu', from: roadFrom }, 3],
     ['hors carte', { type: 'build', tool: 'road', from: { x: -1, y: roadFrom.y } }, 4],
-    ['pont non supporté', { type: 'build', tool: 'bridge', from: roadFrom, to: roadTo }, 8],
+    [
+      'pont diagonal',
+      {
+        type: 'build',
+        tool: 'bridge',
+        from: roadFrom,
+        to: { x: roadFrom.x + 2, y: roadFrom.y + 1 },
+      },
+      4,
+    ],
     [
       'rail sur route',
       { type: 'build', tool: 'rail', from: roadFrom, to: { x: roadFrom.x + 1, y: roadFrom.y } },

@@ -328,6 +328,51 @@ export interface TownAuthoritySnapshot {
   actions: Record<TownActionKind, TownActionSnapshot>;
 }
 
+/** Matériau d'un pont, aligné sur les familles de ponts d'OpenTTD. */
+export type BridgeMaterial =
+  'wood' | 'concrete' | 'steel' | 'suspension' | 'cantilever' | 'tubular';
+
+/** Réseau porté par un pont ou un tunnel. */
+export type StructureTransport = 'road' | 'rail';
+
+/** Extrémité d'un ouvrage, en tuiles entières. */
+export interface StructureEnd {
+  x: number;
+  y: number;
+}
+
+/**
+ * Pont construit. `from` et `to` sont les deux culées (rampes) ; `length`
+ * compte les rampes et le tablier. `deckHeight` est exprimé en demi-niveaux
+ * OpenTTD, comme `heightMap`.
+ */
+export interface BridgeStructureSnapshot {
+  id: number;
+  kind: 'bridge';
+  company: CompanyId;
+  transport: StructureTransport;
+  material: BridgeMaterial;
+  from: StructureEnd;
+  to: StructureEnd;
+  length: number;
+  deckHeight: number;
+}
+
+/** Tunnel construit : deux portails et la longueur enterrée. */
+export interface TunnelStructureSnapshot {
+  id: number;
+  kind: 'tunnel';
+  company: CompanyId;
+  transport: StructureTransport;
+  from: StructureEnd;
+  to: StructureEnd;
+  length: number;
+  /** Hauteur des portails en demi-niveaux OpenTTD. */
+  portalHeight: number;
+}
+
+export type StructureSnapshot = BridgeStructureSnapshot | TunnelStructureSnapshot;
+
 export interface TownSnapshot {
   id: number;
   name: string;
@@ -442,6 +487,11 @@ export interface WorldSnapshot {
   depots: DepotSnapshot[];
   /** Signaux présents sur la carte (#156), dérivés de `map.signalData`. */
   signals?: SignalSnapshot[];
+  /**
+   * Ponts et tunnels, optionnel : les moteurs antérieurs à #154/#155 n'en
+   * produisent pas. Le rendu retombe alors sur une inférence depuis `map`.
+   */
+  structures?: StructureSnapshot[];
   vehicles: VehicleSnapshot[];
   /** Subventions proposées et attribuées (#166/#167). */
   subsidies?: SubsidySnapshot[];
@@ -579,6 +629,80 @@ export type EngineCommand =
       company: CompanyId;
       town: number;
     };
+
+/** Index OpenTTD du type de rail/route demandé (`rail_type`, `road_type`). */
+export type BuildRailTypeOption = number;
+
+/**
+ * Options typées de l'outil `bridge` (#154). `length` et `direction` sont des
+ * indications de l'aperçu : le pont est déterminé par `from` → `to`, comme
+ * dans OpenTTD où les deux culées doivent être alignées.
+ */
+export interface BridgeBuildOptions {
+  /** Réseau porté par l'ouvrage (défaut : rail). */
+  kind?: StructureTransport;
+  /** Famille de pont (défaut : wood). */
+  material?: BridgeMaterial;
+  /** Index brut `BridgeType` OpenTTD (0..12), prioritaire sur `material`. */
+  bridge?: number;
+  /** Longueur totale en tuiles, rampes comprises (contrôle de cohérence). */
+  length?: number;
+  /** Axe du pont (`x` ou `y`), déduit de `from`/`to` par le moteur. */
+  direction?: 'x' | 'y';
+  /** Type de rail OpenTTD (index) pour un pont ferroviaire. */
+  rail_type?: BuildRailTypeOption;
+  /** Type de route OpenTTD (index) pour un pont routier. */
+  road_type?: BuildRailTypeOption;
+}
+
+/** Options typées de l'outil `tunnel` (#155). */
+export interface TunnelBuildOptions {
+  kind?: StructureTransport;
+  length?: number;
+  direction?: 'x' | 'y';
+  rail_type?: BuildRailTypeOption;
+  road_type?: BuildRailTypeOption;
+}
+
+/** Codes d'erreur stables renvoyés par `ottd_command` pour les ouvrages. */
+export type BuildErrorCode =
+  | 'OK'
+  | 'INVALID_PARAMETER'
+  | 'UNKNOWN_TOOL'
+  | 'NO_ROAD_TYPE'
+  | 'NO_RAIL_TYPE'
+  | 'NOT_ENOUGH_MONEY'
+  | 'COMMAND_FAILED'
+  | 'BRIDGE_TOO_LONG'
+  | 'BRIDGE_THROUGH_MAP_BORDER'
+  | 'BRIDGEHEADS_NOT_SAME_HEIGHT'
+  | 'BRIDGE_TOO_LOW_FOR_TERRAIN'
+  | 'BRIDGE_TOO_HIGH_FOR_TERRAIN'
+  | 'TUNNEL_TOO_LONG'
+  | 'TUNNEL_THROUGH_MAP_BORDER'
+  | 'ANOTHER_TUNNEL_IN_THE_WAY'
+  | 'SITE_UNSUITABLE_FOR_TUNNEL'
+  | 'SLOPE_TOO_STEEP'
+  | 'TOO_CLOSE_TO_EDGE'
+  | 'MUST_DEMOLISH_BRIDGE_FIRST'
+  | 'ALREADY_BUILT'
+  | 'NOT_SUPPORTED';
+
+/** Résultat JSON d'une commande de construction d'ouvrage. */
+export interface StructureCommandResult {
+  ok: boolean;
+  code: BuildErrorCode | (string & {});
+  message: string;
+  detail?: string;
+  /** Coût effectivement débité (uniquement si `ok`). */
+  cost?: number;
+  /** Entretien annuel estimé, en livres. */
+  maintenance?: number;
+  /** Nombre de tuiles couvertes par l'ouvrage. */
+  tiles?: number;
+  /** Ouvrage créé, pour rafraîchir immédiatement le rendu. */
+  structure?: StructureSnapshot;
+}
 
 export interface EngineStatus {
   ready: boolean;

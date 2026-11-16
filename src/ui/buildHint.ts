@@ -29,6 +29,8 @@ const TOOL_LABEL_KEYS: Record<BuildTool, TranslationKey> = {
   lock: 'toolbar.lock.label',
   aqueduct: 'toolbar.aqueduct.label',
   crossing: 'toolbar.crossing.label',
+  bridge: 'toolbar.bridge.label',
+  tunnel: 'toolbar.tunnel.label',
 };
 
 const TOOL_HINT_KEYS: Record<BuildTool, TranslationKey> = {
@@ -46,6 +48,8 @@ const TOOL_HINT_KEYS: Record<BuildTool, TranslationKey> = {
   lock: 'build.hint.lock',
   aqueduct: 'build.hint.aqueduct',
   crossing: 'build.hint.crossing',
+  bridge: 'build.hint.bridge',
+  tunnel: 'build.hint.tunnel',
 };
 
 function countLabel(plan: BuildPlan): string {
@@ -55,6 +59,15 @@ function countLabel(plan: BuildPlan): string {
     return t(count > 1 ? 'build.count.signal.other' : 'build.count.signal.one', {
       count: formatted,
     });
+  }
+  if (plan.tool === 'bridge') {
+    return t('build.count.bridge', {
+      count: formatted,
+      span: formatInt(plan.bridge?.span ?? Math.max(0, count - 1)),
+    });
+  }
+  if (plan.tool === 'tunnel') {
+    return t('build.count.tunnel', { count: formatted });
   }
   if (plan.tool === 'station' && plan.station?.kind === 'road') {
     return t('build.count.tile.one', { count: '1' });
@@ -98,7 +111,21 @@ export function describeBuildPlan(
     };
   }
   const detail =
-    plan.tool === 'station' ? t('build.station.detail', { station: stationLabel(plan) }) : '';
+    plan.tool === 'station'
+      ? t('build.station.detail', { station: stationLabel(plan) })
+      : plan.tool === 'bridge'
+        ? t('build.bridge.detail', {
+            material: t(`build.material.${plan.bridge?.material ?? 'wood'}` as TranslationKey),
+            kind: t(plan.bridge?.kind === 'road' ? 'build.road' : 'build.rail'),
+            maintenance: formatMoney(plan.bridge?.maintenance ?? 0),
+          })
+        : plan.tool === 'tunnel'
+          ? t('build.tunnel.detail', {
+              kind: t(plan.tunnel?.kind === 'road' ? 'build.road' : 'build.rail'),
+              depth: formatInt(plan.tunnel?.depth ?? 0),
+              maintenance: formatMoney(plan.tunnel?.maintenance ?? 0),
+            })
+          : '';
   return {
     tone: 'valid',
     text: t('build.valid', {
