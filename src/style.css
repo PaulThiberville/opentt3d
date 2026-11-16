@@ -4172,6 +4172,50 @@ select.input {
   gap: 7px;
 }
 
+.hud-report-group-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid var(--hud-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.hud-report-group-form,
+.hud-report-group-actions,
+.hud-report-group-autoreplace {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: end;
+}
+
+.hud-report-group-form .hud-report-field {
+  flex: 1 1 150px;
+}
+
+.hud-report-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--hud-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.hud-report-select {
+  min-height: 28px;
+  max-width: 150px;
+  padding: 4px 6px;
+  border: 1px solid var(--hud-border);
+  border-radius: 8px;
+  background: rgba(8, 12, 17, 0.66);
+  color: var(--hud-text);
+  font: inherit;
+  font-size: 10.5px;
+}
+
 .hud-report-group-list {
   display: flex;
   flex-wrap: wrap;
@@ -4185,6 +4229,18 @@ select.input {
   background: rgba(255, 255, 255, 0.04);
   color: var(--hud-muted);
   font-size: 10.5px;
+}
+
+.hud-report-group-chip.is-active {
+  border-color: rgba(127, 212, 160, 0.5);
+  color: var(--hud-text);
+}
+
+.hud-report-group-auto {
+  display: block;
+  margin-top: 2px;
+  color: var(--hud-accent);
+  font-size: 9.5px;
 }
 
 .hud-report-vehicle-list {

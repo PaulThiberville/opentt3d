@@ -600,6 +600,76 @@ describe('mapping JSON → WorldSnapshot', () => {
     expect(vehicle?.orderDetails?.[2]?.options?.action).toBe('transfer');
   });
 
+  it('mappe les groupes, la fiabilité et les événements #163/#164', () => {
+    const world = parseWorldJson({
+      ...engineJson(),
+      groups: [
+        {
+          id: 2,
+          company: 0,
+          name: 'Ligne A',
+          kind: 'road',
+          parent: -1,
+          vehicles: 1,
+          autoreplace: { model: 'bus_intercity', whenOld: true },
+        },
+        { id: 3, company: 0, name: '', kind: 'inconnu' },
+      ],
+      vehicles: [
+        {
+          id: 9,
+          kind: 'road',
+          company: 0,
+          group: { id: 2, name: 'Ligne A' },
+          reliability: {
+            wear: 61,
+            reliability: 39,
+            breakdown: 'slowing',
+            breakdownTicks: 12,
+            lastServiceTick: null,
+            serviceIntervalDays: 120,
+            daysSinceService: 70,
+            maintenancePerYear: 480,
+          },
+        },
+      ],
+      events: [
+        { type: 'vehicle_breakdown', vehicle: 9, breakdown: 'stopped', tick: 40 },
+        { type: 'group_created', group: 2, company: 0, tick: 41 },
+        { type: 'group_deleted', group: 2, company: 0, tick: 42 },
+      ],
+    });
+    expect(world.groups).toEqual([
+      {
+        id: 2,
+        company: 0,
+        name: 'Ligne A',
+        kind: 'road',
+        parent: null,
+        vehicles: 1,
+        autoreplace: { model: 'bus_intercity', whenOld: true },
+      },
+    ]);
+    const vehicle = world.vehicles[0];
+    expect(vehicle?.group).toEqual({ id: 2, name: 'Ligne A' });
+    expect(vehicle?.reliability).toEqual({
+      wear: 61,
+      reliability: 39,
+      breakdown: 'slowing',
+      breakdownTicks: 12,
+      lastServiceTick: null,
+      serviceIntervalDays: 120,
+      daysSinceService: 70,
+      maintenancePerYear: 480,
+    });
+    expect(world.events.map((event) => event.type)).toEqual([
+      'vehicle_breakdown',
+      'group_created',
+      'group_deleted',
+    ]);
+    expect(world.events[0]).toMatchObject({ breakdown: 'stopped' });
+  });
+
   it('refuse un protocole incompatible', () => {
     const json = engineJson();
     (json.meta as Record<string, unknown>).protocol = PROTOCOL_VERSION + 1;

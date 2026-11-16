@@ -19,6 +19,7 @@ import type {
   EngineDriver,
   OrderOptions,
   TownActionKind,
+  VehicleKind,
   WorldSnapshot,
 } from '../engine/protocol';
 import { TILE_FLAG } from '../engine/protocol';
@@ -40,14 +41,22 @@ import {
 } from '../game/buildRules';
 import { tileKindAt } from '../game/mapGrid';
 import {
+  assignGroupCommand,
   buyVehicleCommand,
   cloneOrderOptions,
   cloneVehicleCommand,
+  createGroupCommand,
+  deleteGroupCommand,
   depotAtTile,
   depotOrder,
+  groupActionCommand,
+  groupAutoreplaceCommand,
   orderVehicleCommand,
   ordersFromSnapshot,
   refitVehicleCommand,
+  renameGroupCommand,
+  sendVehicleToDepotCommand,
+  serviceVehicleCommand,
   stationAtTile,
   stationOrder,
   validateVehicleOrders,
@@ -1180,6 +1189,15 @@ export class GameSession {
       onAddConditionalOrder: (vehicleId) => this.addConditionalOrder(vehicleId),
       onShareOrders: (vehicleId, targetId) => this.shareOrders(vehicleId, targetId),
       onCloneVehicle: (vehicleId) => this.cloneVehicle(vehicleId),
+      onServiceVehicle: (vehicleId) => this.serviceVehicle(vehicleId),
+      onSendVehicleToDepot: (vehicleId) => this.sendVehicleToDepot(vehicleId),
+      onCreateGroup: (kind, name) => this.createGroup(kind, name),
+      onRenameGroup: (groupId, name) => this.renameGroup(groupId, name),
+      onDeleteGroup: (groupId) => this.deleteGroup(groupId),
+      onAssignVehicleGroup: (vehicleId, groupId) => this.assignVehicleGroup(vehicleId, groupId),
+      onGroupAction: (groupId, action) => this.runGroupAction(groupId, action),
+      onGroupAutoreplace: (groupId, model, whenOld) =>
+        this.setGroupAutoreplace(groupId, model, whenOld),
       onCloseVehicle: () => this.clearSelection(),
       onPlaceFocus: (x, y) => this.focusPlace(x, y),
       onPlaceSelect: (target) => this.selectPlaceTarget(target),
@@ -1884,6 +1902,87 @@ export class GameSession {
     }
     game.refresh();
     this.refreshHud();
+  }
+
+  /** Entretien au dépôt (#163). */
+  private serviceVehicle(vehicleId: number): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(serviceVehicleCommand(company, vehicleId));
+  }
+
+  /** Envoi au dépôt sans entretien (#163). */
+  private sendVehicleToDepot(vehicleId: number): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueVehicleCommand(sendVehicleToDepotCommand(company, vehicleId));
+  }
+
+  /** Émet une commande de groupe, force le snapshot en solo puis rafraîchit le HUD. */
+  private issueGroupCommand(command: EngineCommand, message = 'Commande de groupe envoyée.'): void {
+    const game = this.game;
+    if (!game) return;
+    game.issueCommand(command);
+    if (this.isNetwork) {
+      this.hud?.notify('info', `${message} Elle sera appliquée au prochain tour.`);
+      return;
+    }
+    game.refresh();
+    this.refreshHud();
+  }
+
+  private createGroup(kind: VehicleKind, name: string): void {
+    const company = this.localCompanyId();
+    if (company === null) {
+      this.hud?.notify('warning', 'Aucune entreprise locale : création impossible.');
+      return;
+    }
+    this.issueGroupCommand(createGroupCommand(company, kind, name), 'Création du groupe envoyée.');
+  }
+
+  private renameGroup(groupId: number, name: string): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueGroupCommand(renameGroupCommand(company, groupId, name), 'Renommage envoyé.');
+  }
+
+  private deleteGroup(groupId: number): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueGroupCommand(deleteGroupCommand(company, groupId), 'Suppression envoyée.');
+  }
+
+  private assignVehicleGroup(vehicleId: number, groupId: number | null): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueGroupCommand(
+      assignGroupCommand(company, groupId, [vehicleId]),
+      'Affectation envoyée.',
+    );
+  }
+
+  private runGroupAction(
+    groupId: number,
+    action: 'start' | 'stop' | 'send_to_depot' | 'sell',
+  ): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    if (action === 'sell' && this.game?.getSelection()?.kind === 'vehicle') {
+      this.clearSelection();
+    }
+    this.issueGroupCommand(
+      groupActionCommand(company, groupId, action),
+      'Action de groupe envoyée.',
+    );
+  }
+
+  private setGroupAutoreplace(groupId: number, model: string | null, whenOld: boolean): void {
+    const company = this.localCompanyId();
+    if (company === null) return;
+    this.issueGroupCommand(
+      groupAutoreplaceCommand(company, groupId, model, whenOld),
+      'Autoreplace envoyé.',
+    );
   }
 
   /** Arme ou désarme l'ajout d'un ordre par clic sur la carte. */

@@ -21,6 +21,8 @@
 
 #include "ai/ai_info.hpp"
 #include "articulated_vehicles.h"
+#include "autoreplace_cmd.h"
+#include "autoreplace_func.h"
 #include "bridge.h"
 #include "bridge_map.h"
 #include "cargo_type.h"
@@ -47,6 +49,8 @@
 #include "engine_type.h"
 #include "gfx_func.h"
 #include "genworld.h"
+#include "group.h"
+#include "group_cmd.h"
 #include "industry.h"
 #include "industrytype.h"
 #include "landscape.h"
@@ -83,6 +87,7 @@
 #include "terraform_cmd.h"
 #include "tile_map.h"
 #include "timer/timer_game_calendar.h"
+#include "timer/timer_game_economy.h"
 #include "timer/timer_game_tick.h"
 #include "timetable_cmd.h"
 #include "town.h"
@@ -98,6 +103,7 @@
 #include "vehicle_base.h"
 #include "vehicle_cmd.h"
 #include "vehicle_type.h"
+#include "vehiclelist.h"
 #include "water_cmd.h"
 #include "water_map.h"
 #include "window_func.h"
@@ -131,6 +137,8 @@ namespace {
 
 /** Utilisé par le snapshot avant sa définition plus bas (#157). */
 const char *RailTypeName(RailType type);
+/** Utilisé par le snapshot des groupes avant sa définition plus bas (#164). */
+std::string EngineName(EngineID engine);
 
 bool _ottd_booted = false;
 bool _ottd_in_game = false;
@@ -1879,6 +1887,51 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 	}
 	out.push_back(']');
 
+	/* --- Groupes de véhicules (#164) -------------------------------------- */
+	/* Les groupes sont typés et propres à une entreprise. `autoreplace` est
+	 * déduit de la règle OpenTTD du premier véhicule du groupe : le pont ne
+	 * stocke qu'un couple moteur d'origine → moteur de remplacement. */
+	out += ",\"groups\":[";
+	bool first_group = true;
+	for (const Group *g : Group::Iterate()) {
+		if (!Company::IsValidID(g->owner)) continue;
+		uint32_t group_vehicles = 0;
+		std::string replace_model;
+		bool replace_when_old = false;
+		for (const Vehicle *v : Vehicle::Iterate()) {
+			if (v->group_id != g->index || !v->IsPrimaryVehicle()) continue;
+			group_vehicles++;
+			if (replace_model.empty()) {
+				const EngineID replacement = EngineReplacementForCompany(
+						Company::Get(g->owner), v->engine_type, g->index, &replace_when_old);
+				if (replacement != EngineID::Invalid()) replace_model = EngineName(replacement);
+			}
+		}
+
+		if (!first_group) out.push_back(',');
+		first_group = false;
+		const std::string group_name = g->name.empty()
+				? fmt::format("Groupe {}", g->index.base() + 1)
+				: g->name;
+		out += fmt::format(
+			"{{\"id\":{},\"company\":{},\"name\":", g->index.base(), ProtocolOwner(g->owner));
+		AppendJsonString(out, group_name);
+		out += fmt::format(
+			",\"kind\":\"{}\",\"parent\":{},\"vehicles\":{}",
+			VehicleKindName(g->vehicle_type),
+			g->parent == GroupID::Invalid() ? -1 : static_cast<int>(g->parent.base()),
+			group_vehicles);
+		if (!replace_model.empty()) {
+			out += ",\"autoreplace\":{\"model\":";
+			AppendJsonString(out, replace_model);
+			out += fmt::format(",\"whenOld\":{}}}", replace_when_old ? "true" : "false");
+		} else {
+			out += ",\"autoreplace\":null";
+		}
+		out.push_back('}');
+	}
+	out.push_back(']');
+
 	/* --- Ponts et tunnels (#154/#155) ------------------------------------- */
 	/* `structures` évite au rendu de deviner le matériau et les tabliers.
 	 * Les milieux de pont ne sont pas des tuiles MP_TUNNELBRIDGE : on émet un
@@ -1975,10 +2028,58 @@ void BuildWorldJson(std::string &out, uint32_t width, uint32_t height)
 			AppendOrderOptions(out, *order, timetable_started);
 			out.push_back('}');
 		}
-		out += fmt::format("],\"currentOrder\":{},\"profitLastYear\":{:.2f},\"ageDays\":{}}}",
+		out += fmt::format("],\"currentOrder\":{},\"profitLastYear\":{:.2f},\"ageDays\":{}",
 			static_cast<unsigned>(v->cur_real_order_index),
 			static_cast<double>(v->profit_last_year) / 256.0,
 			v->age.base());
+
+		/* Groupe de rattachement (#164). */
+		if (v->group_id != DEFAULT_GROUP && Group::IsValidID(v->group_id)) {
+			const Group *group = Group::Get(v->group_id);
+			const std::string group_name = group->name.empty()
+					? fmt::format("Groupe {}", group->index.base() + 1)
+					: group->name;
+			out += ",\"group\":{\"id\":";
+			out += fmt::format("{}", group->index.base());
+			out += ",\"name\":";
+			AppendJsonString(out, group_name);
+			out.push_back('}');
+		}
+
+		/* Usure, fiabilité et panne (#163). OpenTTD stocke la fiabilité sur
+		 * 16 bits ; on la normalise en pourcentage pour l'UI. */
+		const Engine *engine = v->GetEngine();
+		const uint32_t max_reliability = engine != nullptr && engine->reliability_max > 0
+				? engine->reliability_max
+				: v->reliability;
+		const uint32_t current_reliability = max_reliability > 0
+				? std::min<uint32_t>(v->reliability, max_reliability)
+				: 0;
+		const uint32_t wear = max_reliability > 0
+				? ((max_reliability - current_reliability) * 100) / max_reliability
+				: 0;
+		const char *breakdown = "none";
+		uint32_t breakdown_ticks = 0;
+		if (v->breakdown_ctr == 1) {
+			breakdown = "stopped";
+			breakdown_ticks = v->breakdown_delay;
+		} else if (v->breakdown_ctr == 2) {
+			breakdown = "slowing";
+			breakdown_ticks = 1;
+		}
+		const int64_t economy_day = TimerGameEconomy::date.base();
+		const uint32_t days_since_service = static_cast<uint32_t>(
+				std::max<int64_t>(0, economy_day - v->date_of_last_service.base()));
+		const uint16_t service_interval = v->GetServiceInterval() > 0
+				? v->GetServiceInterval()
+				: 120;
+		out += fmt::format(
+			",\"reliability\":{{\"wear\":{},\"reliability\":{},\"breakdown\":\"{}\","
+			"\"breakdownTicks\":{},\"lastServiceTick\":null,\"serviceIntervalDays\":{},"
+			"\"daysSinceService\":{},\"maintenancePerYear\":{}}}",
+			wear, 100 - wear, breakdown, breakdown_ticks, service_interval,
+			days_since_service, v->GetDisplayRunningCost());
+		out.push_back('}');
 	}
 	out.push_back(']');
 
@@ -2508,6 +2609,7 @@ struct CommandReply {
 	VehicleID vehicle = VehicleID::Invalid();
 	StationID station = StationID::Invalid();
 	DepotID depot = DepotID::Invalid();
+	GroupID group = GroupID::Invalid();
 	std::string model;
 };
 
@@ -2537,6 +2639,9 @@ void AppendReplyJson(std::string &out, const CommandReply &reply)
 	}
 	if (reply.depot != DepotID::Invalid()) {
 		out += fmt::format(",\"depotId\":{}", reply.depot.base());
+	}
+	if (reply.group != GroupID::Invalid()) {
+		out += fmt::format(",\"groupId\":{}", reply.group.base());
 	}
 	if (!reply.model.empty()) {
 		out += ",\"model\":";
@@ -4039,6 +4144,17 @@ VehicleType ModelVehicleType(const std::string &model)
 	return VEH_INVALID;
 }
 
+/** Type exact d'un groupe (`train`, `road`, `ship`, `aircraft`). */
+VehicleType ParseVehicleKind(const std::string &kind)
+{
+	const std::string needle = LowerAscii(kind);
+	if (needle == "train" || needle == "rail") return VEH_TRAIN;
+	if (needle == "road" || needle == "route") return VEH_ROAD;
+	if (needle == "ship" || needle == "bateau") return VEH_SHIP;
+	if (needle == "aircraft" || needle == "avion") return VEH_AIRCRAFT;
+	return VEH_INVALID;
+}
+
 /**
  * Résout la tuile du dépôt désigné par `depotId` (prioritaire) ou `depot {x,y}`
  * et vérifie qu'il appartient à `company`.
@@ -4166,6 +4282,33 @@ bool VehicleStartStop(CompanyID company, const JsonValue &root, CommandReply &re
 	reply.cost = result.GetCost();
 	reply.vehicle = vehicle->index;
 	return Succeed(reply, start ? "Véhicule démarré." : "Véhicule arrêté.");
+}
+
+/**
+ * Envoi au dépôt (#163). `service=true` demande un entretien immédiat à
+ * l'arrivée ; OpenTTD route le véhicule puis le service est appliqué par le
+ * moteur, le coût exact n'est donc pas connu au moment de la commande.
+ */
+bool VehicleDepot(CompanyID company, const JsonValue &root, CommandReply &reply, bool service)
+{
+	Vehicle *vehicle = FindVehicle(root, company, reply);
+	if (vehicle == nullptr) return false;
+	if (!vehicle->IsPrimaryVehicle()) {
+		return FailWith(reply, "NOT_PRIMARY_VEHICLE", "Seul un véhicule de tête peut rejoindre un dépôt.");
+	}
+	DepotCommandFlags flags{};
+	if (service) flags.Set(DepotCommandFlag::Service);
+	CommandCost test = RunCompanyCommand<CMD_SEND_VEHICLE_TO_DEPOT>(
+			company, vehicle->tile, true, vehicle->index, flags, VehicleListIdentifier{});
+	if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Envoi au dépôt refusé.");
+	CommandCost result = RunCompanyCommand<CMD_SEND_VEHICLE_TO_DEPOT>(
+			company, vehicle->tile, false, vehicle->index, flags, VehicleListIdentifier{});
+	if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Envoi au dépôt refusé.");
+	reply.cost = result.GetCost();
+	reply.vehicle = vehicle->index;
+	return Succeed(reply, service
+			? "Véhicule envoyé au dépôt pour entretien."
+			: "Véhicule envoyé au dépôt.");
 }
 
 /** Refit d'un véhicule vers une cargaison (#160). */
@@ -4615,6 +4758,302 @@ bool DispatchTownAction(CompanyID company, const JsonValue &root, CommandReply &
 		static_cast<int64_t>(result.GetCost())));
 }
 
+/* ------------------------------------------------------------------------- */
+/*  Groupes de véhicules (#164)                                              */
+/* ------------------------------------------------------------------------- */
+
+/** Groupe désigné par `group`, vérifié comme appartenant à `company`. */
+Group *ResolveGroup(const JsonValue &root, CompanyID company, CommandReply &reply)
+{
+	int id = 0;
+	if (!JsonGetInt(root.Find("group"), id) || id < 0 || id > 0xFFFF) {
+		FailWith(reply, "INVALID_PARAMETER", "Le champ « group » doit être un identifiant entier.");
+		return nullptr;
+	}
+	Group *group = Group::GetIfValid(GroupID(static_cast<uint16_t>(id)));
+	if (group == nullptr) {
+		FailWith(reply, "UNKNOWN_GROUP", fmt::format("Groupe {} inexistant.", id));
+		return nullptr;
+	}
+	if (group->owner != company) {
+		FailWith(reply, "WRONG_OWNER", "Ce groupe appartient à une autre entreprise.");
+		return nullptr;
+	}
+	return group;
+}
+
+/** Identifiants des véhicules de tête d'un groupe, dans l'ordre du pool. */
+std::vector<VehicleID> GroupVehicleIds(CompanyID company, const Group *group)
+{
+	std::vector<VehicleID> ids;
+	for (const Vehicle *v : Vehicle::Iterate()) {
+		if (v->owner != company || v->group_id != group->index) continue;
+		if (!v->IsPrimaryVehicle()) continue;
+		ids.push_back(v->index);
+	}
+	return ids;
+}
+
+bool GroupCreate(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	VehicleType type = VEH_ROAD;
+	std::string kind;
+	if (JsonGetString(root.Find("kind"), kind) && !kind.empty()) {
+		type = ParseVehicleKind(kind);
+		if (type == VEH_INVALID) {
+			return FailWith(reply, "INVALID_PARAMETER",
+					fmt::format("Type de groupe inconnu « {} ».", kind));
+		}
+	}
+
+	GroupID parent = GroupID::Invalid();
+	int parent_id = 0;
+	if (JsonGetInt(root.Find("parent"), parent_id) && parent_id >= 0) {
+		Group *parent_group = Group::GetIfValid(GroupID(static_cast<uint16_t>(parent_id)));
+		if (parent_group == nullptr || parent_group->owner != company ||
+				parent_group->vehicle_type != type) {
+			return FailWith(reply, "INVALID_PARAMETER",
+					"Le groupe parent doit appartenir à l'entreprise et partager le même type.");
+		}
+		parent = parent_group->index;
+	}
+
+	auto test = RunCompanyCommand<CMD_CREATE_GROUP>(
+			company, INVALID_TILE, true, type, parent);
+	if (std::get<0>(test).Failed()) {
+		return FailFromCommand(reply, std::get<0>(test), "COMMAND_FAILED", "Création du groupe refusée.");
+	}
+	auto result = RunCompanyCommand<CMD_CREATE_GROUP>(
+			company, INVALID_TILE, false, type, parent);
+	const CommandCost cost = std::get<0>(result);
+	if (cost.Failed()) {
+		return FailFromCommand(reply, cost, "COMMAND_FAILED", "Création du groupe refusée.");
+	}
+	const GroupID group_id = std::get<1>(result);
+	reply.group = group_id;
+	reply.cost = cost.GetCost();
+
+	std::string name;
+	if (JsonGetString(root.Find("name"), name) && !name.empty()) {
+		CommandCost rename = RunCompanyCommand<CMD_ALTER_GROUP>(
+				company, INVALID_TILE, false, AlterGroupMode::Rename, group_id,
+				GroupID::Invalid(), name);
+		if (rename.Failed()) {
+			return FailFromCommand(reply, rename, "COMMAND_FAILED", "Groupe créé, mais renommage refusé.");
+		}
+	}
+	return Succeed(reply, fmt::format("Groupe #{} créé.", group_id.base()));
+}
+
+bool GroupRename(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	Group *group = ResolveGroup(root, company, reply);
+	if (group == nullptr) return false;
+	std::string name;
+	if (!JsonGetString(root.Find("name"), name) || name.empty()) {
+		return FailWith(reply, "INVALID_PARAMETER", "Le champ « name » doit être un nom non vide.");
+	}
+	CommandCost test = RunCompanyCommand<CMD_ALTER_GROUP>(
+			company, INVALID_TILE, true, AlterGroupMode::Rename, group->index,
+			GroupID::Invalid(), name);
+	if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Renommage refusé.");
+	CommandCost result = RunCompanyCommand<CMD_ALTER_GROUP>(
+			company, INVALID_TILE, false, AlterGroupMode::Rename, group->index,
+			GroupID::Invalid(), name);
+	if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Renommage refusé.");
+	reply.group = group->index;
+	return Succeed(reply, "Groupe renommé.");
+}
+
+bool GroupDelete(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	Group *group = ResolveGroup(root, company, reply);
+	if (group == nullptr) return false;
+	const GroupID id = group->index;
+	CommandCost test = RunCompanyCommand<CMD_DELETE_GROUP>(
+			company, INVALID_TILE, true, id);
+	if (test.Failed()) return FailFromCommand(reply, test, "COMMAND_FAILED", "Suppression refusée.");
+	CommandCost result = RunCompanyCommand<CMD_DELETE_GROUP>(
+			company, INVALID_TILE, false, id);
+	if (result.Failed()) return FailFromCommand(reply, result, "COMMAND_FAILED", "Suppression refusée.");
+	reply.group = id;
+	return Succeed(reply, "Groupe supprimé.");
+}
+
+bool GroupAssign(CompanyID company, const JsonValue &root, CommandReply &reply, bool remove)
+{
+	GroupID target = DEFAULT_GROUP;
+	if (!remove) {
+		Group *group = ResolveGroup(root, company, reply);
+		if (group == nullptr) return false;
+		target = group->index;
+	}
+
+	const JsonValue *list_value = root.Find("vehicles");
+	if (list_value == nullptr || list_value->type != JsonValue::Type::Array ||
+			list_value->items.empty()) {
+		return FailWith(reply, "INVALID_PARAMETER", "« vehicles » doit être un tableau non vide.");
+	}
+
+	int changed = 0;
+	for (const JsonValue &item : list_value->items) {
+		int id = 0;
+		if (!JsonGetInt(&item, id) || id < 0) continue;
+		Vehicle *vehicle = Vehicle::GetIfValid(VehicleID(static_cast<uint16_t>(id)));
+		if (vehicle == nullptr || vehicle->owner != company) continue;
+		if (!vehicle->IsPrimaryVehicle()) continue;
+		if (!remove) {
+			Group *group = Group::Get(target);
+			if (group->vehicle_type != vehicle->type) continue;
+		}
+		CommandCost result = CostOf(RunCompanyCommand<CMD_ADD_VEHICLE_GROUP>(
+				company, vehicle->tile, false, target, vehicle->index, false,
+				VehicleListIdentifier{}));
+		if (result.Succeeded()) changed++;
+	}
+	if (changed == 0) {
+		return FailWith(reply, "COMMAND_FAILED", "Aucun véhicule n'a pu être affecté au groupe.");
+	}
+	reply.group = remove ? GroupID::Invalid() : target;
+	return Succeed(reply, remove
+			? fmt::format("{} véhicule(s) retiré(s) du groupe.", changed)
+			: fmt::format("{} véhicule(s) affecté(s) au groupe.", changed));
+}
+
+bool GroupBulk(CompanyID company, const JsonValue &root, CommandReply &reply,
+		const std::string &action)
+{
+	Group *group = ResolveGroup(root, company, reply);
+	if (group == nullptr) return false;
+	const std::vector<VehicleID> ids = GroupVehicleIds(company, group);
+	if (ids.empty()) {
+		return FailWith(reply, "EMPTY_GROUP", "Ce groupe ne contient aucun véhicule.");
+	}
+
+	Money total_cost = 0;
+	int changed = 0;
+	for (const VehicleID id : ids) {
+		Vehicle *vehicle = Vehicle::GetIfValid(id);
+		if (vehicle == nullptr || vehicle->owner != company) continue;
+		CommandCost result = CommandCost();
+		if (action == "start" || action == "stop") {
+			result = RunCompanyCommand<CMD_START_STOP_VEHICLE>(
+					company, vehicle->tile, false, id, false);
+		} else if (action == "send_to_depot") {
+			result = RunCompanyCommand<CMD_SEND_VEHICLE_TO_DEPOT>(
+					company, vehicle->tile, false, id, DepotCommandFlags{}, VehicleListIdentifier{});
+		} else if (action == "sell") {
+			const bool sell_chain = vehicle->type == VEH_TRAIN;
+			result = RunCompanyCommand<CMD_SELL_VEHICLE>(
+					company, vehicle->tile, false, id, sell_chain, false, CLIENT_ID_SERVER);
+		} else {
+			return FailWith(reply, "UNKNOWN_ACTION",
+					fmt::format("Action de groupe inconnue « {} ».", action));
+		}
+		if (result.Succeeded()) {
+			changed++;
+			total_cost += result.GetCost();
+		}
+	}
+	if (changed == 0) {
+		return FailWith(reply, "COMMAND_FAILED", "Aucune action de groupe n'a abouti.");
+	}
+	reply.cost = total_cost;
+	reply.group = group->index;
+	return Succeed(reply, fmt::format("{} véhicule(s) traités.", changed));
+}
+
+bool GroupAutoreplace(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	Group *group = ResolveGroup(root, company, reply);
+	if (group == nullptr) return false;
+	const std::vector<VehicleID> ids = GroupVehicleIds(company, group);
+	if (ids.empty()) {
+		return FailWith(reply, "EMPTY_GROUP",
+				"Le groupe doit contenir au moins un véhicule pour définir l'autoreplace.");
+	}
+	Vehicle *sample = Vehicle::GetIfValid(ids.front());
+	if (sample == nullptr) {
+		return FailWith(reply, "UNKNOWN_VEHICLE", "Véhicule de référence introuvable.");
+	}
+
+	EngineID new_engine = EngineID::Invalid();
+	const JsonValue *model_value = root.Find("model");
+	std::string model;
+	if (model_value != nullptr && !model_value->IsNull() &&
+			JsonGetString(model_value, model) && !model.empty()) {
+		new_engine = SelectEngine(company, sample->type, model);
+		if (new_engine == EngineID::Invalid()) {
+			return FailWith(reply, "NO_ENGINE",
+					fmt::format("Aucun moteur ne correspond à « {} » pour ce groupe.", model));
+		}
+	}
+
+	bool when_old = true;
+	const JsonValue *when_old_value = root.Find("whenOld");
+	if (when_old_value != nullptr && when_old_value->type == JsonValue::Type::Bool) {
+		when_old = when_old_value->boolean;
+	}
+
+	/* Une règle OpenTTD est indexée par moteur d'origine : on configure tous
+	 * les moteurs présents dans le groupe vers le même modèle cible. */
+	std::vector<EngineID> old_engines;
+	for (const VehicleID id : ids) {
+		const Vehicle *vehicle = Vehicle::GetIfValid(id);
+		if (vehicle == nullptr) continue;
+		if (std::find(old_engines.begin(), old_engines.end(), vehicle->engine_type) !=
+				old_engines.end()) {
+			continue;
+		}
+		old_engines.push_back(vehicle->engine_type);
+	}
+
+	int configured = 0;
+	Money total_cost = 0;
+	for (const EngineID old_engine : old_engines) {
+		CommandCost test = RunCompanyCommand<CMD_SET_AUTOREPLACE>(
+				company, INVALID_TILE, true, group->index, old_engine, new_engine, when_old);
+		if (test.Failed()) continue;
+		CommandCost result = RunCompanyCommand<CMD_SET_AUTOREPLACE>(
+				company, INVALID_TILE, false, group->index, old_engine, new_engine, when_old);
+		if (result.Failed()) continue;
+		configured++;
+		total_cost += result.GetCost();
+	}
+	if (configured == 0) {
+		return FailWith(reply, "COMMAND_FAILED",
+				"Autoreplace refusé : aucun moteur du groupe n'est compatible avec ce modèle.");
+	}
+	reply.cost = total_cost;
+	reply.group = group->index;
+	if (new_engine == EngineID::Invalid()) {
+		return Succeed(reply, fmt::format("Autoreplace désactivé pour {} moteur(s) du groupe.",
+				configured));
+	}
+	reply.model = EngineName(new_engine);
+	return Succeed(reply, fmt::format("Autoreplace configuré vers {} pour {} moteur(s){}.",
+			reply.model, configured, when_old ? " (véhicules anciens)" : ""));
+}
+
+bool DispatchGroup(CompanyID company, const JsonValue &root, CommandReply &reply)
+{
+	std::string action;
+	if (!JsonGetString(root.Find("action"), action)) {
+		return FailWith(reply, "UNKNOWN_ACTION", "Le champ « action » doit être une chaîne.");
+	}
+	action = LowerAscii(action);
+	if (action == "create" || action == "creer" || action == "créer") return GroupCreate(company, root, reply);
+	if (action == "rename" || action == "renommer") return GroupRename(company, root, reply);
+	if (action == "delete" || action == "supprimer") return GroupDelete(company, root, reply);
+	if (action == "assign" || action == "affecter") return GroupAssign(company, root, reply, false);
+	if (action == "remove" || action == "retirer") return GroupAssign(company, root, reply, true);
+	if (action == "autoreplace") return GroupAutoreplace(company, root, reply);
+	if (action == "start" || action == "stop" || action == "send_to_depot" || action == "sell") {
+		return GroupBulk(company, root, reply, action);
+	}
+	return FailWith(reply, "UNKNOWN_ACTION", fmt::format("Action de groupe inconnue « {} ».", action));
+}
+
 bool DispatchVehicle(CompanyID company, const JsonValue &root, CommandReply &reply)
 {
 	std::string action;
@@ -4630,6 +5069,8 @@ bool DispatchVehicle(CompanyID company, const JsonValue &root, CommandReply &rep
 	if (action == "order" || action == "ordre") return VehicleOrders(company, root, reply);
 	if (action == "refit" || action == "reconfigurer") return VehicleRefit(company, root, reply);
 	if (action == "clone" || action == "dupliquer") return VehicleClone(company, root, reply);
+	if (action == "service" || action == "entretenir") return VehicleDepot(company, root, reply, true);
+	if (action == "send_to_depot" || action == "depot" || action == "dépôt") return VehicleDepot(company, root, reply, false);
 	return FailWith(reply, "UNKNOWN_ACTION", fmt::format("Action véhicule inconnue « {} ».", action));
 }
 
@@ -4738,6 +5179,8 @@ int ExecuteCommandJson(std::string_view json)
 		DispatchFinance(company, root, reply);
 	} else if (type == "town_action" || type == "town") {
 		DispatchTownAction(company, root, reply);
+	} else if (type == "group" || type == "groups" || type == "groupe") {
+		DispatchGroup(company, root, reply);
 	} else if (type == "pause" || type == "speed" || type == "console") {
 		FailWith(reply, "NOT_SUPPORTED",
 				fmt::format("La commande « {} » est gérée par le pilote, pas par le pont (#11).", type));

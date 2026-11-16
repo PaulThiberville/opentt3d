@@ -164,6 +164,23 @@ export interface VehicleShareView {
   label: string;
 }
 
+/** Vue d'usure et d'entretien d'un véhicule (#163). */
+export interface VehicleReliabilityView {
+  wear: number;
+  reliability: number;
+  wearLabel: string;
+  reliabilityLabel: string;
+  breakdown: 'none' | 'slowing' | 'stopped';
+  breakdownLabel: string | null;
+  serviceIntervalLabel: string;
+  daysSinceService: number;
+  maintenanceLabel: string;
+  serviceCost: number;
+  serviceCostLabel: string;
+  canService: boolean;
+  reason: string | null;
+}
+
 export interface VehiclePanelView extends SelectionSummary {
   status: string;
   /** Nom du modèle catalogue, ou null pour la flotte de démonstration. */
@@ -186,6 +203,14 @@ export interface VehiclePanelView extends SelectionSummary {
   canSell: boolean;
   /** Le prochain clic sur la carte ajoute une gare/dépôt à la tournée. */
   orderPicking: boolean;
+  /** Usure, panne et entretien (#163), absent des anciens moteurs. */
+  reliability: VehicleReliabilityView | null;
+  /** Libellé du groupe (#164), ou null si non groupé. */
+  groupLabel: string | null;
+  /** Groupes de l'entreprise proposés à l'affectation. */
+  groupOptions: { id: number; label: string }[];
+  /** Envoi au dépôt possible (véhicule de l'entreprise hors dépôt). */
+  canSendToDepot: boolean;
   hint: string;
 }
 
@@ -377,6 +402,10 @@ export interface VehicleGroupView {
   id: string;
   label: string;
   count: number;
+  /** Type du groupe (train, road…), null pour « non groupé ». */
+  kind: string | null;
+  /** Résumé de la règle d'autoreplace, ou null. */
+  autoreplaceLabel: string | null;
 }
 
 export interface VehicleListRowView {
@@ -386,6 +415,8 @@ export interface VehicleListRowView {
   companyName: string;
   colour: number;
   kind: string;
+  /** Identifiant du groupe (`UNGROUPED_ID` si non groupé). */
+  groupId: string;
   groupLabel: string;
   status: number | null;
   statusLabel: string;
@@ -394,6 +425,8 @@ export interface VehicleListRowView {
   ageDays: number | null;
   ageLabel: string;
   orders: number;
+  reliability: number | null;
+  reliabilityLabel: string;
   isLocal: boolean;
   canSelect: boolean;
   canStart: boolean;
@@ -418,6 +451,14 @@ export interface VehicleListPanelView {
   groupOptions: ReportOption[];
   groupActions: ReportActionView[];
   groupNote: string;
+  /** Groupe actuellement sélectionné par le filtre, ou null (tous). */
+  selectedGroup: VehicleGroupView | null;
+  /** Création de groupe possible si le snapshot expose `groups`. */
+  canManageGroups: boolean;
+  /** Modèles compatibles avec le groupe sélectionné, pour l'autoreplace. */
+  autoreplaceOptions: ReportOption[];
+  /** Règle d'autoreplace active du groupe sélectionné. */
+  autoreplace: { model: string; whenOld: boolean } | null;
   empty: string;
   hint: string;
 }

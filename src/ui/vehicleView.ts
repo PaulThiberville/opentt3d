@@ -23,10 +23,13 @@ import {
 } from '../game/vehicleRules';
 import { RAIL_TYPE_LABELS } from '../game/railRules';
 import { modelKindFor } from '../game/vehicleInterpolation';
+import { serviceCost } from '../game/vehicleReliability';
+import { companyGroups, vehicleGroupLabel } from '../game/vehicleGroups';
 import { companyColour } from '../render/tileVisuals';
 import { vehicleVariantFor, type VehicleVariant } from '../render/vehicleModels';
 import { cargoLabel, vehicleLabel, vehicleStatusLabel } from './labels';
 import { formatInt, formatMoney } from './format';
+import { t } from './i18n';
 import { describeSelection } from './selection';
 import type { DepotPanelView, VehiclePanelView, VehicleOrderView } from './types';
 
@@ -202,6 +205,45 @@ export function describeVehiclePanel(
       })
     : [];
   const status = vehicleStatusLabel(vehicle.status);
+  const reliability = vehicle.reliability
+    ? (() => {
+        const cost = serviceCost(
+          vehicle.reliability.maintenancePerYear,
+          vehicle.reliability.daysSinceService,
+          vehicle.reliability.serviceIntervalDays,
+        );
+        const breakdownLabel =
+          vehicle.reliability.breakdown === 'slowing'
+            ? t('vehicle.reliability.breakdown.slowing')
+            : vehicle.reliability.breakdown === 'stopped'
+              ? t('vehicle.reliability.breakdown.stopped')
+              : null;
+        return {
+          wear: vehicle.reliability.wear,
+          reliability: vehicle.reliability.reliability,
+          wearLabel: t('vehicle.reliability.wearValue', {
+            value: formatInt(vehicle.reliability.wear),
+          }),
+          reliabilityLabel: t('vehicle.reliability.reliabilityValue', {
+            value: formatInt(vehicle.reliability.reliability),
+          }),
+          breakdown: vehicle.reliability.breakdown,
+          breakdownLabel,
+          serviceIntervalLabel: t('selection.unit.days', {
+            value: formatInt(vehicle.reliability.serviceIntervalDays),
+          }),
+          daysSinceService: vehicle.reliability.daysSinceService,
+          maintenanceLabel: t('vehicle.reliability.maintenanceValue', {
+            value: formatInt(vehicle.reliability.maintenancePerYear),
+          }),
+          serviceCost: cost,
+          serviceCostLabel: formatMoney(cost),
+          canService: true,
+          reason: null,
+        };
+      })()
+    : null;
+  const companyGroupsList = companyGroups(snapshot, vehicle.company);
   return {
     ...summary,
     status,
@@ -228,13 +270,17 @@ export function describeVehiclePanel(
     canStop: vehicle.status === 1 || vehicle.status === 2,
     canSell: true,
     orderPicking,
+    reliability,
+    groupLabel: vehicleGroupLabel(vehicle, snapshot),
+    groupOptions: companyGroupsList.map((group) => ({ id: group.id, label: group.name })),
+    canSendToDepot: !inDepot,
     hint:
       orders.length === 0
         ? 'Aucun ordre : cliquez sur « Ajouter une gare », puis sur une gare ou un dépôt de la carte.'
         : orderPicking
           ? 'Cliquez sur une gare ou un dépôt de la carte pour l’ajouter à la tournée.'
           : inDepot
-            ? 'Reconfigurez la cargaison, partagez la tournée ou démarrez le véhicule.'
+            ? 'Reconfigurez la cargaison, entretenez le véhicule ou démarrez-le.'
             : 'Modifiez les options d’un ordre avec ✎, puis démarrez ou arrêtez le véhicule.',
   };
 }

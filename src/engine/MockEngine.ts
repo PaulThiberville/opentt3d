@@ -41,6 +41,7 @@ import {
   type TownAuthoritySnapshot,
   type TownSnapshot,
   type VehicleKind,
+  type VehicleGroupSnapshot,
   type VehicleSnapshot,
   type WorldEvent,
   type WorldSnapshot,
@@ -113,6 +114,27 @@ import {
   type DepotKind,
   type VehicleOrder,
 } from '../game/vehicleRules';
+import {
+  BREAKDOWN_COOLDOWN_DAYS,
+  BREAKDOWN_SLOW_TICKS,
+  advanceBreakdown,
+  advanceWear,
+  breakdownSpeedFactor,
+  clampServiceInterval,
+  initialReliability,
+  reliabilitySnapshot,
+  rollBreakdown,
+  serviceCost,
+  shouldAutoreplace,
+  type ReliabilityTrack,
+} from '../game/vehicleReliability';
+import {
+  MAX_GROUPS,
+  compatibleAutoreplaceModel,
+  defaultGroupName,
+  isValidGroupName,
+  normalizeGroupName,
+} from '../game/vehicleGroups';
 
 /** Ticks moteur par jour de jeu (OpenTTD : `TICKS_PER_DAY`). */
 export const TICKS_PER_DAY = 74;
@@ -187,6 +209,21 @@ interface MockVehicle {
   orders: VehicleOrder[];
   profitLastYear: number;
   ageDays: number;
+  /** Groupe de véhicules (#164), null = non groupé. */
+  groupId: number | null;
+  /** Usure, fiabilité et panne en cours (#163). */
+  reliability: ReliabilityTrack;
+}
+
+/** Groupe de véhicules du mock (#164). */
+interface MockGroup {
+  id: number;
+  company: number;
+  name: string;
+  kind: VehicleKind;
+  parent: number | null;
+  replaceModel: string | null;
+  replaceWhenOld: boolean;
 }
 
 interface MockCompany {
@@ -375,6 +412,8 @@ interface MockWorld {
   structures: MockStructure[];
   vehicles: MockVehicle[];
   subsidies: MockSubsidy[];
+  /** Groupes de véhicules (#164). */
+  groups: MockGroup[];
 
   news: MockNews[];
   newsCursor: number;
@@ -432,12 +471,17 @@ interface SerializedWorld {
   depots?: MockDepot[];
   /** Absent des sauvegardes mock antérieures à #154/#155. */
   structures?: MockStructure[];
-  vehicles: (Omit<MockVehicle, 'pathLengths' | 'segmentStops'> & {
+  vehicles: (Omit<MockVehicle, 'pathLengths' | 'segmentStops' | 'reliability' | 'groupId'> & {
     segmentStops?: (MockStop | null)[];
     /** Ancien format (#29) : arrêts de gare uniquement. */
     segmentStations?: number[];
+    /** Absents des sauvegardes antérieures à #163/#164. */
+    groupId?: number | null;
+    reliability?: Partial<ReliabilityTrack>;
   })[];
   subsidies?: MockSubsidy[];
+  /** Absent des sauvegardes antérieures à #164. */
+  groups?: MockGroup[];
   news: MockNews[];
   /** Désastres (#172) ; absents des sauvegardes antérieures. */
   disastersEnabled?: boolean;
@@ -1528,6 +1572,12 @@ class WorldBuilder {
         orders: orders.map((order) => cloneOrder(order)),
         profitLastYear: Math.round(this.rng.float(8_000, 90_000)),
         ageDays: this.rng.int(40, 1_400),
+        groupId: null,
+        reliability: {
+          ...initialReliability(),
+          wear: this.rng.int(0, 65),
+          lastServiceTick: 0,
+        },
       };
       const offset = (n / count) * total + this.rng.float(-2, 2);
       placeOnPath(vehicle, ((offset % total) + total) % total);
@@ -1871,6 +1921,7 @@ class WorldBuilder {
       structures: this.structures,
       vehicles: this.vehicles,
       subsidies: this.subsidies,
+      groups: [],
       news: [
         {
           tick: 0,
@@ -3171,6 +3222,11 @@ function buyVehicle(
     orders: [],
     profitLastYear: 0,
     ageDays: 0,
+    groupId: null,
+    reliability: {
+      ...initialReliability(model.depot === 'rail' ? 150 : 110),
+      lastServiceTick: world.tick,
+    },
   };
   world.vehicles.push(vehicle);
   company.money -= cost;
@@ -3252,6 +3308,263 @@ function stopVehicle(
   vehicle.status = 0;
   vehicle.waitTicks = 0;
   addNews(world, 'info', `Véhicule #${vehicle.id} arrêté.`);
+}
+
+/** Entretien explicite d'un véhicule déjà au dépôt (#163). */
+function serviceVehicleCommand(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'vehicle' }>,
+  company: MockCompany,
+): void {
+  const vehicle = findVehicle(world, command.vehicle);
+  if (!vehicle) {
+    addNews(world, 'error', `Entretien refusé : véhicule #${command.vehicle ?? '?'} introuvable.`);
+    return;
+  }
+  if (vehicle.company !== company.id) {
+    addNews(world, 'error', 'Entretien refusé : ce véhicule ne vous appartient pas.');
+    return;
+  }
+  if (vehicle.status !== 3 && !sendVehicleToDepot(world, vehicle)) return;
+  serviceVehicle(world, vehicle, company);
+  updateVehiclesTransforms(world);
+}
+
+/** Envoi au dépôt sans entretien immédiat (#163). */
+function sendToDepotCommand(
+  world: MockWorld,
+  command: Extract<EngineCommand, { type: 'vehicle' }>,
+  company: MockCompany,
+): void {
+  const vehicle = findVehicle(world, command.vehicle);
+  if (!vehicle) {
+    addNews(world, 'error', `Dépôt refusé : véhicule #${command.vehicle ?? '?'} introuvable.`);
+    return;
+  }
+  if (vehicle.company !== company.id) {
+    addNews(world, 'error', 'Dépôt refusé : ce véhicule ne vous appartient pas.');
+    return;
+  }
+  if (sendVehicleToDepot(world, vehicle)) updateVehiclesTransforms(world);
+}
+
+// ---------------------------------------------------------------------------
+// Groupes de véhicules et actions groupées (#164)
+// ---------------------------------------------------------------------------
+
+function nextGroupId(world: MockWorld): number {
+  let next = 0;
+  for (const group of world.groups) next = Math.max(next, group.id + 1);
+  return next;
+}
+
+function groupById(world: MockWorld, id: number | undefined): MockGroup | null {
+  if (id === undefined || !Number.isFinite(id)) return null;
+  return world.groups.find((group) => group.id === Math.trunc(id)) ?? null;
+}
+
+function groupVehicleIds(world: MockWorld, group: MockGroup): number[] {
+  return world.vehicles
+    .filter((vehicle) => vehicle.company === group.company && vehicle.groupId === group.id)
+    .map((vehicle) => vehicle.id);
+}
+
+/** Applique une commande de groupe ; les actions groupées réutilisent les règles véhicule. */
+function applyGroup(world: MockWorld, command: Extract<EngineCommand, { type: 'group' }>): void {
+  const company = world.companies[command.company];
+  if (!company) {
+    addNews(world, 'error', `Groupes : entreprise #${command.company} inconnue.`);
+    return;
+  }
+  if (company.bankrupt) {
+    addNews(world, 'error', 'Groupes : votre entreprise est en faillite.');
+    return;
+  }
+  const group = groupById(world, command.group);
+
+  switch (command.action) {
+    case 'create': {
+      const kind = command.kind ?? 'road';
+      const owned = world.groups.filter((item) => item.company === company.id).length;
+      if (owned >= MAX_GROUPS) {
+        addNews(world, 'error', `Groupes : ${MAX_GROUPS} groupes maximum par entreprise.`);
+        return;
+      }
+      const rawName = command.name ?? '';
+      if (rawName.trim() && !isValidGroupName(rawName)) {
+        addNews(world, 'error', 'Groupe refusé : nom vide ou trop long.');
+        return;
+      }
+      const parent = groupById(world, command.parent);
+      if (parent && (parent.company !== company.id || parent.kind !== kind)) {
+        addNews(
+          world,
+          'error',
+          'Groupe refusé : le parent doit être de votre entreprise et du même type.',
+        );
+        return;
+      }
+      const id = nextGroupId(world);
+      const created: MockGroup = {
+        id,
+        company: company.id,
+        name: normalizeGroupName(rawName) || defaultGroupName(id),
+        kind,
+        parent: parent?.id ?? null,
+        replaceModel: null,
+        replaceWhenOld: true,
+      };
+      world.groups.push(created);
+      addNews(world, 'info', `Groupe « ${created.name} » créé (${kind}).`);
+      addEvent(world, {
+        type: 'group_created',
+        group: created.id,
+        company: company.id,
+        tick: world.tick,
+      });
+      return;
+    }
+    case 'rename': {
+      if (!group || group.company !== company.id) {
+        addNews(world, 'error', 'Renommage refusé : groupe introuvable.');
+        return;
+      }
+      const name = normalizeGroupName(command.name ?? '');
+      if (!name) {
+        addNews(world, 'error', 'Renommage refusé : le nom ne peut pas être vide.');
+        return;
+      }
+      group.name = name;
+      addNews(world, 'info', `Groupe #${group.id} renommé « ${name} ».`);
+      return;
+    }
+    case 'delete': {
+      if (!group || group.company !== company.id) {
+        addNews(world, 'error', 'Suppression refusée : groupe introuvable.');
+        return;
+      }
+      for (const vehicle of world.vehicles) {
+        if (vehicle.groupId === group.id) vehicle.groupId = null;
+      }
+      for (const child of world.groups) {
+        if (child.parent === group.id) child.parent = group.parent;
+      }
+      world.groups = world.groups.filter((item) => item.id !== group.id);
+      addNews(world, 'info', `Groupe « ${group.name} » supprimé.`);
+      addEvent(world, {
+        type: 'group_deleted',
+        group: group.id,
+        company: company.id,
+        tick: world.tick,
+      });
+      return;
+    }
+    case 'assign':
+    case 'remove': {
+      const target = command.action === 'remove' ? null : group;
+      if (command.action === 'assign' && !target) {
+        addNews(world, 'error', 'Affectation refusée : groupe introuvable.');
+        return;
+      }
+      if (target && target.company !== company.id) {
+        addNews(
+          world,
+          'error',
+          'Affectation refusée : ce groupe appartient à une autre entreprise.',
+        );
+        return;
+      }
+      const ids = command.vehicles ?? [];
+      let changed = 0;
+      let rejected = 0;
+      for (const id of ids) {
+        const vehicle = findVehicle(world, id);
+        if (!vehicle || vehicle.company !== company.id) {
+          rejected += 1;
+          continue;
+        }
+        if (target && vehicle.kind !== target.kind) {
+          rejected += 1;
+          continue;
+        }
+        vehicle.groupId = target?.id ?? null;
+        changed += 1;
+      }
+      addNews(
+        world,
+        changed > 0 ? 'info' : 'error',
+        target
+          ? `${changed} véhicule(s) affecté(s) au groupe « ${target.name} »${rejected > 0 ? ` (${rejected} refusé(s))` : ''}.`
+          : `${changed} véhicule(s) retiré(s) de leur groupe${rejected > 0 ? ` (${rejected} refusé(s))` : ''}.`,
+      );
+      return;
+    }
+    default:
+      break;
+  }
+
+  if (!group || group.company !== company.id) {
+    addNews(world, 'error', 'Action de groupe refusée : groupe introuvable.');
+    return;
+  }
+
+  if (command.action === 'autoreplace') {
+    const modelId = command.model ?? null;
+    if (modelId === null || modelId === '') {
+      group.replaceModel = null;
+      addNews(world, 'info', `Autoreplace désactivé pour « ${group.name} ».`);
+      return;
+    }
+    const target = compatibleAutoreplaceModel(modelId, group.kind);
+    if (!target) {
+      addNews(
+        world,
+        'error',
+        `Autoreplace refusé : « ${modelId} » n’est pas un modèle ${group.kind} du catalogue.`,
+      );
+      return;
+    }
+    group.replaceModel = target.id;
+    group.replaceWhenOld = command.whenOld !== false;
+    addNews(
+      world,
+      'info',
+      `Autoreplace activé pour « ${group.name} » vers ${target.name} (${
+        group.replaceWhenOld ? 'véhicules anciens' : 'dès que possible'
+      }).`,
+    );
+    return;
+  }
+
+  const ids = groupVehicleIds(world, group);
+  if (ids.length === 0) {
+    addNews(world, 'warning', `Groupe « ${group.name} » : aucun véhicule à traiter.`);
+    return;
+  }
+  const base = {
+    type: 'vehicle' as const,
+    company: company.id,
+  };
+  switch (command.action) {
+    case 'start':
+      for (const id of ids) startVehicle(world, { ...base, action: 'start', vehicle: id }, company);
+      return;
+    case 'stop':
+      for (const id of ids) stopVehicle(world, { ...base, action: 'stop', vehicle: id }, company);
+      return;
+    case 'send_to_depot':
+      for (const id of ids) {
+        sendToDepotCommand(world, { ...base, action: 'send_to_depot', vehicle: id }, company);
+      }
+      updateVehiclesTransforms(world);
+      return;
+    case 'sell':
+      for (const id of [...ids])
+        sellVehicle(world, { ...base, action: 'sell', vehicle: id }, company);
+      return;
+    default:
+      break;
+  }
 }
 
 /** Valide et normalise une tournée reçue du client (#161). */
@@ -3426,6 +3739,11 @@ function cloneVehicle(
     waitTicks: 0,
     profitLastYear: 0,
     ageDays: 0,
+    groupId: source.groupId,
+    reliability: {
+      ...initialReliability(source.reliability.serviceIntervalDays),
+      lastServiceTick: world.tick,
+    },
   };
   if (command.shareOrders === false) {
     clone.orders = [];
@@ -3529,6 +3847,12 @@ function applyVehicle(
       break;
     case 'clone':
       cloneVehicle(world, command, company);
+      break;
+    case 'service':
+      serviceVehicleCommand(world, command, company);
+      break;
+    case 'send_to_depot':
+      sendToDepotCommand(world, command, company);
       break;
     default:
       break;
@@ -3954,6 +4278,7 @@ function moveVehicle(world: MockWorld, vehicle: MockVehicle): void {
   // 0 = arrêté par le joueur, 3 = en dépôt : le véhicule ne bouge pas.
   if (vehicle.status === 0 || vehicle.status === 3) return;
   if (vehicle.path.length < 2) return;
+  if (vehicle.reliability.breakdown === 'stopped') return;
   if (vehicle.waitTicks > 0) {
     const stop = vehicle.segmentStops[vehicle.segment] ?? null;
     if (stop && stop.kind === 'station') {
@@ -3976,6 +4301,7 @@ function moveVehicle(world: MockWorld, vehicle: MockVehicle): void {
   }
 
   let remaining = (vehicle.speed / TICKS_PER_DAY) * MOTION_SCALE;
+  remaining *= breakdownSpeedFactor(vehicle.reliability.breakdown);
   let guard = 0;
   while (remaining > 0 && guard < 12) {
     guard += 1;
@@ -4635,6 +4961,204 @@ function monthlyIndustries(world: MockWorld, rng: Prng): void {
   }
 }
 
+/** Entretien annuel indicatif d'un véhicule, même hors catalogue. */
+function vehicleMaintenance(vehicle: MockVehicle): number {
+  return vehicleModel(vehicle.model)?.maintenance ?? Math.max(600, vehicle.cargoCapacity * 14);
+}
+
+/** Jours écoulés depuis le dernier service, ou depuis la mise en circulation. */
+function daysSinceService(world: MockWorld, vehicle: MockVehicle): number {
+  const since = vehicle.reliability.lastServiceTick ?? 0;
+  return Math.max(0, Math.floor((world.tick - since) / TICKS_PER_DAY));
+}
+
+/** Service au dépôt : remet l'usure à zéro et débite une quote-part d'entretien. */
+function serviceVehicle(world: MockWorld, vehicle: MockVehicle, company: MockCompany): boolean {
+  const days = daysSinceService(world, vehicle);
+  const cost = serviceCost(
+    vehicleMaintenance(vehicle),
+    days,
+    vehicle.reliability.serviceIntervalDays,
+  );
+  if (company.money < cost) {
+    addNews(
+      world,
+      'error',
+      `Entretien refusé pour le véhicule #${vehicle.id} : ${Math.round(cost)} £ requis.`,
+    );
+    return false;
+  }
+  company.money -= cost;
+  vehicle.reliability = {
+    ...initialReliability(vehicle.reliability.serviceIntervalDays),
+    lastServiceTick: world.tick,
+  };
+  vehicle.waitTicks = 0;
+  addNews(
+    world,
+    'info',
+    `Véhicule #${vehicle.id} entretenu pour ${Math.round(cost)} £ : fiabilité restaurée.`,
+  );
+  addEvent(world, {
+    type: 'vehicle_repaired',
+    vehicle: vehicle.id,
+    cost,
+    tick: world.tick,
+  });
+  return true;
+}
+
+/** Gare/dépôt de rattachement du véhicule (homeDepot ou dépôt le plus proche). */
+function vehicleHomeDepot(world: MockWorld, vehicle: MockVehicle): MockDepot | null {
+  if (vehicle.homeDepot) {
+    const depot = depotAtTile(world, vehicle.homeDepot.x, vehicle.homeDepot.y);
+    if (depot && depot.company === vehicle.company) return depot;
+  }
+  let best: MockDepot | null = null;
+  let bestDistance = Infinity;
+  for (const depot of world.depots) {
+    if (depot.company !== vehicle.company) continue;
+    const kindOk = vehicle.kind === 'train' ? depot.kind === 'rail' : depot.kind === 'road';
+    if (!kindOk && vehicle.kind !== 'ship' && vehicle.kind !== 'aircraft') continue;
+    const dx = depot.x - vehicle.x;
+    const dy = depot.y - vehicle.y;
+    const distance = dx * dx + dy * dy;
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = depot;
+    }
+  }
+  return best;
+}
+
+/** Envoie le véhicule dans son dépôt (téléportation simplifiée du mock). */
+function sendVehicleToDepot(world: MockWorld, vehicle: MockVehicle): boolean {
+  if (vehicle.status === 3) return true;
+  const depot = vehicleHomeDepot(world, vehicle);
+  if (!depot) {
+    addNews(
+      world,
+      'error',
+      `Véhicule #${vehicle.id} : aucun dépôt de votre entreprise pour l'accueillir.`,
+    );
+    return false;
+  }
+  const centre = { x: depot.x + depot.width / 2, y: depot.y + depot.height / 2 };
+  vehicle.homeDepot = { x: depot.x, y: depot.y };
+  vehicle.path = [{ ...centre }];
+  vehicle.pathLengths = [0];
+  vehicle.segment = 0;
+  vehicle.segmentT = 0;
+  vehicle.segmentStops = [null];
+  vehicle.status = 3;
+  vehicle.waitTicks = 0;
+  vehicle.x = centre.x;
+  vehicle.y = centre.y;
+  addNews(world, 'info', `Véhicule #${vehicle.id} envoyé au dépôt ${depot.id}.`);
+  return true;
+}
+
+/** Progression d'une panne : ralentissement puis arrêt temporaire. */
+function advanceVehicleBreakdown(world: MockWorld, vehicle: MockVehicle): void {
+  if (vehicle.reliability.breakdown === 'none') return;
+  const previous = vehicle.reliability.breakdown;
+  const next = advanceBreakdown(vehicle.reliability.breakdown, vehicle.reliability.breakdownTicks);
+  vehicle.reliability.breakdown = next.breakdown;
+  vehicle.reliability.breakdownTicks = next.breakdownTicks;
+  if (previous === 'slowing' && next.breakdown === 'stopped') {
+    addNews(world, 'warning', `Panne : le véhicule #${vehicle.id} est temporairement arrêté.`);
+  }
+  if (next.breakdown === 'none') {
+    addNews(world, 'info', `Véhicule #${vehicle.id} réparé : il reprend son service.`);
+  }
+}
+
+/** Usure quotidienne et tirage déterministe des pannes. */
+function updateReliabilityDaily(world: MockWorld, rng: Prng): void {
+  for (const vehicle of world.vehicles) {
+    if (vehicle.status === 3) continue;
+    vehicle.reliability = advanceWear(vehicle.reliability, 1);
+    vehicle.reliability.cooldownDays = Math.max(0, vehicle.reliability.cooldownDays - 1);
+    if (vehicle.reliability.breakdown !== 'none') continue;
+    if (
+      rollBreakdown(vehicle.reliability.wear, vehicle.reliability.cooldownDays, rng.float(0, 1))
+    ) {
+      vehicle.reliability.breakdown = 'slowing';
+      vehicle.reliability.breakdownTicks = BREAKDOWN_SLOW_TICKS;
+      vehicle.reliability.cooldownDays = BREAKDOWN_COOLDOWN_DAYS;
+      addNews(
+        world,
+        'warning',
+        `Panne : le véhicule #${vehicle.id} ralentit (usure ${Math.round(
+          vehicle.reliability.wear,
+        )} %).`,
+      );
+      addEvent(world, {
+        type: 'vehicle_breakdown',
+        vehicle: vehicle.id,
+        breakdown: 'slowing',
+        tick: world.tick,
+      });
+    }
+  }
+}
+
+/** Remplacement automatique des véhicules d'un groupe (#164). */
+function updateAutoreplace(world: MockWorld): void {
+  if (world.groups.length === 0) return;
+  for (const group of world.groups) {
+    if (!group.replaceModel) continue;
+    const target = compatibleAutoreplaceModel(group.replaceModel, group.kind);
+    if (!target) continue;
+    for (const vehicle of world.vehicles) {
+      if (vehicle.groupId !== group.id || vehicle.company !== group.company) continue;
+      if (vehicle.model === target.id) continue;
+      const days = daysSinceService(world, vehicle);
+      if (
+        !shouldAutoreplace(vehicle.ageDays, vehicle.reliability.wear, group.replaceWhenOld, days)
+      ) {
+        continue;
+      }
+      const company = world.companies[vehicle.company];
+      if (!company) continue;
+      const cost = Math.max(
+        0,
+        Math.round((target.cost - vehicleRefund(world, vehicle)) * priceFactor(world)),
+      );
+      if (company.money < cost) {
+        addNews(
+          world,
+          'warning',
+          `Autoreplace différé : ${Math.round(cost)} £ requis pour remplacer le véhicule #${vehicle.id}.`,
+        );
+        continue;
+      }
+      company.money -= cost;
+      vehicle.model = target.id;
+      vehicle.speed = target.speed;
+      vehicle.cargoType = target.cargo;
+      vehicle.cargoClass = target.cargo;
+      vehicle.cargoCapacity = target.capacity;
+      vehicle.cargoAmount = Math.min(vehicle.cargoAmount, target.capacity);
+      vehicle.reliability = {
+        ...initialReliability(vehicle.reliability.serviceIntervalDays),
+        lastServiceTick: world.tick,
+      };
+      addNews(
+        world,
+        'company',
+        `Autoreplace : véhicule #${vehicle.id} remplacé par ${target.name} pour ${Math.round(cost)} £.`,
+      );
+      addEvent(world, {
+        type: 'vehicle_autoreplaced',
+        vehicle: vehicle.id,
+        model: target.id,
+        tick: world.tick,
+      });
+    }
+  }
+}
+
 function dailyTick(world: MockWorld): void {
   const rng = Prng.fromState(world.rngState);
   const dayIndex = (world.year * MONTHS_PER_YEAR + world.month) * DAYS_PER_MONTH + world.day;
@@ -4644,6 +5168,8 @@ function dailyTick(world: MockWorld): void {
   growTowns(world, rng, dayIndex);
   growStationCargo(world, rng);
   updateIndustries(world, rng);
+  updateReliabilityDaily(world, rng);
+  updateAutoreplace(world);
   for (const vehicle of world.vehicles) vehicle.ageDays += 1;
   if (rng.chance(0.16)) addNews(world, 'info', rng.pick(RANDOM_NEWS));
   world.rngState = rng.getState();
@@ -4690,7 +5216,10 @@ function updateSignalAspects(world: MockWorld): void {
 
 function advanceTick(world: MockWorld): void {
   world.tick += 1;
-  for (const vehicle of world.vehicles) moveVehicle(world, vehicle);
+  for (const vehicle of world.vehicles) {
+    advanceVehicleBreakdown(world, vehicle);
+    moveVehicle(world, vehicle);
+  }
   updateSignalAspects(world);
   updateVehiclesTransforms(world);
 
@@ -4778,8 +5307,11 @@ function serializeWorld(world: MockWorld): SerializedWorld {
       orders: vehicle.orders,
       profitLastYear: vehicle.profitLastYear,
       ageDays: vehicle.ageDays,
+      groupId: vehicle.groupId,
+      reliability: vehicle.reliability,
     })),
     subsidies: world.subsidies,
+    groups: world.groups,
     news: world.news,
     disastersEnabled: world.disastersEnabled,
     disasters: world.disasters,
@@ -5061,6 +5593,34 @@ export class MockEngine implements EngineDriver {
         : {}),
       profitLastYear: vehicle.profitLastYear,
       ageDays: vehicle.ageDays,
+      ...(vehicle.groupId !== null
+        ? {
+            group: {
+              id: vehicle.groupId,
+              name:
+                world.groups.find((group) => group.id === vehicle.groupId)?.name ??
+                defaultGroupName(vehicle.groupId),
+            },
+          }
+        : {}),
+      reliability: reliabilitySnapshot(
+        vehicle.reliability,
+        vehicleMaintenance(vehicle),
+        world.tick,
+        TICKS_PER_DAY,
+      ),
+    }));
+
+    const groups: VehicleGroupSnapshot[] = world.groups.map((group) => ({
+      id: group.id,
+      company: group.company,
+      name: group.name,
+      kind: group.kind,
+      parent: group.parent,
+      vehicles: groupVehicleIds(world, group).length,
+      autoreplace: group.replaceModel
+        ? { model: group.replaceModel, whenOld: group.replaceWhenOld }
+        : null,
     }));
 
     const news = world.news.slice(world.newsCursor);
@@ -5095,6 +5655,7 @@ export class MockEngine implements EngineDriver {
       structures,
       vehicles,
       subsidies,
+      groups,
       news,
       disasters,
       events,
@@ -5126,6 +5687,9 @@ export class MockEngine implements EngineDriver {
         break;
       case 'town_action':
         applyTownAction(world, command);
+        break;
+      case 'group':
+        applyGroup(world, command);
         break;
       default:
         break;
@@ -5194,6 +5758,15 @@ export class MockEngine implements EngineDriver {
       hash.mixInt(subsidy.remainingMonths);
       hash.mixInt(subsidy.awardedTo ?? 255);
     }
+    for (const group of world.groups) {
+      hash.mixInt(group.id);
+      hash.mixInt(group.company);
+      hash.mixString(group.name);
+      hash.mixString(group.kind);
+      hash.mixInt(group.parent ?? -1);
+      hash.mixString(group.replaceModel ?? '');
+      hash.mixInt(group.replaceWhenOld ? 1 : 0);
+    }
     for (const station of world.stations) {
       hash.mixInt(station.id);
       for (const waiting of station.waiting) hash.mixInt(waiting.amount);
@@ -5231,6 +5804,12 @@ export class MockEngine implements EngineDriver {
       hash.mixInt(vehicle.cargoAmount);
       hash.mixString(vehicle.cargoType);
       hash.mixInt(vehicle.cargoSource ?? 255);
+      hash.mixInt(vehicle.groupId ?? 255);
+      hash.mixFloat(vehicle.reliability.wear, 1);
+      hash.mixString(vehicle.reliability.breakdown);
+      hash.mixInt(vehicle.reliability.breakdownTicks);
+      hash.mixInt(vehicle.reliability.lastServiceTick ?? -1);
+      hash.mixInt(vehicle.reliability.serviceIntervalDays);
       hash.mixInt(vehicle.orders.length);
       hash.mixInt(vehicle.currentOrder);
       for (const order of vehicle.orders) {
@@ -5369,6 +5948,12 @@ export class MockEngine implements EngineDriver {
       structures: saved.structures ?? [],
       vehicles: [],
       subsidies: saved.subsidies ?? [],
+      groups: (saved.groups ?? []).map((group) => ({
+        ...group,
+        parent: group.parent ?? null,
+        replaceModel: group.replaceModel ?? null,
+        replaceWhenOld: group.replaceWhenOld ?? true,
+      })),
       news: saved.news,
       newsCursor: saved.news.length,
       events: [],
@@ -5382,6 +5967,7 @@ export class MockEngine implements EngineDriver {
     let signalCount = 0;
     for (const value of world.signalData) if (value !== 0) signalCount += 1;
     world.signalCount = signalCount;
+    const validGroups = new Set(world.groups.map((group) => group.id));
     world.vehicles = saved.vehicles.map((vehicle) => {
       const orders =
         vehicle.orders && vehicle.orders.length > 0
@@ -5416,6 +6002,25 @@ export class MockEngine implements EngineDriver {
         routeOrders:
           vehicle.routeOrders && vehicle.routeOrders.length > 0 ? vehicle.routeOrders : positional,
         pathLengths: computePathLengths(vehicle.path),
+        groupId:
+          vehicle.groupId !== null &&
+          vehicle.groupId !== undefined &&
+          validGroups.has(vehicle.groupId)
+            ? vehicle.groupId
+            : null,
+        reliability: {
+          ...initialReliability(
+            clampServiceInterval(
+              vehicle.reliability?.serviceIntervalDays ?? (vehicle.kind === 'train' ? 150 : 110),
+            ),
+          ),
+          ...vehicle.reliability,
+          breakdown: vehicle.reliability?.breakdown ?? 'none',
+          breakdownTicks: vehicle.reliability?.breakdownTicks ?? 0,
+          wear: vehicle.reliability?.wear ?? 0,
+          lastServiceTick: vehicle.reliability?.lastServiceTick ?? world.tick,
+          cooldownDays: vehicle.reliability?.cooldownDays ?? 0,
+        },
       };
     });
     if (!saved.depots) world.depots = legacyDepots(world);

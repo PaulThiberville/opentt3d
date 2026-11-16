@@ -594,10 +594,26 @@ export function buyVehicleCommand(
 /** Commande de vente, d'arrêt ou de démarrage d'un véhicule existant. */
 export function vehicleActionCommand(
   company: CompanyId,
-  action: 'sell' | 'start' | 'stop',
+  action: 'sell' | 'start' | 'stop' | 'service' | 'send_to_depot',
   vehicle: number,
 ): Extract<EngineCommand, { type: 'vehicle' }> {
   return { type: 'vehicle', action, company, vehicle };
+}
+
+/** Envoie un véhicule au dépôt pour entretien (#163). */
+export function serviceVehicleCommand(
+  company: CompanyId,
+  vehicle: number,
+): Extract<EngineCommand, { type: 'vehicle' }> {
+  return { type: 'vehicle', action: 'service', company, vehicle };
+}
+
+/** Envoie un véhicule au dépôt sans entretien immédiat (#163). */
+export function sendVehicleToDepotCommand(
+  company: CompanyId,
+  vehicle: number,
+): Extract<EngineCommand, { type: 'vehicle' }> {
+  return { type: 'vehicle', action: 'send_to_depot', company, vehicle };
 }
 
 /** Commande de refit vers une cargaison disponible du modèle (#160). */
@@ -638,4 +654,64 @@ export function orderVehicleCommand(
       ...(order.options ? { options: cloneOrderOptions(order.options) } : {}),
     })),
   };
+}
+
+/** Crée un groupe typé (#164). */
+export function createGroupCommand(
+  company: CompanyId,
+  kind: VehicleKind,
+  name: string,
+): Extract<EngineCommand, { type: 'group' }> {
+  return { type: 'group', action: 'create', company, kind, name };
+}
+
+/** Renomme un groupe existant (#164). */
+export function renameGroupCommand(
+  company: CompanyId,
+  group: number,
+  name: string,
+): Extract<EngineCommand, { type: 'group' }> {
+  return { type: 'group', action: 'rename', company, group, name };
+}
+
+/** Supprime un groupe ; ses véhicules redeviennent non groupés (#164). */
+export function deleteGroupCommand(
+  company: CompanyId,
+  group: number,
+): Extract<EngineCommand, { type: 'group' }> {
+  return { type: 'group', action: 'delete', company, group };
+}
+
+/** Affecte des véhicules à un groupe, ou les retire avec `group: null`. */
+export function assignGroupCommand(
+  company: CompanyId,
+  group: number | null,
+  vehicles: readonly number[],
+): Extract<EngineCommand, { type: 'group' }> {
+  return {
+    type: 'group',
+    action: group === null ? 'remove' : 'assign',
+    company,
+    ...(group === null ? {} : { group }),
+    vehicles: [...vehicles],
+  };
+}
+
+/** Action groupée sur tous les véhicules d'un groupe (#164). */
+export function groupActionCommand(
+  company: CompanyId,
+  group: number,
+  action: 'start' | 'stop' | 'send_to_depot' | 'sell',
+): Extract<EngineCommand, { type: 'group' }> {
+  return { type: 'group', action, company, group };
+}
+
+/** Configure ou efface l'autoreplace d'un groupe (#164). */
+export function groupAutoreplaceCommand(
+  company: CompanyId,
+  group: number,
+  model: string | null,
+  whenOld = true,
+): Extract<EngineCommand, { type: 'group' }> {
+  return { type: 'group', action: 'autoreplace', company, group, model, whenOld };
 }

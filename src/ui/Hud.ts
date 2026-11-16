@@ -7,7 +7,7 @@
  */
 
 import type { GameSpeed } from '../game/Game';
-import type { OrderOptions, TownActionKind } from '../engine/protocol';
+import type { OrderOptions, TownActionKind, VehicleKind } from '../engine/protocol';
 import type { BuildSettings } from '../game/buildRules';
 import { createBuildSettings } from '../game/buildRules';
 import type { QualityLevel } from '../render/quality';
@@ -62,6 +62,16 @@ export interface HudCallbacks {
   onAddConditionalOrder: (vehicleId: number) => void;
   onShareOrders: (vehicleId: number, targetId: number) => void;
   onCloneVehicle: (vehicleId: number) => void;
+  /** Entretien et envoi au dépôt (#163). */
+  onServiceVehicle: (vehicleId: number) => void;
+  onSendVehicleToDepot: (vehicleId: number) => void;
+  /** Groupes de véhicules et actions groupées (#164). */
+  onCreateGroup: (kind: VehicleKind, name: string) => void;
+  onRenameGroup: (groupId: number, name: string) => void;
+  onDeleteGroup: (groupId: number) => void;
+  onAssignVehicleGroup: (vehicleId: number, groupId: number | null) => void;
+  onGroupAction: (groupId: number, action: 'start' | 'stop' | 'send_to_depot' | 'sell') => void;
+  onGroupAutoreplace: (groupId: number, model: string | null, whenOld: boolean) => void;
   onCloseVehicle: () => void;
   /** Panneau ville/industrie/gare : recentrage et navigation entre lieux. */
   onPlaceFocus: (x: number, y: number) => void;
@@ -195,6 +205,8 @@ export class Hud {
       onAddConditional: (vehicleId) => this.callbacks.onAddConditionalOrder(vehicleId),
       onShareOrders: (vehicleId, targetId) => this.callbacks.onShareOrders(vehicleId, targetId),
       onCloneVehicle: (vehicleId) => this.callbacks.onCloneVehicle(vehicleId),
+      onService: (vehicleId) => this.callbacks.onServiceVehicle(vehicleId),
+      onSendToDepot: (vehicleId) => this.callbacks.onSendVehicleToDepot(vehicleId),
     });
 
     this.placePanel = new PlacePanel({
@@ -213,6 +225,14 @@ export class Hud {
       onStartVehicle: (vehicleId) => this.callbacks.onStartVehicle(vehicleId),
       onStopVehicle: (vehicleId) => this.callbacks.onStopVehicle(vehicleId),
       onSellVehicle: (vehicleId) => this.callbacks.onSellVehicle(vehicleId),
+      onCreateGroup: (kind, name) => this.callbacks.onCreateGroup(kind, name),
+      onRenameGroup: (groupId, name) => this.callbacks.onRenameGroup(groupId, name),
+      onDeleteGroup: (groupId) => this.callbacks.onDeleteGroup(groupId),
+      onAssignVehicleGroup: (vehicleId, groupId) =>
+        this.callbacks.onAssignVehicleGroup(vehicleId, groupId),
+      onGroupAction: (groupId, action) => this.callbacks.onGroupAction(groupId, action),
+      onGroupAutoreplace: (groupId, model, whenOld) =>
+        this.callbacks.onGroupAutoreplace(groupId, model, whenOld),
     });
 
     this.financePanel = new FinancesPanel({

@@ -35,6 +35,9 @@
  * | `vehicle.orderDetails` | absent : l'UI retombe sur `orderTargets` |
  * | `vehicle.currentOrder` | absent |
  * | `vehicle.model` | absent : modèle inféré par type/cargaison |
+ * | `vehicle.reliability` | absent : panneau d'entretien masqué (#163) |
+ * | `vehicle.group` | absent : véhicule non groupé (#164) |
+ * | `groups` absent | `[]` (#164) |
  * | `vehicle.kind` inconnu | véhicule ignoré (aucun modèle de rendu) |
  * | `news`/`events` absents | `[]` |
  *
@@ -45,6 +48,7 @@
 import {
   COMPANY_NONE,
   PROTOCOL_VERSION,
+  type BreakdownState,
   type CompanyId,
   type CompanySnapshot,
   type DepotKind,
@@ -69,7 +73,9 @@ import {
   type TownAuthoritySnapshot,
   type TownSnapshot,
   type VehicleKind,
+  type VehicleGroupSnapshot,
   type VehicleOrderSnapshot,
+  type VehicleReliabilitySnapshot,
   type VehicleSnapshot,
   type WorldEvent,
   type WorldSnapshot,
@@ -480,6 +486,68 @@ export function parseStructure(value: unknown): StructureSnapshot | null {
   return null;
 }
 
+/** Usure et panne exposées par le pont (#163) ; `null` si le bloc manque. */
+function parseReliability(value: unknown): VehicleReliabilitySnapshot | null {
+  if (!isRecord(value)) return null;
+  const breakdown: BreakdownState =
+    value.breakdown === 'slowing' ? 'slowing' : value.breakdown === 'stopped' ? 'stopped' : 'none';
+  const lastService = value.lastServiceTick;
+  return {
+    wear: Math.max(0, Math.min(100, num(value.wear, 0))),
+    reliability: Math.max(0, Math.min(100, num(value.reliability, 100))),
+    breakdown,
+    breakdownTicks: Math.max(0, int(value.breakdownTicks, 0)),
+    lastServiceTick:
+      typeof lastService === 'number' && Number.isFinite(lastService)
+        ? Math.max(0, int(lastService, 0))
+        : null,
+    serviceIntervalDays: Math.max(0, int(value.serviceIntervalDays, 0)),
+    daysSinceService: Math.max(0, int(value.daysSinceService, 0)),
+    maintenancePerYear: Math.max(0, num(value.maintenancePerYear, 0)),
+  };
+}
+
+/** Groupe d'appartenance d'un véhicule (#164). */
+function parseGroupRef(value: unknown): VehicleSnapshot['group'] {
+  if (!isRecord(value)) return undefined;
+  const id = int(value.id, -1);
+  if (id < 0) return undefined;
+  return { id, name: str(value.name, `Groupe ${id + 1}`) };
+}
+
+/** Groupe de véhicules exposé par le pont (#164). */
+export function parseGroup(value: unknown): VehicleGroupSnapshot | null {
+  if (!isRecord(value)) return null;
+  const id = int(value.id, -1);
+  const kind = vehicleKind(value.kind);
+  if (id < 0 || !kind) return null;
+  const autoreplace = isRecord(value.autoreplace)
+    ? {
+        model: str(value.autoreplace.model, ''),
+        whenOld: bool(value.autoreplace.whenOld, true),
+      }
+    : null;
+  const parent = int(value.parent, -1);
+  return {
+    id,
+    company: companyId(value.company),
+    name: str(value.name, `Groupe ${id + 1}`),
+    kind,
+    parent: parent >= 0 ? parent : null,
+    vehicles: Math.max(0, int(value.vehicles, 0)),
+    autoreplace: autoreplace && autoreplace.model !== '' ? autoreplace : null,
+  };
+}
+
+function parseGroups(value: unknown): VehicleGroupSnapshot[] {
+  const groups: VehicleGroupSnapshot[] = [];
+  for (const entry of list(value)) {
+    const group = parseGroup(entry);
+    if (group) groups.push(group);
+  }
+  return groups;
+}
+
 /** Renvoie `null` pour un véhicule dont le type n'a pas de représentation 3D. */
 export function parseVehicle(value: unknown): VehicleSnapshot | null {
   const raw = record(value);
@@ -512,6 +580,8 @@ export function parseVehicle(value: unknown): VehicleSnapshot | null {
   const currentOrder = Number.isFinite(raw.currentOrder)
     ? Math.max(0, int(raw.currentOrder, 0))
     : undefined;
+  const groupRef = parseGroupRef(raw.group);
+  const reliability = parseReliability(raw.reliability);
 
   return {
     id: Math.max(0, int(raw.id, 0)),
@@ -531,6 +601,8 @@ export function parseVehicle(value: unknown): VehicleSnapshot | null {
     ...(currentOrder !== undefined ? { currentOrder } : {}),
     profitLastYear: num(raw.profitLastYear, 0),
     ageDays: Math.max(0, int(raw.ageDays, 0)),
+    ...(groupRef ? { group: groupRef } : {}),
+    ...(reliability ? { reliability } : {}),
   };
 }
 
@@ -633,6 +705,44 @@ function parseEvents(value: unknown): WorldEvent[] {
           action: TOWN_ACTIONS.includes(entry.action as TownActionKind)
             ? (entry.action as TownActionKind)
             : 'advertise',
+          tick,
+        });
+        break;
+      case 'vehicle_breakdown':
+        events.push({
+          type: 'vehicle_breakdown',
+          vehicle: Math.max(0, int(entry.vehicle, 0)),
+          breakdown:
+            entry.breakdown === 'slowing'
+              ? 'slowing'
+              : entry.breakdown === 'stopped'
+                ? 'stopped'
+                : 'none',
+          tick,
+        });
+        break;
+      case 'vehicle_repaired':
+        events.push({
+          type: 'vehicle_repaired',
+          vehicle: Math.max(0, int(entry.vehicle, 0)),
+          cost: Math.max(0, num(entry.cost, 0)),
+          tick,
+        });
+        break;
+      case 'vehicle_autoreplaced':
+        events.push({
+          type: 'vehicle_autoreplaced',
+          vehicle: Math.max(0, int(entry.vehicle, 0)),
+          model: str(entry.model, ''),
+          tick,
+        });
+        break;
+      case 'group_created':
+      case 'group_deleted':
+        events.push({
+          type: entry.type,
+          group: Math.max(0, int(entry.group, 0)),
+          company: companyId(entry.company),
           tick,
         });
         break;
@@ -815,6 +925,7 @@ export function parseWorldJson(input: unknown): WorldSnapshot {
     structures,
     vehicles,
     subsidies: parseSubsidies(root.subsidies),
+    groups: parseGroups(root.groups),
     news: parseNews(root.news, meta.tick),
     disasters: parseDisasters(root.disasters),
     events: parseEvents(root.events),
