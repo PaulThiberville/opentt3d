@@ -320,4 +320,52 @@ describe('panneau véhicule', () => {
     expect(view?.currentOrder).toBe(2);
     expect(view?.shareCandidates.length).toBe(0);
   });
+
+  it('affiche la fiabilité, la panne et le groupe (#163/#164)', () => {
+    const world = snapshot([
+      vehicle({
+        group: { id: 4, name: 'Ligne A' },
+        orderTargets: [3],
+        orderKinds: ['station'],
+        reliability: {
+          wear: 72,
+          reliability: 28,
+          breakdown: 'stopped',
+          breakdownTicks: 42,
+          lastServiceTick: 0,
+          serviceIntervalDays: 120,
+          daysSinceService: 160,
+          maintenancePerYear: 480,
+        },
+      }),
+    ]);
+    world.groups = [
+      {
+        id: 4,
+        company: 0,
+        name: 'Ligne A',
+        kind: 'road',
+        parent: null,
+        vehicles: 1,
+        autoreplace: null,
+      },
+    ];
+    const view = describeVehiclePanel(world, makeMap(), 7, false);
+    expect(view?.groupLabel).toBe('Ligne A');
+    expect(view?.groupOptions).toEqual([{ id: 4, label: 'Ligne A' }]);
+    expect(view?.reliability?.reliability).toBe(28);
+    expect(view?.reliability?.wearLabel).toBe('72 %');
+    expect(view?.reliability?.breakdownLabel).toContain('arrêt temporaire');
+    expect(view?.reliability?.maintenanceLabel).toContain('480 £/an');
+    expect(view?.reliability?.serviceCost).toBeGreaterThan(0);
+    expect(view?.canSendToDepot).toBe(false);
+    expect(view?.hint).toContain('entret');
+  });
+
+  it('masque l’entretien pour un snapshot antérieur à #163', () => {
+    const view = describeVehiclePanel(snapshot([vehicle()]), makeMap(), 7, false);
+    expect(view?.reliability).toBeNull();
+    expect(view?.groupLabel).toBeNull();
+    expect(view?.canSendToDepot).toBe(false);
+  });
 });

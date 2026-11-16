@@ -39,6 +39,8 @@ export interface VehiclePanelOptions {
   onAddConditional: (vehicleId: number) => void;
   onShareOrders: (vehicleId: number, targetId: number) => void;
   onCloneVehicle: (vehicleId: number) => void;
+  onService: (vehicleId: number) => void;
+  onSendToDepot: (vehicleId: number) => void;
 }
 
 const ORDER_KIND_KEYS: Record<VehicleOrderView['kind'], TranslationKey> = {
@@ -232,6 +234,39 @@ export class VehiclePanel {
     this.stats.replaceChildren();
     const stats = [...view.stats];
     if (view.modelName) stats.push({ label: t('vehicle.modelStat'), value: view.modelName });
+    if (view.groupLabel) {
+      stats.push({ label: t('vehicle.group'), value: view.groupLabel });
+    }
+    if (view.reliability) {
+      stats.push(
+        {
+          label: t('vehicle.reliability.reliability'),
+          value: view.reliability.reliabilityLabel,
+          tone:
+            view.reliability.reliability <= 30
+              ? 'bad'
+              : view.reliability.reliability <= 60
+                ? undefined
+                : 'good',
+        },
+        { label: t('vehicle.reliability.wear'), value: view.reliability.wearLabel },
+        {
+          label: t('vehicle.reliability.maintenance'),
+          value: view.reliability.maintenanceLabel,
+        },
+        {
+          label: t('vehicle.reliability.serviceCost'),
+          value: view.reliability.serviceCostLabel,
+        },
+      );
+      if (view.reliability.breakdownLabel) {
+        stats.push({
+          label: t('vehicle.reliability.breakdown'),
+          value: view.reliability.breakdownLabel,
+          tone: 'bad',
+        });
+      }
+    }
     for (const stat of stats) {
       const row = el('div', { className: 'hud-selection-stat' });
       row.append(
@@ -281,6 +316,24 @@ export class VehiclePanel {
         disabled: view.orders.length === 0,
         attrs: { type: 'button', title: t('vehicle.addConditionalTitle') },
         onClick: () => this.options.onAddConditional(id),
+      }),
+      button(t('vehicle.reliability.service'), {
+        className: 'hud-vehicle-action',
+        disabled: !view.reliability,
+        attrs: {
+          type: 'button',
+          title: t('vehicle.reliability.serviceTitle'),
+        },
+        onClick: () => this.options.onService(id),
+      }),
+      button(t('vehicle.reliability.sendToDepot'), {
+        className: 'hud-vehicle-action',
+        disabled: !view.canSendToDepot,
+        attrs: {
+          type: 'button',
+          title: t('vehicle.reliability.sendToDepotTitle'),
+        },
+        onClick: () => this.options.onSendToDepot(id),
       }),
     );
   }

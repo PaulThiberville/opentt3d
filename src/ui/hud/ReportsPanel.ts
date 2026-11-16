@@ -8,10 +8,11 @@
  * les transmet à la session de jeu.
  */
 
-import type { WorldSnapshot } from '../../engine/protocol';
+import type { VehicleKind, WorldSnapshot } from '../../engine/protocol';
 import { button, el, focusableElements } from '../dom';
 import { createBarMeter, createSparkline } from '../charts';
 import { formatGameDate, formatInt } from '../format';
+import { vehicleLabel } from '../labels';
 import { describeFinancePanel, financeChartLabel, localCompany } from '../financeView';
 import { bindAttr, bindText, onLanguageChange, t } from '../i18n';
 import { describeStatsPanel } from '../statsView';
@@ -36,6 +37,13 @@ export interface ReportsPanelOptions {
   onStartVehicle: (vehicleId: number) => void;
   onStopVehicle: (vehicleId: number) => void;
   onSellVehicle: (vehicleId: number) => void;
+  /** Groupes de véhicules (#164). */
+  onCreateGroup: (kind: VehicleKind, name: string) => void;
+  onRenameGroup: (groupId: number, name: string) => void;
+  onDeleteGroup: (groupId: number) => void;
+  onAssignVehicleGroup: (vehicleId: number, groupId: number | null) => void;
+  onGroupAction: (groupId: number, action: 'start' | 'stop' | 'send_to_depot' | 'sell') => void;
+  onGroupAutoreplace: (groupId: number, model: string | null, whenOld: boolean) => void;
 }
 
 const TABS: ReportTab[] = ['finance', 'vehicles', 'stats'];
@@ -91,9 +99,11 @@ export class ReportsPanel {
   private stopLanguage: () => void;
   private vehicleControls: HTMLDivElement;
   private vehicleSummary: HTMLDivElement;
+  private groupControls: HTMLDivElement;
   private vehicleGroups: HTMLDivElement;
   private vehicleList: HTMLDivElement;
   private vehicleHint: HTMLParagraphElement;
+  private groupControlsSignature = '';
 
   constructor(options: ReportsPanelOptions) {
     this.options = options;
@@ -178,6 +188,10 @@ export class ReportsPanel {
     });
     bindAttr(this.vehicleControls, 'aria-label', 'vehicleList.filters.aria');
     this.vehicleSummary = el('div', { className: 'hud-report-stats' });
+    this.groupControls = el('div', {
+      className: 'hud-report-group-controls',
+      attrs: { role: 'group', 'aria-label': t('vehicleList.groups.title') },
+    });
     this.vehicleGroups = el('div', { className: 'hud-report-groups' });
     this.vehicleList = el('div', {
       className: 'hud-report-vehicle-list',
@@ -188,6 +202,7 @@ export class ReportsPanel {
     vehiclePanel?.append(
       this.vehicleControls,
       this.vehicleSummary,
+      this.groupControls,
       this.vehicleGroups,
       this.vehicleList,
       this.vehicleHint,
@@ -199,6 +214,7 @@ export class ReportsPanel {
     this.element.addEventListener('keydown', this.onKeyDown);
     this.stopLanguage = onLanguageChange(() => {
       this.controlsSignature = '';
+      this.groupControlsSignature = '';
       this.signatures.clear();
       this.render();
     });
@@ -808,9 +824,20 @@ export class ReportsPanel {
 
   private renderVehicles(force: boolean): void {
     const view = describeVehicleListPanel(this.snapshot, this.localCompanyId(), this.filters);
+    if (
+      this.filters.group !== 'all' &&
+      !view.groupOptions.some((option) => option.value === this.filters.group)
+    ) {
+      this.filters = { ...this.filters, group: 'all' };
+      this.controlsSignature = '';
+      this.groupControlsSignature = '';
+      this.renderVehicles(true);
+      return;
+    }
     const focusKey = this.currentFocusKey();
     this.ensureVehicleControls(view);
     this.renderVehicleSummary(view);
+    this.renderGroupControls(view);
     this.renderVehicleGroups(view);
     this.renderVehicleRows(view, force);
     this.vehicleHint.textContent = view.hint;
@@ -912,6 +939,7 @@ export class ReportsPanel {
       onClick: () => {
         this.filters = createDefaultVehicleFilters();
         this.controlsSignature = '';
+        this.groupControlsSignature = '';
         this.signatures.delete('vehicles');
         this.renderVehicles(true);
       },
@@ -964,6 +992,134 @@ export class ReportsPanel {
     );
   }
 
+  private renderGroupControls(view: VehicleListPanelView): void {
+    const selectedId =
+      view.selectedGroup && view.selectedGroup.id !== '__none'
+        ? Number.parseInt(view.selectedGroup.id, 10)
+        : null;
+    const signature = JSON.stringify({
+      groups: view.groups.map((group) => [group.id, group.label, group.kind]),
+      selected: selectedId,
+      options: view.autoreplaceOptions,
+      autoreplace: view.autoreplace,
+      canManage: view.canManageGroups,
+    });
+    if (signature === this.groupControlsSignature) return;
+    this.groupControlsSignature = signature;
+    this.groupControls.replaceChildren();
+
+    const nameField = el('label', { className: 'hud-report-field' });
+    nameField.append(el('span', { text: t('vehicleList.groups.name') }));
+    const nameInput = el('input', {
+      attrs: {
+        type: 'text',
+        maxlength: '32',
+        placeholder: t('vehicleList.groups.namePlaceholder'),
+        'data-focus-key': 'group-name',
+      },
+    });
+    nameInput.value = view.selectedGroup?.label ?? '';
+    nameField.append(nameInput);
+
+    const kindField = el('label', { className: 'hud-report-field' });
+    kindField.append(el('span', { text: t('vehicleList.groups.kind') }));
+    const kindSelect = el('select', { attrs: { 'data-focus-key': 'group-kind' } });
+    for (const kind of ['road', 'train', 'ship', 'aircraft'] as VehicleKind[]) {
+      const option = el('option', { text: vehicleLabel(kind) });
+      option.value = kind;
+      if (view.selectedGroup?.kind === kind) option.selected = true;
+      kindSelect.append(option);
+    }
+    kindField.append(kindSelect);
+
+    const create = button(t('vehicleList.groups.create'), {
+      className: 'hud-report-action',
+      disabled: !view.canManageGroups,
+      attrs: { type: 'button', 'data-focus-key': 'group-create' },
+      onClick: () => this.options.onCreateGroup(kindSelect.value as VehicleKind, nameInput.value),
+    });
+    const rename = button(t('vehicleList.groups.rename'), {
+      className: 'hud-report-action',
+      disabled: selectedId === null,
+      attrs: { type: 'button', 'data-focus-key': 'group-rename' },
+      onClick: () => {
+        if (selectedId === null) return;
+        this.options.onRenameGroup(selectedId, nameInput.value);
+      },
+    });
+    const remove = button(t('vehicleList.groups.delete'), {
+      variant: 'danger',
+      className: 'hud-report-action',
+      disabled: selectedId === null,
+      attrs: { type: 'button', 'data-focus-key': 'group-delete' },
+      onClick: () => {
+        if (selectedId === null) return;
+        this.options.onDeleteGroup(selectedId);
+      },
+    });
+    const form = el('div', { className: 'hud-report-group-form' });
+    form.append(nameField, kindField, create, rename, remove);
+
+    const actions = el('div', { className: 'hud-report-group-actions' });
+    if (selectedId !== null) {
+      for (const [action, key] of [
+        ['start', 'vehicleList.groups.start'],
+        ['stop', 'vehicleList.groups.stop'],
+        ['send_to_depot', 'vehicleList.groups.sendToDepot'],
+        ['sell', 'vehicleList.groups.sell'],
+      ] as const) {
+        actions.append(
+          button(t(key), {
+            variant: action === 'sell' ? 'danger' : 'ghost',
+            className: 'hud-report-action',
+            attrs: {
+              type: 'button',
+              'data-focus-key': `group-action-${action}`,
+            },
+            onClick: () => this.options.onGroupAction(selectedId, action),
+          }),
+        );
+      }
+    }
+
+    const autoreplace = el('div', { className: 'hud-report-group-autoreplace' });
+    const modelField = el('label', { className: 'hud-report-field' });
+    modelField.append(el('span', { text: t('vehicleList.groups.model') }));
+    const modelSelect = el('select', { attrs: { 'data-focus-key': 'group-autoreplace-model' } });
+    for (const option of view.autoreplaceOptions) {
+      const node = el('option', { text: option.label });
+      node.value = option.value;
+      if (view.autoreplace?.model === option.value) node.selected = true;
+      modelSelect.append(node);
+    }
+    modelField.append(modelSelect);
+    const whenOldLabel = el('label', { className: 'hud-report-check' });
+    const whenOld = el('input', { attrs: { type: 'checkbox' } });
+    whenOld.checked = view.autoreplace?.whenOld !== false;
+    whenOldLabel.append(whenOld, el('span', { text: t('vehicleList.groups.whenOldLabel') }));
+    const apply = button(t('vehicleList.groups.apply'), {
+      className: 'hud-report-action',
+      disabled: selectedId === null || view.autoreplaceOptions.length === 0,
+      attrs: { type: 'button', 'data-focus-key': 'group-autoreplace-apply' },
+      onClick: () => {
+        if (selectedId === null) return;
+        this.options.onGroupAutoreplace(selectedId, modelSelect.value, whenOld.checked);
+      },
+    });
+    const clear = button(t('vehicleList.groups.clearAutoreplace'), {
+      className: 'hud-report-action',
+      disabled: selectedId === null || !view.autoreplace,
+      attrs: { type: 'button', 'data-focus-key': 'group-autoreplace-clear' },
+      onClick: () => {
+        if (selectedId === null) return;
+        this.options.onGroupAutoreplace(selectedId, null, whenOld.checked);
+      },
+    });
+    autoreplace.append(modelField, whenOldLabel, apply, clear);
+
+    this.groupControls.append(form, actions, autoreplace);
+  }
+
   private renderVehicleGroups(view: VehicleListPanelView): void {
     this.vehicleGroups.replaceChildren();
     const title = el('h3', {
@@ -972,39 +1128,23 @@ export class ReportsPanel {
     });
     const list = el('div', { className: 'hud-report-group-list' });
     for (const group of view.groups) {
-      list.append(
-        el('span', {
-          className: 'hud-report-group-chip',
-          text: `${group.label} · ${t('vehicleList.groups.count', {
-            count: formatInt(group.count),
-          })}`,
-        }),
-      );
+      const chip = el('span', {
+        className: `hud-report-group-chip${group.id === view.selectedGroup?.id ? ' is-active' : ''}`,
+        text: `${group.label} · ${t('vehicleList.groups.count', {
+          count: formatInt(group.count),
+        })}`,
+      });
+      if (group.autoreplaceLabel) {
+        chip.append(
+          el('span', { className: 'hud-report-group-auto', text: group.autoreplaceLabel }),
+        );
+      }
+      list.append(chip);
     }
-    const actions = el('div', { className: 'hud-report-actions' });
-    const noteId = 'vehicle-group-note';
-    actions.append(
-      el('p', {
-        className: 'hud-report-note',
-        text: view.groupNote,
-        attrs: { id: noteId },
-      }),
-    );
-    for (const action of view.groupActions) {
-      actions.append(
-        button(action.label, {
-          className: 'hud-report-action',
-          disabled: !action.supported,
-          attrs: {
-            type: 'button',
-            title: action.reason ?? action.label,
-            'aria-describedby': noteId,
-            'data-focus-key': `vehicle-group-${action.id}`,
-          },
-        }),
-      );
+    this.vehicleGroups.append(title, list);
+    if (!view.canManageGroups) {
+      this.vehicleGroups.append(el('p', { className: 'hud-report-note', text: view.groupNote }));
     }
-    this.vehicleGroups.append(title, list, actions);
   }
 
   private renderVehicleRows(view: VehicleListPanelView, force: boolean): void {
@@ -1016,10 +1156,13 @@ export class ReportsPanel {
       this.vehicleList.append(emptyLine(view.empty));
       return;
     }
-    for (const row of view.rows) this.vehicleList.append(this.renderVehicleRow(row));
+    for (const row of view.rows) this.vehicleList.append(this.renderVehicleRow(row, view.groups));
   }
 
-  private renderVehicleRow(row: VehicleListRowView): HTMLElement {
+  private renderVehicleRow(
+    row: VehicleListRowView,
+    groups: VehicleListPanelView['groups'],
+  ): HTMLElement {
     const item = el('div', {
       className: `hud-report-vehicle${row.isLocal ? ' is-local' : ''}`,
       attrs: { role: 'listitem' },
@@ -1036,7 +1179,7 @@ export class ReportsPanel {
       el('span', { className: 'hud-report-data-detail', text: row.detail }),
       el('span', {
         className: 'hud-report-data-detail',
-        text: `${row.companyName} · ${row.groupLabel}`,
+        text: `${row.companyName} · ${row.groupLabel} · ${t('vehicle.reliability.reliability')} ${row.reliabilityLabel}`,
       }),
       el('span', {
         className: `hud-report-vehicle-profit${row.profit !== null && row.profit < 0 ? ' is-bad' : ''}`,
@@ -1047,6 +1190,31 @@ export class ReportsPanel {
       text.append(el('span', { className: 'hud-report-note', text: row.note }));
     }
     const actions = el('div', { className: 'hud-report-vehicle-actions' });
+    if (row.isLocal) {
+      const groupSelect = el('select', {
+        className: 'hud-report-select',
+        attrs: {
+          'aria-label': t('vehicleList.groups.assignLabel'),
+          'data-focus-key': `vehicle-group-${row.id}`,
+        },
+      });
+      const none = el('option', { text: t('vehicleList.group.none') });
+      none.value = '';
+      if (row.groupId === '__none') none.selected = true;
+      groupSelect.append(none);
+      for (const group of groups) {
+        if (group.id === '__none' || group.kind !== row.kind) continue;
+        const option = el('option', { text: group.label });
+        option.value = group.id;
+        if (group.id === row.groupId) option.selected = true;
+        groupSelect.append(option);
+      }
+      groupSelect.addEventListener('change', () => {
+        const value = groupSelect.value === '' ? null : Number.parseInt(groupSelect.value, 10);
+        this.options.onAssignVehicleGroup(row.id, Number.isFinite(value) ? value : null);
+      });
+      actions.append(groupSelect);
+    }
     const select = button(t('vehicleList.action.select'), {
       className: 'hud-report-action',
       disabled: !row.canSelect,

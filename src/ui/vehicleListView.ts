@@ -1,15 +1,16 @@
 /**
  * Liste complète des véhicules, filtrable et triable.
  *
- * Le protocole v1 n'expose pas les groupes de véhicules : les champs `group`,
- * `groupName` ou `groupId` d'un snapshot étendu sont lus s'ils existent, sinon
- * tous les véhicules sont « non groupés » et les actions de groupe restent
- * désactivées avec une explication. Les actions start/stop/sell réutilisent
- * exactement les règles du panneau véhicule.
+ * Depuis #164, les groupes exposés par `snapshot.groups` sont listés, filtrables
+ * et gérables (création, renommage, affectation, actions groupées et
+ * autoreplace). Un snapshot antérieur à #164 retombe sur un affichage non
+ * groupé et des actions désactivées avec une explication. Les actions
+ * start/stop/sell réutilisent exactement les règles du panneau véhicule.
  */
 
 import type { VehicleSnapshot, WorldSnapshot } from '../engine/protocol';
 import { ordersFromSnapshot } from '../game/vehicleRules';
+import { modelsForGroupKind } from '../game/vehicleGroups';
 import { cargoLabel, vehicleLabel, vehicleStatusLabel } from './labels';
 import { formatInt, formatMoney, formatSignedMoney } from './format';
 import { t } from './i18n';
@@ -58,6 +59,9 @@ function finite(value: unknown): number | null {
 }
 
 function readGroup(vehicle: VehicleSnapshot): VehicleGroup | null {
+  if (vehicle.group && Number.isFinite(vehicle.group.id)) {
+    return { id: String(vehicle.group.id), label: vehicle.group.name };
+  }
   const record = vehicle as unknown as UnknownRecord;
   for (const candidate of [record.group, record.vehicleGroup, record.line]) {
     if (typeof candidate === 'string' && candidate.trim()) {
@@ -117,6 +121,11 @@ function rowFromVehicle(
   const group = readGroup(vehicle);
   const isLocal = companyId !== null && vehicle.company === companyId;
   const statusLabel = vehicleStatusLabel(status ?? -1);
+  const reliability =
+    typeof vehicle.reliability?.reliability === 'number' &&
+    Number.isFinite(vehicle.reliability.reliability)
+      ? vehicle.reliability.reliability
+      : null;
   return {
     id: vehicle.id,
     title: t('vehicleList.rowTitle', { kind, id: vehicle.id }),
@@ -128,6 +137,7 @@ function rowFromVehicle(
     companyName,
     colour,
     kind: vehicle.kind,
+    groupId: group?.id ?? UNGROUPED_ID,
     groupLabel: group?.label ?? t('vehicleList.group.none'),
     status,
     statusLabel,
@@ -136,6 +146,11 @@ function rowFromVehicle(
     ageDays: age,
     ageLabel: age === null ? '—' : t('selection.unit.days', { value: formatInt(age) }),
     orders,
+    reliability,
+    reliabilityLabel:
+      reliability === null
+        ? '—'
+        : t('vehicleList.reliabilityValue', { value: formatInt(reliability) }),
     isLocal,
     canSelect: true,
     canStart: isLocal && orders > 0 && status !== 1 && status !== 2,
@@ -198,15 +213,50 @@ function compareRows(a: VehicleListRowView, b: VehicleListRowView, sort: Vehicle
   }
 }
 
-function groupViews(snapshot: WorldSnapshot): VehicleGroupView[] {
+function groupViews(snapshot: WorldSnapshot, companyId: number | null): VehicleGroupView[] {
   const groups = new Map<string, VehicleGroupView>();
+  const counts = new Map<string, number>();
+  for (const vehicle of snapshot.vehicles) {
+    const id = readGroup(vehicle)?.id ?? UNGROUPED_ID;
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  for (const group of snapshot.groups ?? []) {
+    if (companyId !== null && group.company !== companyId) continue;
+    groups.set(String(group.id), {
+      id: String(group.id),
+      label: group.name,
+      count: counts.get(String(group.id)) ?? group.vehicles,
+      kind: group.kind,
+      autoreplaceLabel: group.autoreplace
+        ? t('vehicleList.groups.autoreplaceValue', {
+            model: group.autoreplace.model,
+            when: group.autoreplace.whenOld
+              ? t('vehicleList.groups.whenOld')
+              : t('vehicleList.groups.always'),
+          })
+        : null,
+    });
+  }
   for (const vehicle of snapshot.vehicles) {
     const group = readGroup(vehicle);
-    const id = group?.id ?? UNGROUPED_ID;
-    const label = group?.label ?? t('vehicleList.group.none');
-    const existing = groups.get(id);
-    if (existing) existing.count += 1;
-    else groups.set(id, { id, label, count: 1 });
+    if (!group) continue;
+    if (groups.has(group.id)) continue;
+    groups.set(group.id, {
+      id: group.id,
+      label: group.label,
+      count: counts.get(group.id) ?? 1,
+      kind: vehicle.kind,
+      autoreplaceLabel: null,
+    });
+  }
+  if ((counts.get(UNGROUPED_ID) ?? 0) > 0) {
+    groups.set(UNGROUPED_ID, {
+      id: UNGROUPED_ID,
+      label: t('vehicleList.group.none'),
+      count: counts.get(UNGROUPED_ID) ?? 0,
+      kind: null,
+      autoreplaceLabel: null,
+    });
   }
   return [...groups.values()].sort((a, b) => {
     if (a.id === UNGROUPED_ID) return 1;
@@ -242,8 +292,15 @@ export function describeVehicleListPanel(
     .map((row) => row.ageDays)
     .filter((age): age is number => age !== null && Number.isFinite(age));
   const moving = rows.filter((row) => statusGroup(row.status) === 'moving').length;
-  const groups = snapshot ? groupViews(snapshot) : [];
-  const groupReason = t('vehicleList.groups.reason');
+  const groups = snapshot ? groupViews(snapshot, companyId) : [];
+  const canManageGroups = Boolean(snapshot && Array.isArray(snapshot.groups));
+  const selectedGroup =
+    canManageGroups && filters.group !== 'all'
+      ? (groups.find((group) => group.id === filters.group) ?? null)
+      : null;
+  const groupReason = t(
+    canManageGroups ? 'vehicleList.groups.manageHint' : 'vehicleList.groups.reason',
+  );
   const kindOptions: ReportOption[] = [
     { value: 'all', label: t('vehicleList.filter.all') },
     ...KINDS.map((kind) => ({ value: kind, label: vehicleLabel(kind) })),
@@ -252,6 +309,68 @@ export function describeVehicleListPanel(
     { value: 'all', label: t('vehicleList.filter.all') },
     ...groups.map((group) => ({ value: group.id, label: group.label })),
   ];
+  const action = (
+    id: string,
+    label: string,
+    supported: boolean,
+    reason?: string,
+  ): { id: string; label: string; supported: boolean; reason?: string } =>
+    supported ? { id, label, supported } : { id, label, supported, ...(reason ? { reason } : {}) };
+  const groupActions = [
+    action('create', t('vehicleList.groups.create'), canManageGroups, groupReason),
+    action(
+      'rename',
+      t('vehicleList.groups.rename'),
+      canManageGroups && selectedGroup !== null && selectedGroup.id !== UNGROUPED_ID,
+      canManageGroups ? t('vehicleList.groups.selectFirst') : groupReason,
+    ),
+    action(
+      'delete',
+      t('vehicleList.groups.delete'),
+      canManageGroups && selectedGroup !== null && selectedGroup.id !== UNGROUPED_ID,
+      canManageGroups ? t('vehicleList.groups.selectFirst') : groupReason,
+    ),
+    action(
+      'start',
+      t('vehicleList.groups.start'),
+      canManageGroups && selectedGroup !== null && selectedGroup.id !== UNGROUPED_ID,
+      canManageGroups ? t('vehicleList.groups.selectFirst') : groupReason,
+    ),
+    action(
+      'stop',
+      t('vehicleList.groups.stop'),
+      canManageGroups && selectedGroup !== null && selectedGroup.id !== UNGROUPED_ID,
+      canManageGroups ? t('vehicleList.groups.selectFirst') : groupReason,
+    ),
+    action(
+      'send_to_depot',
+      t('vehicleList.groups.sendToDepot'),
+      canManageGroups && selectedGroup !== null && selectedGroup.id !== UNGROUPED_ID,
+      canManageGroups ? t('vehicleList.groups.selectFirst') : groupReason,
+    ),
+    action(
+      'sell',
+      t('vehicleList.groups.sell'),
+      canManageGroups && selectedGroup !== null && selectedGroup.id !== UNGROUPED_ID,
+      canManageGroups ? t('vehicleList.groups.selectFirst') : groupReason,
+    ),
+    action(
+      'autoreplace',
+      t('vehicleList.groups.autoreplace'),
+      canManageGroups && selectedGroup !== null && selectedGroup.kind !== null,
+      canManageGroups ? t('vehicleList.groups.selectFirst') : groupReason,
+    ),
+  ];
+  const selectedSnapshotGroup =
+    selectedGroup && snapshot?.groups
+      ? (snapshot.groups.find((group) => String(group.id) === selectedGroup.id) ?? null)
+      : null;
+  const autoreplaceOptions: ReportOption[] = selectedGroup?.kind
+    ? modelsForGroupKind(selectedGroup.kind as VehicleSnapshot['kind']).map((model) => ({
+        value: model.id,
+        label: model.name,
+      }))
+    : [];
   return {
     summary: {
       count: rows.length,
@@ -269,27 +388,12 @@ export function describeVehicleListPanel(
     groups,
     kindOptions,
     groupOptions,
-    groupActions: [
-      {
-        id: 'create',
-        label: t('vehicleList.groups.create'),
-        supported: false,
-        reason: groupReason,
-      },
-      {
-        id: 'rename',
-        label: t('vehicleList.groups.rename'),
-        supported: false,
-        reason: groupReason,
-      },
-      {
-        id: 'assign',
-        label: t('vehicleList.groups.assign'),
-        supported: false,
-        reason: groupReason,
-      },
-    ],
+    groupActions,
     groupNote: groupReason,
+    selectedGroup,
+    canManageGroups,
+    autoreplaceOptions,
+    autoreplace: selectedSnapshotGroup?.autoreplace ?? null,
     empty: t('vehicleList.empty'),
     hint: t('vehicleList.hint'),
   };

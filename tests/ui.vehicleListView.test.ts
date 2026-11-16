@@ -146,9 +146,15 @@ describe('liste des véhicules', () => {
     ];
     const world = snapshot(grouped);
     expect(describeVehicleListPanel(world, 0).groups).toEqual([
-      { id: 'Ligne A', label: 'Ligne A', count: 1 },
-      { id: '3', label: 'Ligne B', count: 1 },
-      { id: UNGROUPED_ID, label: 'Non groupé', count: 1 },
+      { id: 'Ligne A', label: 'Ligne A', count: 1, kind: 'road', autoreplaceLabel: null },
+      { id: '3', label: 'Ligne B', count: 1, kind: 'road', autoreplaceLabel: null },
+      {
+        id: UNGROUPED_ID,
+        label: 'Non groupé',
+        count: 1,
+        kind: null,
+        autoreplaceLabel: null,
+      },
     ]);
     expect(
       describeVehicleListPanel(world, 0, filters({ group: 'Ligne A' })).rows.map((row) => row.id),
@@ -158,10 +164,73 @@ describe('liste des véhicules', () => {
         (row) => row.id,
       ),
     ).toEqual([22]);
-    expect(
-      describeVehicleListPanel(world, 0).groupActions.every((action) => !action.supported),
-    ).toBe(true);
-    expect(describeVehicleListPanel(world, 0).groupActions[0]?.reason).toContain('protocole v1');
+    const legacy = describeVehicleListPanel(world, 0);
+    expect(legacy.canManageGroups).toBe(false);
+    expect(legacy.groupActions.every((action) => !action.supported)).toBe(true);
+    expect(legacy.groupActions[0]?.reason).toContain('groupes de véhicules');
+  });
+
+  it('gère les groupes exposés par le snapshot (#164)', () => {
+    const grouped = [
+      Object.assign(vehicle({ id: 40 }), { group: { id: 7, name: 'Ligne A' } }) as VehicleSnapshot,
+      Object.assign(vehicle({ id: 41 }), { group: { id: 7, name: 'Ligne A' } }) as VehicleSnapshot,
+      vehicle({ id: 42 }),
+      Object.assign(vehicle({ id: 43, kind: 'train', status: 3 }), {
+        group: { id: 8, name: 'Fret' },
+      }) as VehicleSnapshot,
+    ];
+    const world = snapshot(grouped);
+    world.groups = [
+      {
+        id: 7,
+        company: 0,
+        name: 'Ligne A',
+        kind: 'road',
+        parent: null,
+        vehicles: 2,
+        autoreplace: { model: 'bus_intercity', whenOld: true },
+      },
+      {
+        id: 8,
+        company: 0,
+        name: 'Fret',
+        kind: 'train',
+        parent: null,
+        vehicles: 1,
+        autoreplace: null,
+      },
+      {
+        id: 9,
+        company: 0,
+        name: 'Vide',
+        kind: 'road',
+        parent: null,
+        vehicles: 0,
+        autoreplace: null,
+      },
+    ];
+    const view = describeVehicleListPanel(world, 0, filters({ group: '7' }));
+    expect(view.canManageGroups).toBe(true);
+    expect(view.selectedGroup?.label).toBe('Ligne A');
+    expect(view.groups.map((group) => group.id)).toEqual(['8', '7', '9', UNGROUPED_ID]);
+    expect(view.groups.find((group) => group.id === '7')?.autoreplaceLabel).toContain(
+      'bus_intercity',
+    );
+    expect(view.autoreplace).toEqual({ model: 'bus_intercity', whenOld: true });
+    expect(view.autoreplaceOptions.map((option) => option.value)).toContain('bus_intercity');
+    expect(view.autoreplaceOptions.map((option) => option.value)).toEqual([
+      'bus_city',
+      'bus_intercity',
+      'truck_flatbed',
+      'truck_tanker',
+    ]);
+    expect(view.groupActions.every((action) => action.supported)).toBe(true);
+    expect(view.rows.map((row) => row.id)).toEqual([40, 41]);
+    expect(view.rows[0]?.groupId).toBe('7');
+    expect(view.rows[0]?.reliability).toBeNull();
+    const ungrouped = describeVehicleListPanel(world, 0, filters({ group: UNGROUPED_ID }));
+    expect(ungrouped.rows.map((row) => row.id)).toEqual([42]);
+    expect(ungrouped.groupActions.find((action) => action.id === 'start')?.supported).toBe(false);
   });
 
   it('recherche par numéro, entreprise ou groupe et trie par âge/numéro', () => {
