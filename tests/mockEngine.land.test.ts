@@ -16,6 +16,7 @@ import {
   type BuildPoint,
 } from '../src/game/buildRules';
 import { tileIndex } from '../src/game/mapGrid';
+import { findWaterLevelBreaks, waterComponents } from '../src/game/waterLevels';
 
 async function createEngine(seed = 158, size = 128): Promise<MockEngine> {
   const engine = new MockEngine();
@@ -333,6 +334,118 @@ describe('MockEngine : passages à niveau (#159)', () => {
           options: { axis: 'x' },
         });
       }
+      return engine.hash();
+    };
+    expect(await build()).toBe(await build());
+  });
+});
+
+describe('MockEngine : niveaux d’eau cohérents (#205)', () => {
+  function findCanal(map: MapSnapshot): { from: BuildPoint; to: BuildPoint } {
+    for (let y = 2; y < map.height - 2; y += 1) {
+      for (let x = 2; x < map.width - 6; x += 1) {
+        const plan = planCanal({
+          map,
+          from: { x, y },
+          to: { x: x + 4, y },
+          budget: 10_000_000,
+        });
+        if (plan.valid) return { from: { x, y }, to: { x: x + 4, y } };
+      }
+    }
+    throw new Error('aucun canal constructible dans la carte de test');
+  }
+
+  it('génère un plan d’eau unique, sans hauteur erratique', async () => {
+    for (const seed of [205, 777, 4242]) {
+      const engine = await createEngine(seed);
+      const map = mapOf(engine);
+      const levels = new Set<number>();
+      for (let index = 0; index < map.kind.length; index += 1) {
+        const kind = map.kind[index] ?? 0;
+        if (
+          kind === TILE_KIND_INDEX.water ||
+          kind === TILE_KIND_INDEX.river ||
+          kind === TILE_KIND_INDEX.canal ||
+          kind === TILE_KIND_INDEX.lock
+        ) {
+          levels.add(map.heightMap[index] ?? 0);
+        }
+      }
+      expect([...levels]).toEqual([0]);
+      expect(findWaterLevelBreaks(map)).toEqual([]);
+    }
+  });
+
+  it('recolle le canal aux nappes qu’il rejoint', async () => {
+    const engine = await createEngine(206);
+    let map = mapOf(engine);
+    const { from, to } = findCanal(map);
+    engine.send({
+      type: 'build',
+      tool: 'canal',
+      company: 0,
+      from,
+      to,
+      options: { axis: 'x' },
+    });
+    map = engine.snapshot().map ?? map;
+    expect(findWaterLevelBreaks(map)).toEqual([]);
+    for (const component of waterComponents(map)) {
+      expect(component.levels).toHaveLength(1);
+    }
+  });
+
+  it('laisse l’écluse séparer deux biefs sans rupture interne', async () => {
+    const engine = await createEngine(207);
+    let map = mapOf(engine);
+    const { from } = findCanal(map);
+    engine.send({
+      type: 'build',
+      tool: 'canal',
+      company: 0,
+      from,
+      to: { x: from.x + 4, y: from.y },
+      options: { axis: 'x' },
+    });
+    map = engine.snapshot().map ?? map;
+    const lockSpot = { x: from.x + 2, y: from.y };
+    const lockPlan = planLock({
+      map,
+      from: lockSpot,
+      settings: { direction: null },
+      budget: 10_000_000,
+    });
+    expect(lockPlan.valid).toBe(true);
+    engine.send({
+      type: 'build',
+      tool: 'lock',
+      company: 0,
+      from: lockSpot,
+      options: { direction: lockPlan.lock?.direction ?? 'ne' },
+    });
+    map = engine.snapshot().map ?? map;
+    expect(map.kind[tileIndex(lockSpot.x, lockSpot.y, map.width)]).toBe(TILE_KIND_INDEX.lock);
+    // L'écluse est exclue des ruptures : chaque bief reste d'un seul tenant.
+    expect(findWaterLevelBreaks(map)).toEqual([]);
+    for (const component of waterComponents(map)) {
+      expect(component.levels).toHaveLength(1);
+    }
+  });
+
+  it('reste déterministe après normalisation', async () => {
+    const build = async (): Promise<string> => {
+      const engine = await createEngine(208);
+      const map = mapOf(engine);
+      const { from, to } = findCanal(map);
+      engine.send({
+        type: 'build',
+        tool: 'canal',
+        company: 0,
+        from,
+        to,
+        options: { axis: 'x' },
+      });
       return engine.hash();
     };
     expect(await build()).toBe(await build());

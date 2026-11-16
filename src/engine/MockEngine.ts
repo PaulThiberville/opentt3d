@@ -49,6 +49,7 @@ import {
 import { Prng, StateHash, fbm, valueNoise } from '../game/prng';
 import { decodeBase64, encodeBase64 } from '../game/base64';
 import { sampleHeightWorld } from '../game/mapGrid';
+import { normalizeWaterLevels } from '../game/waterLevels';
 import {
   BANKRUPTCY_MONTHS,
   DEFAULT_LOAN_INTERVAL,
@@ -1464,7 +1465,12 @@ class WorldBuilder {
     for (let y = cy - radiusY; y <= cy + radiusY; y += 1) {
       for (let x = cx - radiusX; x <= cx + radiusX; x += 1) {
         if (!inBounds(this.width, this.height, x, y)) continue;
-        this.heightMap[this.index(x, y)] = level;
+        const index = this.index(x, y);
+        // L'eau garde son plan : un aplatissement de ville ou d'industrie ne
+        // doit pas relever une tuile d'eau voisine et créer une nappe flottante.
+        const kind = this.kind[index] ?? K.void;
+        if (kind === K.water || kind === K.river || kind === K.canal || kind === K.lock) continue;
+        this.heightMap[index] = level;
       }
     }
   }
@@ -2284,6 +2290,14 @@ class WorldBuilder {
     this.generateTerrain();
     this.generateTowns();
     this.generateIndustries();
+    // Recolle les nappes héritées des aplatissements de ville/industrie :
+    // l'eau générée doit être un plan continu, jamais une mosaïque de niveaux.
+    normalizeWaterLevels({
+      width: this.width,
+      height: this.height,
+      kind: this.kind,
+      heightMap: this.heightMap,
+    });
     this.generateNetwork();
 
     const world: MockWorld = {
@@ -3014,6 +3028,9 @@ function applyCanal(
     world.flags[tile.index] = TILE_FLAG.WATER;
     world.trackBits[tile.index] = tile.connections;
   }
+  // Un canal qui rejoint une nappe existante ne doit pas créer de marche :
+  // toutes les tuiles 4-connexes hors écluse partagent le même niveau.
+  normalizeWaterLevels(world);
   computeSlopes(world);
   updateVehiclesTransforms(world);
   completeBuild(
@@ -3048,6 +3065,9 @@ function applyLock(
   world.owner[tile.index] = command.company;
   world.flags[tile.index] = TILE_FLAG.WATER;
   world.trackBits[tile.index] = tile.connections;
+  // L'écluse est une barrière : chaque bief de part et d'autre garde son
+  // niveau, mais les tuiles d'un même bief restent alignées.
+  normalizeWaterLevels(world);
   computeSlopes(world);
   updateVehiclesTransforms(world);
   completeBuild(world, company, plan.cost, `Écluse construite pour ${Math.round(plan.cost)} £.`);
@@ -3089,6 +3109,7 @@ function applyAqueduct(
     }
     world.owner[tile.index] = command.company;
   }
+  normalizeWaterLevels(world);
   computeSlopes(world);
   updateVehiclesTransforms(world);
   completeBuild(
