@@ -56,8 +56,9 @@ function station(overrides: Partial<StationSnapshot> = {}): StationSnapshot {
     company: 0,
     name: 'Gare',
     kind: 'train',
-    x: 10,
-    y: 12,
+    // `x/y` est le centre de l'emprise (contrat du snapshot).
+    x: 10.5,
+    y: 12.5,
     width: 3,
     height: 2,
     waiting: [],
@@ -238,7 +239,7 @@ describe('CityLayer : gares', () => {
     const { map } = makeTownMap();
     const layer = new CityLayer();
     layer.setStations(
-      [station(), station({ id: 1, kind: 'road', x: 20, y: 20, width: 1, height: 1 })],
+      [station(), station({ id: 1, kind: 'road', x: 20.5, y: 20.5, width: 1, height: 1 })],
       map,
     );
     expect(layer.stationCountValue).toBe(2);
@@ -283,7 +284,7 @@ describe('CityLayer : gares', () => {
     const { map } = makeTownMap();
     for (let dy = 0; dy < 2; dy += 1) {
       for (let dx = 0; dx < 3; dx += 1) {
-        map.heightMap[(12 + dy) * map.width + (10 + dx)] = 4 + dx + dy;
+        map.heightMap[(11 + dy) * map.width + (9 + dx)] = 4 + dx + dy;
       }
     }
     const layer = new CityLayer();
@@ -301,10 +302,10 @@ describe('CityLayer : gares', () => {
       platforms.getMatrixAt(index, matrix);
       matrix.decompose(position, quaternion, scale);
       expect(position.y).toBeCloseTo(sampleHeightWorld(map, position.x, position.z), 5);
-      expect(Math.floor(position.x)).toBeGreaterThanOrEqual(10);
-      expect(Math.floor(position.x)).toBeLessThanOrEqual(12);
-      expect(Math.floor(position.z)).toBeGreaterThanOrEqual(12);
-      expect(Math.floor(position.z)).toBeLessThanOrEqual(13);
+      expect(Math.floor(position.x)).toBeGreaterThanOrEqual(9);
+      expect(Math.floor(position.x)).toBeLessThanOrEqual(11);
+      expect(Math.floor(position.z)).toBeGreaterThanOrEqual(11);
+      expect(Math.floor(position.z)).toBeLessThanOrEqual(12);
       const tileX = Math.floor(position.x);
       const tileY = Math.floor(position.z);
       const minCorner = Math.min(
@@ -321,7 +322,7 @@ describe('CityLayer : gares', () => {
   it('ne pose pas de canopée de quai sur un aéroport', () => {
     const { map } = makeTownMap();
     const layer = new CityLayer();
-    layer.setStations([station({ kind: 'airport', x: 10, y: 12, width: 3, height: 3 })], map);
+    layer.setStations([station({ kind: 'airport', x: 10.5, y: 12.5, width: 3, height: 3 })], map);
     expect(layer.stationCountValue).toBe(1);
     expect(
       layer.group.children.find((child) => child.name === 'station-platforms'),
@@ -341,6 +342,103 @@ describe('CityLayer : gares', () => {
     const halls = layer.group.children.find((child) => child.name === 'station-halls');
     layer.setStations([{ ...base[0]!, waiting: [{ cargo: 'passengers', amount: 42 }] }], map);
     expect(layer.group.children.find((child) => child.name === 'station-halls')).toBe(halls);
+    layer.dispose();
+  });
+
+  it('centre la halle 1×1 sur sa tuile et les quais dans l’emprise du snapshot', () => {
+    const { map } = makeTownMap();
+    const layer = new CityLayer();
+    const multi = station();
+    const single = station({ id: 1, kind: 'road', x: 20.5, y: 16.5, width: 1, height: 1 });
+    layer.setStations([multi, single], map);
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+
+    const halls = layer.group.children.find(
+      (child) => child.name === 'station-halls',
+    ) as THREE.InstancedMesh;
+    halls.getMatrixAt(0, matrix);
+    matrix.decompose(position, quaternion, scale);
+    expect(position.x).toBe(10.5);
+    expect(position.z).toBe(12.5);
+    halls.getMatrixAt(1, matrix);
+    matrix.decompose(position, quaternion, scale);
+    // Une gare 1×1 est exactement au centre de sa tuile, jamais sur l'arête.
+    expect(position.x).toBe(20.5);
+    expect(position.z).toBe(16.5);
+
+    const platforms = layer.group.children.find(
+      (child) => child.name === 'station-platforms',
+    ) as THREE.InstancedMesh;
+    const tiles = new Set<string>();
+    for (let index = 0; index < platforms.count; index += 1) {
+      platforms.getMatrixAt(index, matrix);
+      matrix.decompose(position, quaternion, scale);
+      expect(position.x - Math.floor(position.x)).toBeCloseTo(0.5, 6);
+      expect(position.z - Math.floor(position.z)).toBeCloseTo(0.5, 6);
+      tiles.add(`${Math.floor(position.x)},${Math.floor(position.z)}`);
+    }
+    // Emprise 3×2 centrée en (10,5 ; 12,5) + arrêt 1×1.
+    expect([...tiles].sort()).toEqual(
+      ['10,11', '10,12', '11,11', '11,12', '20,16', '9,11', '9,12'].sort(),
+    );
+    layer.dispose();
+  });
+
+  it('associe chaque instance de bâtiment à sa tuile réelle', () => {
+    const { map, town } = makeTownMap();
+    const layer = new CityLayer();
+    layer.build([town], map);
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    let seen = 0;
+    for (const target of layer.pickTargets()) {
+      if (!target.mesh.name.startsWith('city-')) continue;
+      for (let index = 0; index < target.mesh.count; index += 1) {
+        target.mesh.getMatrixAt(index, matrix);
+        matrix.decompose(position, quaternion, scale);
+        const info = target.infoForInstance(index);
+        expect(info?.kind).toBe('building');
+        if (info?.kind !== 'building') continue;
+        expect(info.x).toBe(Math.floor(position.x));
+        expect(info.y).toBe(Math.floor(position.z));
+        expect(map.kind[info.y * map.width + info.x]).toBe(TILE_KIND_INDEX.house);
+        seen += 1;
+      }
+    }
+    expect(seen).toBe(layer.buildingCount);
+    // Le socle de ville n'est jamais une cible de bâtiment.
+    expect(layer.pickTargets().some((target) => target.mesh.name === 'city-plinths')).toBe(false);
+    layer.dispose();
+  });
+
+  it('rend les gares pickables avec leur id et une tuile de leur emprise', () => {
+    const { map } = makeTownMap();
+    const layer = new CityLayer();
+    const train = station();
+    layer.setStations([train], map);
+    const stationTargets = layer
+      .pickTargets()
+      .filter((target) => target.mesh.name.startsWith('station-'));
+    expect(stationTargets.length).toBeGreaterThan(0);
+    const left = Math.floor(train.x - train.width / 2);
+    const top = Math.floor(train.y - train.height / 2);
+    for (const target of stationTargets) {
+      for (let index = 0; index < target.mesh.count; index += 1) {
+        const info = target.infoForInstance(index);
+        expect(info?.kind).toBe('station');
+        if (info?.kind !== 'station') continue;
+        expect(info.stationId).toBe(train.id);
+        expect(info.x).toBeGreaterThanOrEqual(left);
+        expect(info.x).toBeLessThan(left + train.width);
+        expect(info.y).toBeGreaterThanOrEqual(top);
+        expect(info.y).toBeLessThan(top + train.height);
+      }
+    }
     layer.dispose();
   });
 });
