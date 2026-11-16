@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { MockEngine } from '../src/engine/MockEngine';
 import { TILE_FLAG, TILE_KIND_INDEX, type MapSnapshot } from '../src/engine/protocol';
-import { planBridge, planTunnel, type BuildPoint } from '../src/game/buildRules';
+import {
+  planBridge,
+  planTunnel,
+  BRIDGE_APPROACH_TILES,
+  type BuildPoint,
+} from '../src/game/buildRules';
 import { tileIndex } from '../src/game/mapGrid';
 
 async function createEngine(seed = 4242, size = 128): Promise<MockEngine> {
@@ -81,6 +86,7 @@ describe('MockEngine : ponts', () => {
       budget: 10_000_000,
     });
     const moneyBefore = engine.snapshot().companies[0]?.money ?? 0;
+    const structuresBefore = engine.snapshot().structures?.length ?? 0;
 
     engine.send({
       type: 'build',
@@ -101,8 +107,17 @@ describe('MockEngine : ponts', () => {
       expect(built.kind[index]).toBe(TILE_KIND_INDEX.bridge);
       expect(built.owner[index]).toBe(0);
     }
-    expect(after.structures).toHaveLength(1);
-    expect(after.structures?.[0]).toMatchObject({
+    expect(after.structures).toHaveLength(structuresBefore + 1);
+    expect(
+      after.structures?.find(
+        (structure) =>
+          structure.kind === 'bridge' &&
+          structure.from.x === site.from.x &&
+          structure.from.y === site.from.y &&
+          structure.to.x === site.to.x &&
+          structure.to.y === site.to.y,
+      ),
+    ).toMatchObject({
       kind: 'bridge',
       company: 0,
       transport: 'rail',
@@ -118,6 +133,7 @@ describe('MockEngine : ponts', () => {
     const engine = await createEngine(77);
     const map = mapOf(engine);
     const site = findBridge(map);
+    const structuresBefore = engine.snapshot().structures?.length ?? 0;
     engine.send({
       type: 'build',
       tool: 'bridge',
@@ -130,7 +146,7 @@ describe('MockEngine : ponts', () => {
     // Ctrl+Z ne démolit qu'une culée : OpenTTD retire tout l'ouvrage.
     engine.send({ type: 'build', tool: 'clear', company: 0, from: site.from });
     const after = engine.snapshot();
-    expect(after.structures).toEqual([]);
+    expect(after.structures).toHaveLength(structuresBefore);
     const restored = after.map;
     if (!restored) throw new Error('la démolition doit invalider la carte');
     for (let x = site.from.x; x <= site.to.x; x += 1) {
@@ -145,6 +161,7 @@ describe('MockEngine : ponts', () => {
     const map = mapOf(engine);
     const from = { x: 4, y: 4 };
     const moneyBefore = engine.snapshot().companies[0]?.money ?? 0;
+    const structuresBefore = engine.snapshot().structures?.length ?? 0;
     engine.send({
       type: 'build',
       tool: 'bridge',
@@ -155,12 +172,68 @@ describe('MockEngine : ponts', () => {
     });
     const after = engine.snapshot();
     expect(after.map).toBeNull();
-    expect(after.structures).toEqual([]);
+    expect(after.structures).toHaveLength(structuresBefore);
     expect(after.companies[0]?.money).toBe(moneyBefore);
     expect(after.news.some((item) => item.kind === 'error' && item.text.includes('droit'))).toBe(
       true,
     );
     expect(map.owner[tileIndex(from.x, from.y, map.width)]).toBe(255);
+  });
+});
+
+describe('MockEngine : ponts générés', () => {
+  it('valide les ponts générés : obstacle réel, rampes planes et matériau adapté', async () => {
+    const engine = await createEngine(1337);
+    const snapshot = engine.snapshot();
+    const map = snapshot.map;
+    if (!map) throw new Error('carte attendue dans le premier snapshot');
+    const bridges = (snapshot.structures ?? []).filter((structure) => structure.kind === 'bridge');
+    // Un tracé sans berges planes est détourné, et les ponts générés
+    // respectent les mêmes invariants que la construction manuelle.
+    expect(bridges.length).toBeGreaterThan(0);
+    for (const bridge of bridges) {
+      if (bridge.kind !== 'bridge') continue;
+      const dx = Math.sign(bridge.to.x - bridge.from.x);
+      const dy = Math.sign(bridge.to.y - bridge.from.y);
+      const length =
+        Math.abs(bridge.to.x - bridge.from.x) + Math.abs(bridge.to.y - bridge.from.y) + 1;
+      expect(bridge.length).toBe(length);
+      const endHeight = map.heightMap[tileIndex(bridge.from.x, bridge.from.y, map.width)] ?? 0;
+      expect(map.heightMap[tileIndex(bridge.to.x, bridge.to.y, map.width)] ?? 0).toBe(endHeight);
+      for (let distance = 1; distance <= BRIDGE_APPROACH_TILES; distance += 1) {
+        for (const [x, y] of [
+          [bridge.from.x - dx * distance, bridge.from.y - dy * distance],
+          [bridge.to.x + dx * distance, bridge.to.y + dy * distance],
+        ] as const) {
+          const index = tileIndex(x, y, map.width);
+          expect(map.kind[index]).not.toBe(TILE_KIND_INDEX.water);
+          expect(map.heightMap[index]).toBe(endHeight);
+        }
+      }
+      let obstacle = false;
+      for (let i = 1; i < length - 1; i += 1) {
+        const x = bridge.from.x + dx * i;
+        const y = bridge.from.y + dy * i;
+        const index = tileIndex(x, y, map.width);
+        const kind = map.kind[index] ?? 0;
+        const height = map.heightMap[index] ?? 0;
+        if (
+          kind === TILE_KIND_INDEX.water ||
+          kind === TILE_KIND_INDEX.river ||
+          kind === TILE_KIND_INDEX.canal ||
+          kind === TILE_KIND_INDEX.lock ||
+          kind === TILE_KIND_INDEX.road ||
+          kind === TILE_KIND_INDEX.rail ||
+          kind === TILE_KIND_INDEX.crossing ||
+          endHeight - height >= 2
+        ) {
+          obstacle = true;
+          break;
+        }
+      }
+      expect(obstacle).toBe(true);
+      if (bridge.material === 'wood') expect(length).toBeLessThanOrEqual(5);
+    }
   });
 });
 
@@ -177,6 +250,7 @@ describe('MockEngine : tunnels', () => {
       budget: 10_000_000,
     });
     const moneyBefore = engine.snapshot().companies[0]?.money ?? 0;
+    const structuresBefore = engine.snapshot().structures?.length ?? 0;
 
     engine.send({
       type: 'build',
@@ -197,7 +271,17 @@ describe('MockEngine : tunnels', () => {
       expect(built.kind[index]).toBe(TILE_KIND_INDEX.tunnel);
       expect(built.owner[index]).toBe(0);
     }
-    expect(after.structures?.[0]).toMatchObject({
+    expect(after.structures).toHaveLength(structuresBefore + 1);
+    expect(
+      after.structures?.find(
+        (structure) =>
+          structure.kind === 'tunnel' &&
+          structure.from.x === site.from.x &&
+          structure.from.y === site.from.y &&
+          structure.to.x === site.to.x &&
+          structure.to.y === site.to.y,
+      ),
+    ).toMatchObject({
       kind: 'tunnel',
       company: 0,
       transport: 'rail',
@@ -209,13 +293,14 @@ describe('MockEngine : tunnels', () => {
     );
 
     engine.send({ type: 'build', tool: 'clear', company: 0, from: site.from, to: site.to });
-    expect(engine.snapshot().structures).toEqual([]);
+    expect(engine.snapshot().structures).toHaveLength(structuresBefore);
   });
 
   it('refuse un tunnel dont un portail est sur l’eau', async () => {
     const engine = await createEngine(101);
     const map = mapOf(engine);
     const moneyBefore = engine.snapshot().companies[0]?.money ?? 0;
+    const structuresBefore = engine.snapshot().structures?.length ?? 0;
     let water: BuildPoint | null = null;
     let second: BuildPoint | null = null;
     for (let y = 1; y < map.height - 1 && !water; y += 1) {
@@ -241,7 +326,7 @@ describe('MockEngine : tunnels', () => {
     });
     const after = engine.snapshot();
     expect(after.map).toBeNull();
-    expect(after.structures).toEqual([]);
+    expect(after.structures).toHaveLength(structuresBefore);
     expect(after.companies[0]?.money).toBe(moneyBefore);
     expect(after.news.some((item) => item.kind === 'error' && item.text.includes('portail'))).toBe(
       true,

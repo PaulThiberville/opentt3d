@@ -3578,6 +3578,79 @@ std::optional<BridgeType> SelectBridgeType(const JsonValue *options, uint bridge
 	return std::nullopt;
 }
 
+/**
+ * Vérifie qu'un pont franchit un obstacle réel et que ses deux rampes
+ * rejoignent une approche plane. Sans ce garde-fou, OpenTTD accepte un pont
+ * posé sur du terrain plat, puis le rendu produit un ouvrage massif et inutile.
+ * Les mêmes invariants sont appliqués côté mock (`planBridge`, #201).
+ */
+bool ValidateBridgeLanding(TileIndex tile, uint expected_height)
+{
+	if (IsWaterTile(tile)) return false;
+	switch (GetTileType(tile)) {
+		case MP_VOID:
+		case MP_HOUSE:
+		case MP_INDUSTRY:
+		case MP_STATION:
+		case MP_TUNNELBRIDGE:
+		case MP_OBJECT:
+			return false;
+		default:
+			break;
+	}
+	return TileHeight(tile) == expected_height;
+}
+
+bool ValidateBridgeSpan(CommandReply &reply, int from_x, int from_y, int to_x, int to_y)
+{
+	const TileIndex start = TileXY(from_x, from_y);
+	const TileIndex end = TileXY(to_x, to_y);
+	const int dx = (to_x > from_x) - (to_x < from_x);
+	const int dy = (to_y > from_y) - (to_y < from_y);
+	const uint start_height = TileHeight(start);
+	const uint end_height = TileHeight(end);
+
+	/* Une tuile d'approche plane derrière chaque culée. */
+	const int ax = from_x - dx;
+	const int ay = from_y - dy;
+	const int bx = to_x + dx;
+	const int by = to_y + dy;
+	if (!IsTileInMap(ax, ay) || !IsTileInMap(bx, by)) {
+		return FailWith(reply, "BRIDGE_APPROACH",
+				"La rampe du pont sort de la carte : reculez la culée d’une tuile.");
+	}
+	if (!ValidateBridgeLanding(TileXY(ax, ay), start_height) ||
+			!ValidateBridgeLanding(TileXY(bx, by), end_height)) {
+		return FailWith(reply, "BRIDGE_APPROACH",
+				"La rampe du pont doit rejoindre une approche plane au même niveau, sur la terre ferme.");
+	}
+
+	const uint bridge_len = GetTunnelBridgeLength(start, end);
+	int first_obstacle = -1;
+	int last_obstacle = -1;
+	int index = 0;
+	for (int x = from_x + dx, y = from_y + dy; x != to_x || y != to_y; x += dx, y += dy) {
+		const TileIndex tile = TileXY(x, y);
+		const auto type = GetTileType(tile);
+		const bool obstacle = IsWaterTile(tile) || type == MP_ROAD || type == MP_RAILWAY ||
+				type == MP_TUNNELBRIDGE || TileHeight(tile) + 2 <= start_height;
+		if (obstacle) {
+			if (first_obstacle < 0) first_obstacle = index;
+			last_obstacle = index;
+		}
+		index++;
+	}
+	if (bridge_len == 0 || first_obstacle < 0) {
+		return FailWith(reply, "BRIDGE_NO_OBSTACLE",
+				"Un pont doit franchir un obstacle réel (eau, vallée, route ou voie ferrée).");
+	}
+	if (first_obstacle > 1 || index - 1 - last_obstacle > 1) {
+		return FailWith(reply, "BRIDGE_OVERHANG",
+				"Portée incohérente : le tablier déborde sur la terre ferme. Placez les culées au bord de l’obstacle.");
+	}
+	return true;
+}
+
 bool BuildBridge(CompanyID company, const JsonValue &root, CommandReply &reply)
 {
 	int from_x, from_y, to_x, to_y;
@@ -3649,6 +3722,8 @@ bool BuildBridge(CompanyID company, const JsonValue &root, CommandReply &reply)
 		return FailWith(reply, "BRIDGE_TOO_LONG",
 				fmt::format("Aucun pont disponible pour une portée de {} tuiles à cette date.", bridge_len));
 	}
+
+	if (!ValidateBridgeSpan(reply, from_x, from_y, to_x, to_y)) return false;
 
 	const TransportType transport = rail ? TRANSPORT_RAIL : TRANSPORT_ROAD;
 	const CommandCost test = RunCompanyCommand<CMD_BUILD_BRIDGE>(

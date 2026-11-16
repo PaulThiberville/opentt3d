@@ -58,6 +58,7 @@ import {
 } from '../game/economyRules';
 import {
   BUILD_TOOL_LABELS,
+  BRIDGE_APPROACH_TILES,
   BRIDGE_MATERIALS,
   BRIDGE_MATERIAL_LABELS,
   directionToIndex,
@@ -70,6 +71,7 @@ import {
   planDepot,
   planLock,
   planRemoveSignal,
+  planLinkedRoute,
   planSignal,
   planStation,
   planTerraform,
@@ -1554,44 +1556,378 @@ class WorldBuilder {
     }
   }
 
-  paintRoute(tiles: P2[], kindIndex: number, owner: number): void {
-    const network = kindIndex === K.rail ? 'rail' : 'road';
-    for (let i = 0; i < tiles.length; i += 1) {
-      const tile = tiles[i];
-      if (!tile) continue;
-      const index = this.index(tile.x, tile.y);
-      const overWater = this.isWater(tile.x, tile.y);
-      const existing = this.kind[index] ?? K.grass;
-      const existingNetwork =
-        existing === K.rail
-          ? 'rail'
-          : existing === K.road
-            ? 'road'
-            : existing === K.crossing
-              ? 'crossing'
-              : null;
-      if (!overWater && existingNetwork !== null && existingNetwork !== network) {
-        // Deux réseaux se croisent : on ne remplace pas la voie existante, on
-        // pose un passage à niveau. Le nibble bas garde l'axe d'origine et le
-        // bit `TRACK_BIT_CROSSING_RAIL` mémorise son réseau (cf. #159).
-        if (existingNetwork !== 'crossing') {
+  /** Eau franchissable par un pont (l'`void` reste infranchissable). */
+  private isBridgeWater(x: number, y: number): boolean {
+    const kind = this.kindAt(x, y);
+    return kind === K.water || kind === K.river || kind === K.canal || kind === K.lock;
+  }
+
+  /**
+   * Aplanit les abords d'un pont de démonstration pour que la rampe rejoigne
+   * une approche crédible. Seules les tuiles naturelles sont terrassées ; un
+   * bâtiment, une gare ou une falaise font préférer un détour au tracé.
+   */
+  private prepareBridgeApproach(path: P2[], run: { start: number; end: number }): boolean {
+    const from = path[run.start - 1];
+    const to = path[run.end + 1];
+    if (!from || !to) return false;
+    const fromHeight = this.heightMap[this.index(from.x, from.y)] ?? 0;
+    const toHeight = this.heightMap[this.index(to.x, to.y)] ?? 0;
+    if (fromHeight !== toHeight) return false;
+    for (const [index, height] of [
+      [run.start - 2, fromHeight],
+      [run.end + 2, toHeight],
+    ] as const) {
+      const point = path[index];
+      if (!point) return false;
+      const kind = this.kindAt(point.x, point.y);
+      const natural =
+        kind === K.grass ||
+        kind === K.clear ||
+        kind === K.rough ||
+        kind === K.trees ||
+        kind === K.coast;
+      if (!natural) return false;
+      const tile = this.index(point.x, point.y);
+      const current = this.heightMap[tile] ?? 0;
+      if (Math.abs(current - height) > 2) return false;
+      this.heightMap[tile] = height;
+    }
+    return true;
+  }
+
+  /**
+   * Chemin déterministe qui contourne l'eau. Le réseau de démonstration
+   * préfère un détour à une traversée de lac : les ponts ne servent qu'aux
+   * cours d'eau étroits dont les deux berges sont au même niveau.
+   */
+  private findDryPath(from: P2, to: P2): P2[] | null {
+    const size = this.width * this.height;
+    const start = this.index(
+      clampInt(Math.floor(from.x), 0, this.width - 1),
+      clampInt(Math.floor(from.y), 0, this.height - 1),
+    );
+    const goal = this.index(
+      clampInt(Math.floor(to.x), 0, this.width - 1),
+      clampInt(Math.floor(to.y), 0, this.height - 1),
+    );
+    if (start === goal) return [{ x: from.x, y: from.y }];
+    if (this.isWater(start % this.width, Math.floor(start / this.width))) return null;
+    if (this.isWater(goal % this.width, Math.floor(goal / this.width))) return null;
+
+    const costAt = (index: number): number => {
+      const kind = this.kind[index] ?? K.void;
+      if (kind === K.water || kind === K.river || kind === K.canal || kind === K.lock) return -1;
+      if (kind === K.void) return -1;
+      if (kind === K.bridge || kind === K.tunnel || kind === K.aqueduct) return 24;
+      if (
+        kind === K.house ||
+        kind === K.industry ||
+        kind === K.station ||
+        kind === K.airport ||
+        kind === K.dock ||
+        kind === K.object
+      ) {
+        return 16;
+      }
+      return 1;
+    };
+
+    const gScore = new Float64Array(size).fill(Number.POSITIVE_INFINITY);
+    const cameFrom = new Int32Array(size).fill(-1);
+    const closed = new Uint8Array(size);
+    const heap: { index: number; f: number; g: number }[] = [];
+    const push = (node: { index: number; f: number; g: number }): void => {
+      heap.push(node);
+      let child = heap.length - 1;
+      while (child > 0) {
+        const parent = (child - 1) >> 1;
+        const a = heap[parent];
+        const b = heap[child];
+        if (!a || !b || a.f < b.f || (a.f === b.f && a.index <= b.index)) break;
+        heap[parent] = b;
+        heap[child] = a;
+        child = parent;
+      }
+    };
+    const pop = (): { index: number; f: number; g: number } | null => {
+      const top = heap[0] ?? null;
+      const last = heap.pop();
+      if (heap.length > 0 && last) {
+        heap[0] = last;
+        let parent = 0;
+        for (;;) {
+          const left = parent * 2 + 1;
+          const right = left + 1;
+          let best = parent;
+          const current = heap[best];
+          const l = heap[left];
+          const r = heap[right];
+          if (l && (!current || l.f < current.f || (l.f === current.f && l.index < current.index)))
+            best = left;
+          const bestNode = heap[best];
+          if (
+            r &&
+            (!bestNode || r.f < bestNode.f || (r.f === bestNode.f && r.index < bestNode.index))
+          )
+            best = right;
+          if (best === parent) break;
+          const swap = heap[parent];
+          const other = heap[best];
+          if (!swap || !other) break;
+          heap[parent] = other;
+          heap[best] = swap;
+          parent = best;
+        }
+      }
+      return top;
+    };
+    const gx = goal % this.width;
+    const gy = Math.floor(goal / this.width);
+    const heuristic = (index: number): number =>
+      Math.abs((index % this.width) - gx) + Math.abs(Math.floor(index / this.width) - gy);
+
+    gScore[start] = 0;
+    push({ index: start, f: heuristic(start), g: 0 });
+    let guard = size * 4;
+    while (heap.length > 0 && guard > 0) {
+      guard -= 1;
+      const node = pop();
+      if (!node) break;
+      if (closed[node.index]) continue;
+      if (node.index === goal) {
+        const path: P2[] = [];
+        let cursor = goal;
+        while (cursor >= 0) {
+          path.push({ x: cursor % this.width, y: Math.floor(cursor / this.width) });
+          if (cursor === start) break;
+          cursor = cameFrom[cursor] ?? -1;
+        }
+        return path.reverse();
+      }
+      closed[node.index] = 1;
+      const x = node.index % this.width;
+      const y = Math.floor(node.index / this.width);
+      for (const [dx, dy] of [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+      ] as const) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (!inBounds(this.width, this.height, nx, ny)) continue;
+        const next = this.index(nx, ny);
+        if (closed[next]) continue;
+        const step = costAt(next);
+        if (step < 0) continue;
+        const tentative = node.g + step;
+        if (tentative >= (gScore[next] ?? Number.POSITIVE_INFINITY)) continue;
+        gScore[next] = tentative;
+        cameFrom[next] = node.index;
+        push({ index: next, f: tentative + heuristic(next), g: tentative });
+      }
+    }
+    return null;
+  }
+
+  paintRoute(tiles: P2[], kindIndex: number, owner: number): P2[] {
+    const maxBridgeSpan = 6;
+    const collectRuns = (path: P2[]): { start: number; end: number }[] => {
+      const runs: { start: number; end: number }[] = [];
+      for (let i = 0; i < path.length; i += 1) {
+        const point = path[i];
+        if (!point || !this.isBridgeWater(point.x, point.y)) continue;
+        let end = i;
+        while (end + 1 < path.length) {
+          const next = path[end + 1];
+          if (!next || !this.isBridgeWater(next.x, next.y)) break;
+          end += 1;
+        }
+        runs.push({ start: i, end });
+        i = end;
+      }
+      // Deux trous séparés d'une seule tuile forment un seul ouvrage.
+      for (let i = 1; i < runs.length; i += 1) {
+        const previous = runs[i - 1];
+        const current = runs[i];
+        if (!previous || !current) continue;
+        if (current.start - previous.end <= 2) {
+          previous.end = current.end;
+          runs.splice(i, 1);
+          i -= 1;
+        }
+      }
+      return runs;
+    };
+    const validRun = (path: P2[], run: { start: number; end: number }): boolean => {
+      if (run.start <= 0 || run.end >= path.length - 1) return false;
+      if (run.end - run.start + 1 > maxBridgeSpan) return false;
+      const from = path[run.start - 1];
+      const to = path[run.end + 1];
+      if (!from || !to) return false;
+      const fromHeight = this.heightMap[this.index(from.x, from.y)] ?? 0;
+      const toHeight = this.heightMap[this.index(to.x, to.y)] ?? 0;
+      if (fromHeight !== toHeight) return false;
+      // Approche plane : la rampe du rendu rejoint le sol sans traverser une
+      // falaise ni surplomber l'eau.
+      for (let distance = 1; distance <= BRIDGE_APPROACH_TILES; distance += 1) {
+        const before = path[run.start - 1 - distance];
+        const after = path[run.end + 1 + distance];
+        if (!before || !after) return false;
+        for (const [point, height] of [
+          [before, fromHeight],
+          [after, toHeight],
+        ] as const) {
+          if (this.isBridgeWater(point.x, point.y) || this.kindAt(point.x, point.y) === K.void) {
+            return false;
+          }
+          if ((this.heightMap[this.index(point.x, point.y)] ?? 0) !== height) return false;
+        }
+      }
+      return true;
+    };
+
+    let path = tiles;
+    let runs = collectRuns(path);
+    if (runs.some((run) => !validRun(path, run))) {
+      for (const run of runs) {
+        if (!validRun(path, run)) this.prepareBridgeApproach(path, run);
+      }
+    }
+    if (runs.some((run) => !validRun(path, run))) {
+      const first = path[0];
+      const last = path[path.length - 1];
+      if (first && last) {
+        const detour = this.findDryPath(first, last);
+        if (detour) {
+          path = detour;
+          runs = collectRuns(path);
+        }
+      }
+    }
+    const accepted = runs.some((run) => !validRun(path, run))
+      ? runs
+      : runs.filter((run) => validRun(path, run));
+    const rangeByStart = new Map<
+      number,
+      { start: number; end: number; underlay: MockStructure['underlay'] }
+    >();
+    for (const run of accepted) {
+      const start = run.start - 1;
+      const end = run.end + 1;
+      const underlay: MockStructure['underlay'] = [];
+      for (let i = start; i <= end; i += 1) {
+        const point = path[i];
+        if (!point) continue;
+        const index = this.index(point.x, point.y);
+        underlay.push({
+          index,
+          kind: this.kind[index] ?? K.grass,
+          owner: this.owner[index] ?? COMPANY_NONE,
+          flags: this.flags[index] ?? 0,
+          trackBits: this.trackBits[index] ?? 0,
+        });
+      }
+      rangeByStart.set(start, { start, end, underlay });
+    }
+
+    let range: { start: number; end: number; underlay: MockStructure['underlay'] } | null = null;
+    for (let i = 0; i < path.length; i += 1) {
+      const point = path[i];
+      if (!point) continue;
+      const index = this.index(point.x, point.y);
+      const active = rangeByStart.get(i) ?? null;
+      if (active) {
+        range = active;
+      }
+      if (range && i >= range.start && i <= range.end) {
+        const abutment = i === range.start || i === range.end;
+        if (abutment) {
+          this.kind[index] = K.bridge;
+          this.owner[index] = owner;
+          this.trackBits[index] = 0;
+          this.flags[index] = TILE_FLAG.BRIDGE;
+        } else {
+          this.flags[index] = (this.flags[index] ?? 0) | TILE_FLAG.BRIDGE;
+          this.owner[index] = owner;
+        }
+      } else {
+        range = null;
+        const existing = this.kind[index] ?? K.grass;
+        const existingNetwork =
+          existing === K.rail
+            ? 'rail'
+            : existing === K.road
+              ? 'road'
+              : existing === K.crossing
+                ? 'crossing'
+                : null;
+        const network = kindIndex === K.rail ? 'rail' : 'road';
+        if (
+          existingNetwork !== null &&
+          existingNetwork !== network &&
+          existingNetwork !== 'crossing'
+        ) {
+          // Deux réseaux se croisent : passage à niveau, pas d'écrasement.
           const bits = (this.trackBits[index] ?? 0) & 0x0f;
           this.kind[index] = K.crossing;
           this.trackBits[index] = bits | (existing === K.rail ? TRACK_BIT_CROSSING_RAIL : 0);
+          this.owner[index] = owner;
+          continue;
         }
+        this.kind[index] = kindIndex;
         this.owner[index] = owner;
-        continue;
+        const previous = path[i - 1];
+        const next = path[i + 1];
+        let bits = 0;
+        if (previous) bits |= directionBit(point, previous);
+        if (next) bits |= directionBit(point, next);
+        this.trackBits[index] = (this.trackBits[index] ?? 0) | bits;
       }
-      this.kind[index] = overWater ? K.bridge : kindIndex;
-      if (overWater) this.flags[index] = (this.flags[index] ?? 0) | TILE_FLAG.BRIDGE;
-      this.owner[index] = owner;
-      const previous = tiles[i - 1];
-      const next = tiles[i + 1];
-      let bits = 0;
-      if (previous) bits |= directionBit(tile, previous);
-      if (next) bits |= directionBit(tile, next);
-      this.trackBits[index] = (this.trackBits[index] ?? 0) | bits;
+      if (range && i === range.end) {
+        const from = path[range.start];
+        const to = path[range.end];
+        if (from && to) {
+          const length = range.end - range.start + 1;
+          const span = length - 1;
+          let maxGround = 0;
+          for (let j = range.start; j <= range.end; j += 1) {
+            const item = path[j];
+            if (!item) continue;
+            maxGround = Math.max(maxGround, this.heightMap[this.index(item.x, item.y)] ?? 0);
+          }
+          const material: BridgeMaterial =
+            kindIndex === K.rail
+              ? span <= 5
+                ? 'steel'
+                : 'tubular'
+              : span <= 2
+                ? 'concrete'
+                : span <= 5
+                  ? 'steel'
+                  : 'tubular';
+          const spec = BRIDGE_MATERIALS[material];
+          this.structures.push({
+            id: this.structures.length,
+            type: 'bridge',
+            company: owner,
+            transport: kindIndex === K.rail ? 'rail' : 'road',
+            material,
+            from: { ...from },
+            to: { ...to },
+            length,
+            deckHeight: maxGround + spec.deckLift,
+            maintenancePerYear: Math.round(
+              length * (kindIndex === K.rail ? spec.railMaintenance : spec.roadMaintenance),
+            ),
+            underlay: range.underlay,
+          });
+        }
+        range = null;
+      }
     }
+    return path;
   }
 
   private generateTerrain(): void {
@@ -2083,8 +2419,8 @@ class WorldBuilder {
     // Réseau ferroviaire : gare A ↔ gare B.
     if (trainA && trainB) {
       const tiles = traceTiles({ x: trainA.x, y: trainA.y }, { x: trainB.x, y: trainB.y });
-      this.paintRoute(tiles, K.rail, 0);
-      const path = loopPath(tiles);
+      const route = this.paintRoute(tiles, K.rail, 0);
+      const path = loopPath(route);
       const stops = this.segmentsForStops(path, [
         { x: Math.floor(trainA.x), y: Math.floor(trainA.y), kind: 'station', id: trainA.id },
         { x: Math.floor(trainB.x), y: Math.floor(trainB.y), kind: 'station', id: trainB.id },
@@ -2118,8 +2454,8 @@ class WorldBuilder {
     // Réseau routier voyageurs : arrêt A ↔ arrêt B.
     if (roadA && roadB) {
       const tiles = traceTiles({ x: roadA.x, y: roadA.y }, { x: roadB.x, y: roadB.y });
-      this.paintRoute(tiles, K.road, 0);
-      const path = loopPath(tiles);
+      const route = this.paintRoute(tiles, K.road, 0);
+      const path = loopPath(route);
       const stops = this.segmentsForStops(path, [
         { x: Math.floor(roadA.x), y: Math.floor(roadA.y), kind: 'station', id: roadA.id },
         { x: Math.floor(roadB.x), y: Math.floor(roadB.y), kind: 'station', id: roadB.id },
@@ -2160,8 +2496,8 @@ class WorldBuilder {
       const to = this.industries[toId];
       if (!from || !to) continue;
       const tiles = traceTiles({ x: from.x, y: from.y }, { x: to.x, y: to.y });
-      this.paintRoute(tiles, K.road, 0);
-      const path = loopPath(tiles);
+      const route = this.paintRoute(tiles, K.road, 0);
+      const path = loopPath(route);
       const stops = this.segmentsForStops(path, [
         { x: Math.floor(from.x), y: Math.floor(from.y), kind: 'industry', id: from.id },
         { x: Math.floor(to.x), y: Math.floor(to.y), kind: 'industry', id: to.id },
@@ -5103,26 +5439,39 @@ function aiBuildLinkBetween(
       const axes: ('x' | 'y')[] =
         Math.abs(siteA.x - siteB.x) >= Math.abs(siteA.y - siteB.y) ? ['x', 'y'] : ['y', 'x'];
       for (const axis of axes) {
-        const plan = planBuild({
+        const link = planLinkedRoute({
           map: mapSnapshotView(world),
-          tool: 'road',
           from: siteA,
           to: siteB,
           axis,
+          kind: 'road',
           company: company.id,
           budget: company.money,
         });
-        if (!plan.valid || plan.cost > company.money * 0.65) continue;
+        if (!link || link.cost > company.money * 0.65) continue;
 
         const beforeStations = world.stations.length;
-        applyBuild(world, {
-          type: 'build',
-          tool: 'road',
-          company: company.id,
-          from: siteA,
-          to: siteB,
-          options: { axis },
-        });
+        for (const piece of link.pieces) {
+          if (piece.tool === 'bridge') {
+            applyBuild(world, {
+              type: 'build',
+              tool: 'bridge',
+              company: company.id,
+              from: piece.from,
+              to: piece.to,
+              options: { kind: 'road', material: piece.material ?? 'steel' },
+            });
+          } else {
+            applyBuild(world, {
+              type: 'build',
+              tool: 'road',
+              company: company.id,
+              from: piece.from,
+              to: piece.to,
+              options: { axis: piece.axis },
+            });
+          }
+        }
         // La gare de départ suit le premier segment, celle d'arrivée le
         // dernier : sur un tracé en L, leurs axes diffèrent souvent.
         const startDirection = axis === 'x' ? 'ne' : 'nw';

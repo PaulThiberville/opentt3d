@@ -139,6 +139,7 @@ describe('MockEngine : construction', () => {
       }
     }
     if (!spot) throw new Error('aucun site de pont dans la carte de test');
+    const beforeStructures = engine.snapshot().structures?.length ?? 0;
     const moneyBefore = engine.snapshot().companies[0]?.money ?? 0;
     engine.send({
       type: 'build',
@@ -159,13 +160,22 @@ describe('MockEngine : construction', () => {
       TILE_KIND_INDEX.bridge,
     );
     expect(built.kind[tileIndex(spot.to.x, spot.to.y, built.width)]).toBe(TILE_KIND_INDEX.bridge);
-    expect(after.structures?.[0]).toMatchObject({ kind: 'bridge', material: 'wood', company: 0 });
+    expect(after.structures).toHaveLength(beforeStructures + 1);
+    const builtStructure = after.structures?.find(
+      (structure) =>
+        structure.kind === 'bridge' &&
+        structure.from.x === spot.from.x &&
+        structure.from.y === spot.from.y &&
+        structure.to.x === spot.to.x &&
+        structure.to.y === spot.to.y,
+    );
+    expect(builtStructure).toMatchObject({ kind: 'bridge', material: 'wood', company: 0 });
     expect((after.companies[0]?.money ?? 0) - moneyBefore).toBeLessThan(0);
     expect(after.news.some((item) => item.text.includes('Pont en bois construit'))).toBe(true);
 
     engine.send({ type: 'build', tool: 'clear', company: 0, from: spot.from, to: spot.to });
     const cleared = engine.snapshot();
-    expect(cleared.structures).toEqual([]);
+    expect(cleared.structures).toHaveLength(beforeStructures);
     const restored = cleared.map;
     if (!restored) throw new Error('la démolition doit invalider la carte');
     expect(restored.kind[tileIndex(spot.from.x, spot.from.y, restored.width)]).toBe(

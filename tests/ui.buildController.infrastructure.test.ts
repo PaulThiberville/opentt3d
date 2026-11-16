@@ -141,7 +141,12 @@ describe('BuildController : gares', () => {
 
 describe('BuildController : ponts et tunnels', () => {
   it('affiche un pont A→B, mémorise le matériau et le commit', () => {
-    const { controller, previews, commits, settings } = harness();
+    const map = makeMap();
+    for (let x = 4; x <= 6; x += 1) {
+      setTile(map, x, 4, TILE_KIND_INDEX.water);
+      map.heightMap[4 * map.width + x] = 0;
+    }
+    const { controller, previews, commits, settings } = harness(map);
     settings.bridge = { kind: 'rail', material: 'suspension' };
     controller.setSettings(settings);
     controller.setTool('bridge');

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MockEngine } from '../src/engine/MockEngine';
 import {
+  TILE_FLAG,
   TILE_KIND_INDEX,
   type DepotSnapshot,
   type MapSnapshot,
@@ -82,7 +83,9 @@ function surfaceViolation(
   if (vehicle.kind === 'aircraft') return null;
   const x = Math.floor(vehicle.x);
   const y = Math.floor(vehicle.y);
-  const tile = map.kind[tileIndex(x, y, map.width)] ?? TILE_KIND_INDEX.void;
+  const index = tileIndex(x, y, map.width);
+  const tile = map.kind[index] ?? TILE_KIND_INDEX.void;
+  const onBridge = ((map.flags[index] ?? 0) & TILE_FLAG.BRIDGE) !== 0;
   const name = (value: number): string =>
     Object.entries(TILE_KIND_INDEX).find(([, index]) => index === value)?.[0] ?? String(value);
 
@@ -91,7 +94,7 @@ function surfaceViolation(
       ? null
       : `${vehicle.kind} sur passage à niveau`;
   }
-  if (tile === TILE_KIND_INDEX.bridge || tile === TILE_KIND_INDEX.tunnel) return null;
+  if (tile === TILE_KIND_INDEX.bridge || tile === TILE_KIND_INDEX.tunnel || onBridge) return null;
   if (tile === TILE_KIND_INDEX.station) {
     const station = stationAtTile(stations, x, y);
     if (!station)
