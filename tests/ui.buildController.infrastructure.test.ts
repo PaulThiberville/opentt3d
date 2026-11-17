@@ -39,6 +39,25 @@ function setTile(
   map.owner[index] = owner;
 }
 
+/**
+ * Colline régulière au sens OpenTTD pour un tunnel +x : portail (2,y) en talus
+ * SW, crête à 7 sur x=4..7, sortie (8,y) en talus NE. `heightMap` porte le coin
+ * nord de chaque tuile, d'où le décalage d'un niveau sur la sortie.
+ */
+function tunnelMound(map: MapSnapshot, y = 4): void {
+  const set = (x: number, dy: number, height: number): void => {
+    map.heightMap[(y + dy) * map.width + x] = height;
+  };
+  set(3, 0, 5);
+  set(3, 1, 5);
+  for (let x = 4; x <= 7; x += 1) {
+    set(x, 0, 7);
+    set(x, 1, 7);
+  }
+  set(8, 0, 5);
+  set(8, 1, 5);
+}
+
 interface Harness {
   controller: BuildController;
   previews: (BuildPlan | null)[];
@@ -247,22 +266,23 @@ describe('BuildController : ponts et tunnels', () => {
 
   it('trouve la sortie du tunnel quand le drag s’arrête sur le relief', () => {
     const map = makeMap();
-    for (let x = 4; x <= 6; x += 1) map.heightMap[x + 4 * map.width] = 7;
+    tunnelMound(map);
     const { controller, previews, commits, settings } = harness(map);
     settings.tunnel = { kind: 'rail' };
     controller.setSettings(settings);
     controller.setTool('tunnel');
     controller.handleBegin({ x: 2, y: 4 });
-    // Le curseur est sur la colline (hauteur 7) et non sur un portail.
+    // Le curseur est sur la colline et non sur un portail : la sortie est
+    // retrouvée à la même surface, pas au coin nord surélevé.
     controller.handleMove({ x: 5, y: 5 });
     const plan = lastPlan(previews);
     expect(plan?.from).toEqual({ x: 2, y: 4 });
-    expect(plan?.to).toEqual({ x: 7, y: 4 });
+    expect(plan?.to).toEqual({ x: 8, y: 4 });
     expect(plan?.valid).toBe(true);
     expect(plan?.tunnel?.depth).toBe(3);
     controller.handleEnd({ x: 5, y: 5 });
     expect(commits).toHaveLength(1);
-    expect(commits[0]?.to).toEqual({ x: 7, y: 4 });
+    expect(commits[0]?.to).toEqual({ x: 8, y: 4 });
   });
 
   it('refuse un clic sans drag avec un message explicite', () => {
@@ -276,10 +296,7 @@ describe('BuildController : ponts et tunnels', () => {
 
   it('prévisualise et construit un tunnel entre deux portails', () => {
     const map = makeMap();
-    for (let x = 4; x <= 6; x += 1) {
-      const index = x + 4 * map.width;
-      map.heightMap[index] = 7;
-    }
+    tunnelMound(map);
     const { controller, previews, commits, settings } = harness(map);
     settings.tunnel = { kind: 'rail' };
     controller.setSettings(settings);

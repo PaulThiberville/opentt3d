@@ -265,7 +265,7 @@ const BUILD_TOOL_INTROS: Record<BuildTool, string> = {
   aqueduct: 'Aqueducs : glissez d’une rive à l’autre au-dessus du val',
   crossing: 'Passage à niveau : cliquez sur une voie droite',
   bridge: 'Ponts : glissez d’une culée à l’autre, M change le matériau',
-  tunnel: 'Tunnels : glissez depuis le portail d’entrée à travers le relief',
+  tunnel: 'Tunnels : glissez depuis un talus d’entrée à travers le relief',
 };
 
 /** Touches 1/2/3 du mode photo, alignées sur `PHOTO_PRESET_IDS`. */
