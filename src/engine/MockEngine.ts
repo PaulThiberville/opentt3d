@@ -3087,11 +3087,14 @@ function applyStation(
     world.flags[tile.index] = 0;
     writeSignalData(world, tile.index, 0);
   }
-  const footprint = stationFootprint(plan.station ?? settings);
+  // `planStation` a pu aligner un arrêt en passage sur la chaussée : c'est
+  // cette orientation résolue qui doit figurer dans le snapshot, pas celle,
+  // éventuellement perpendiculaire, envoyée par le client.
   const resolved = plan.station ?? settings;
+  const footprint = stationFootprint(resolved);
   const id = world.stations.length;
   const town = nearestTownName(world, plan.from.x, plan.from.y);
-  const baseName = settings.kind === 'rail' ? `Gare de ${town}` : `Arrêt de ${town}`;
+  const baseName = resolved.kind === 'rail' ? `Gare de ${town}` : `Arrêt de ${town}`;
   let name = baseName;
   let suffix = 2;
   while (world.stations.some((station) => station.name === name)) {
@@ -3102,23 +3105,23 @@ function applyStation(
     id,
     company: command.company,
     name,
-    kind: settings.kind === 'rail' ? 'train' : 'road',
+    kind: resolved.kind === 'rail' ? 'train' : 'road',
     x: plan.from.x + footprint.width / 2,
     y: plan.from.y + footprint.height / 2,
     width: footprint.width,
     height: footprint.height,
     waiting: [],
-    ...(settings.kind === 'road'
+    ...(resolved.kind === 'road'
       ? {
-          driveThrough: settings.driveThrough,
-          ...(settings.driveThrough ? { roadAxis: directionAxis(settings.direction) } : {}),
+          driveThrough: resolved.driveThrough,
+          ...(resolved.driveThrough ? { roadAxis: directionAxis(resolved.direction) } : {}),
         }
       : {}),
   });
   const message =
-    settings.kind === 'rail'
+    resolved.kind === 'rail'
       ? `Gare ferroviaire construite (${resolved.platforms} voie(s) × ${resolved.length} tuile(s)).`
-      : settings.driveThrough
+      : resolved.driveThrough
         ? 'Gare routière en passage construite.'
         : 'Gare routière construite.';
   completeBuild(world, company, plan.cost, message);

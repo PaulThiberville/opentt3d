@@ -10,12 +10,14 @@ import {
   commandFromPlan,
   createBuildSettings,
   planBridge,
+  planBuild,
   planTunnel,
   type BuildPlan,
   type BuildPoint,
 } from '../src/game/buildRules';
 import { BuildController } from '../src/ui/buildController';
-import type { MapSnapshot } from '../src/engine/protocol';
+import { TILE_KIND_INDEX, type MapSnapshot } from '../src/engine/protocol';
+import { tileIndex } from '../src/game/mapGrid';
 
 async function createEngine(seed = 4242): Promise<MockEngine> {
   const engine = new MockEngine();
@@ -131,6 +133,67 @@ function lastPlan(plans: BuildPlan[]): BuildPlan {
   if (!plan) throw new Error('aperçu attendu');
   return plan;
 }
+
+describe('UI → plan → MockEngine : arrêt de bus en passage (#230)', () => {
+  function findVerticalRoad(map: MapSnapshot): { from: BuildPoint; to: BuildPoint } {
+    for (let x = 1; x < map.width - 1; x += 1) {
+      for (let y = 1; y < map.height - 4; y += 1) {
+        const plan = planBuild({
+          map,
+          tool: 'road',
+          from: { x, y },
+          to: { x, y: y + 2 },
+          budget: 10_000_000,
+        });
+        if (plan.valid) return { from: plan.from, to: plan.to };
+      }
+    }
+    throw new Error('aucune route verticale constructible');
+  }
+
+  it('un clic du contrôleur pose l’arrêt sur la chaussée, sans halle', async () => {
+    const engine = await createEngine(9090);
+    const road = findVerticalRoad(mapOf(engine));
+    engine.send({ type: 'build', tool: 'road', company: 0, from: road.from, to: road.to });
+    const map = engine.snapshot().map;
+    if (!map) throw new Error('la route doit invalider la carte');
+
+    const middle = { x: road.from.x, y: road.from.y + 1 };
+    const { controller, plans } = harness(map);
+    const settings = createBuildSettings();
+    settings.station = {
+      ...settings.station,
+      kind: 'road',
+      driveThrough: true,
+      // Direction perpendiculaire au départ : l'aperçu doit s'aligner sur Y.
+      direction: 'ne',
+    };
+    controller.setSettings(settings);
+    controller.setTool('station');
+    controller.handleBegin(middle);
+    controller.handleEnd(middle);
+
+    const plan = lastPlan(plans);
+    expect(plan.valid).toBe(true);
+    expect(plan.station?.driveThrough).toBe(true);
+    expect(plan.station?.direction).toBe('nw');
+    expect(plan.axis).toBe('y');
+
+    engine.send(commandFromPlan(plan, 0));
+    const after = engine.snapshot();
+    const built = after.map;
+    if (!built) throw new Error('l’arrêt doit invalider la carte');
+    const index = tileIndex(middle.x, middle.y, built.width);
+    expect(built.kind[index]).toBe(TILE_KIND_INDEX.station);
+    expect((built.trackBits[index] ?? 0) & 0x0f).toBe(1 | 4);
+    const station = after.stations.find(
+      (item) => item.kind === 'road' && item.x === middle.x + 0.5 && item.y === middle.y + 0.5,
+    );
+    expect(station?.driveThrough).toBe(true);
+    expect(station?.roadAxis).toBe('y');
+    expect(after.news.some((item) => item.text.includes('en passage'))).toBe(true);
+  });
+});
 
 describe('UI → plan → MockEngine : ouvrages (#216/#217)', () => {
   it('construit le pont tracé par un drag diagonal du contrôleur', async () => {

@@ -154,6 +154,55 @@ describe('MockEngine : gares', () => {
     expect(after.news.some((item) => item.text.includes('en passage'))).toBe(true);
   });
 
+  it('pose un arrêt en passage sur une route verticale malgré une direction perpendiculaire', async () => {
+    const engine = await createEngine(321);
+    const map = mapOf(engine);
+    let road: ReturnType<typeof planBuild> | null = null;
+    for (let x = 1; x < map.width - 1 && !road; x += 1) {
+      for (let y = 1; y < map.height - 4 && !road; y += 1) {
+        const plan = planBuild({
+          map,
+          tool: 'road',
+          from: { x, y },
+          to: { x, y: y + 2 },
+          budget: 10_000_000,
+        });
+        if (plan.valid) road = plan;
+      }
+    }
+    if (!road) throw new Error('aucune route verticale constructible');
+    engine.send({
+      type: 'build',
+      tool: 'road',
+      company: 0,
+      from: road.from,
+      to: road.to,
+    });
+    engine.snapshot();
+    const middle = { x: road.from.x, y: road.from.y + 1 };
+    engine.send({
+      type: 'build',
+      tool: 'station',
+      company: 0,
+      from: middle,
+      // Direction volontairement perpendiculaire : le mock doit s'aligner.
+      options: { kind: 'road', direction: 'ne', drive_through: true },
+    });
+    const after = engine.snapshot();
+    const built = after.map;
+    if (!built) throw new Error('l’arrêt doit invalider la carte');
+    const index = tileIndex(middle.x, middle.y, built.width);
+    expect(built.kind[index]).toBe(TILE_KIND_INDEX.station);
+    expect((built.trackBits[index] ?? 0) & 0x0f).toBe(1 | 4);
+    const station = after.stations.find(
+      (item) => item.kind === 'road' && item.x === middle.x + 0.5,
+    );
+    expect(station?.driveThrough).toBe(true);
+    expect(station?.roadAxis).toBe('y');
+    expect(after.news.some((item) => item.text.includes('en passage'))).toBe(true);
+    expect(after.news.some((item) => item.text.includes('Construction impossible'))).toBe(false);
+  });
+
   it('refuse une gare sur l’eau sans débiter ni modifier la carte', async () => {
     const engine = await createEngine(99);
     const map = mapOf(engine);
