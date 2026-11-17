@@ -8,6 +8,7 @@ import {
   planBridge,
   planLinkedRoute,
   planTunnel,
+  resolveBridgeSpan,
   resolveTunnelSpan,
   structureDragTarget,
   type BridgeMaterial,
@@ -59,11 +60,15 @@ describe('planBridge', () => {
       budget: 1_000_000,
     });
     expect(plan.valid).toBe(true);
-    expect(plan.tiles).toHaveLength(6);
-    expect(plan.bridge).toMatchObject({ kind: 'rail', material: 'wood', span: 5, length: 6 });
+    // Le drag déborde de part et d'autre : les culées sont recalées sur les
+    // berges réelles de la rivière (#243).
+    expect(plan.from).toEqual({ x: 3, y: 5 });
+    expect(plan.to).toEqual({ x: 6, y: 5 });
+    expect(plan.tiles).toHaveLength(4);
+    expect(plan.bridge).toMatchObject({ kind: 'rail', material: 'wood', span: 3, length: 4 });
     expect(plan.bridge?.deckHeight).toBe(6);
-    expect(plan.cost).toBe(2 * 460 + 4 * BRIDGE_MATERIALS.wood.railCost);
-    expect(plan.bridge?.maintenance).toBe(Math.round(6 * BRIDGE_MATERIALS.wood.railMaintenance));
+    expect(plan.cost).toBe(2 * 460 + 2 * BRIDGE_MATERIALS.wood.railCost);
+    expect(plan.bridge?.maintenance).toBe(Math.round(4 * BRIDGE_MATERIALS.wood.railMaintenance));
     expect(plan.tiles.every((tile) => tile.elevation !== undefined)).toBe(true);
   });
 
@@ -105,27 +110,32 @@ describe('planBridge', () => {
     const overhang = makeMap();
     setTile(overhang, 7, 4, TILE_KIND_INDEX.water, 0);
     setTile(overhang, 8, 4, TILE_KIND_INDEX.water, 0);
-    const tooMuchLand = planBridge({
+    const snapped = planBridge({
       map: overhang,
       from: { x: 2, y: 4 },
       to: { x: 12, y: 4 },
       settings: { kind: 'road', material: 'wood' },
       budget: 1_000_000,
     });
-    expect(tooMuchLand.valid).toBe(false);
-    expect(tooMuchLand.reason).toContain('Portée incohérente');
+    // Le drag part trop loin sur la terre ferme : les culées sont ramenées au
+    // bord de l'eau au lieu de refuser la portée (#243).
+    expect(snapped.valid).toBe(true);
+    expect(snapped.from).toEqual({ x: 6, y: 4 });
+    expect(snapped.to).toEqual({ x: 9, y: 4 });
+    expect(snapped.tiles).toHaveLength(4);
   });
 
   it('refuse une rampe en falaise ou posée sur l’eau', () => {
     const cliff = makeMap();
     setTile(cliff, 5, 4, TILE_KIND_INDEX.water, 0);
     setTile(cliff, 6, 4, TILE_KIND_INDEX.water, 0);
-    setTile(cliff, 1, 4, TILE_KIND_INDEX.grass, 6);
-    setTile(cliff, 2, 4, TILE_KIND_INDEX.grass, 6);
+    // La berge de la culée (4) donne sur une falaise deux niveaux plus haut :
+    // la rampe ne peut pas monter (#243).
+    setTile(cliff, 3, 4, TILE_KIND_INDEX.grass, 6);
     const cliffPlan = planBridge({
       map: cliff,
-      from: { x: 3, y: 4 },
-      to: { x: 8, y: 4 },
+      from: { x: 4, y: 4 },
+      to: { x: 7, y: 4 },
       settings: { kind: 'road', material: 'wood' },
       budget: 1_000_000,
     });
@@ -133,13 +143,13 @@ describe('planBridge', () => {
     expect(cliffPlan.reason).toContain('rampe');
 
     const flooded = makeMap();
+    setTile(flooded, 3, 4, TILE_KIND_INDEX.water, 0);
     setTile(flooded, 5, 4, TILE_KIND_INDEX.water, 0);
     setTile(flooded, 6, 4, TILE_KIND_INDEX.water, 0);
-    setTile(flooded, 2, 4, TILE_KIND_INDEX.water, 0);
     const floodedPlan = planBridge({
       map: flooded,
-      from: { x: 3, y: 4 },
-      to: { x: 8, y: 4 },
+      from: { x: 4, y: 4 },
+      to: { x: 7, y: 4 },
       settings: { kind: 'road', material: 'wood' },
       budget: 1_000_000,
     });
@@ -151,15 +161,16 @@ describe('planBridge', () => {
     const slope = makeMap();
     setTile(slope, 4, 4, TILE_KIND_INDEX.water, 0);
     setTile(slope, 5, 4, TILE_KIND_INDEX.water, 0);
-    setTile(slope, 2, 4, TILE_KIND_INDEX.grass, 5);
-    setTile(slope, 7, 4, TILE_KIND_INDEX.grass, 5);
-    // Les approches descendent d'un niveau : la rampe du tablier les rejoint.
-    setTile(slope, 1, 4, TILE_KIND_INDEX.grass, 4);
-    setTile(slope, 8, 4, TILE_KIND_INDEX.grass, 4);
+    // Les berges (3 et 6) sont un niveau au-dessus de leurs approches (2 et 7)
+    // : les rampes du tablier les rejoignent.
+    setTile(slope, 3, 4, TILE_KIND_INDEX.grass, 5);
+    setTile(slope, 6, 4, TILE_KIND_INDEX.grass, 5);
+    setTile(slope, 2, 4, TILE_KIND_INDEX.grass, 4);
+    setTile(slope, 7, 4, TILE_KIND_INDEX.grass, 4);
     const gentle = planBridge({
       map: slope,
-      from: { x: 2, y: 4 },
-      to: { x: 7, y: 4 },
+      from: { x: 3, y: 4 },
+      to: { x: 6, y: 4 },
       settings: { kind: 'road', material: 'wood' },
       budget: 1_000_000,
     });
@@ -169,14 +180,14 @@ describe('planBridge', () => {
     const cliff = makeMap();
     setTile(cliff, 4, 4, TILE_KIND_INDEX.water, 0);
     setTile(cliff, 5, 4, TILE_KIND_INDEX.water, 0);
-    setTile(cliff, 2, 4, TILE_KIND_INDEX.grass, 5);
-    setTile(cliff, 7, 4, TILE_KIND_INDEX.grass, 5);
-    setTile(cliff, 1, 4, TILE_KIND_INDEX.grass, 2);
-    setTile(cliff, 8, 4, TILE_KIND_INDEX.grass, 2);
+    setTile(cliff, 3, 4, TILE_KIND_INDEX.grass, 5);
+    setTile(cliff, 6, 4, TILE_KIND_INDEX.grass, 5);
+    setTile(cliff, 2, 4, TILE_KIND_INDEX.grass, 2);
+    setTile(cliff, 7, 4, TILE_KIND_INDEX.grass, 2);
     const tooSteep = planBridge({
       map: cliff,
-      from: { x: 2, y: 4 },
-      to: { x: 7, y: 4 },
+      from: { x: 3, y: 4 },
+      to: { x: 6, y: 4 },
       settings: { kind: 'road', material: 'wood' },
       budget: 1_000_000,
     });
@@ -184,7 +195,41 @@ describe('planBridge', () => {
     expect(tooSteep.reason).toContain('trop raide');
   });
 
-  it('refuse une diagonale, des culées à des hauteurs différentes et une portée trop longue', () => {
+  it('tolère un niveau d’écart entre les berges quand l’une est un talus (#243)', () => {
+    const map = makeMap();
+    setTile(map, 4, 4, TILE_KIND_INDEX.water, 0);
+    setTile(map, 5, 4, TILE_KIND_INDEX.water, 0);
+    // Berge ouest à 5 (talus vers l'eau), berge est à 4 (plate) : écart d'un
+    // niveau accepté par OpenTTD.
+    setTile(map, 3, 4, TILE_KIND_INDEX.grass, 5);
+    setTile(map, 2, 4, TILE_KIND_INDEX.grass, 4);
+    const plan = planBridge({
+      map,
+      from: { x: 3, y: 4 },
+      to: { x: 6, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(plan.valid).toBe(true);
+    expect(plan.bridge?.deckHeight).toBe(5 + BRIDGE_MATERIALS.wood.deckLift);
+
+    const tooHigh = makeMap();
+    setTile(tooHigh, 4, 4, TILE_KIND_INDEX.water, 0);
+    setTile(tooHigh, 5, 4, TILE_KIND_INDEX.water, 0);
+    setTile(tooHigh, 3, 4, TILE_KIND_INDEX.grass, 6);
+    setTile(tooHigh, 2, 4, TILE_KIND_INDEX.grass, 5);
+    const refused = planBridge({
+      map: tooHigh,
+      from: { x: 3, y: 4 },
+      to: { x: 6, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(refused.valid).toBe(false);
+    expect(refused.reason).toContain('dénivelées');
+  });
+
+  it('refuse une diagonale, des berges trop dénivelées et une portée trop longue', () => {
     const map = makeMap();
     const diagonal = planBridge({
       map,
@@ -196,16 +241,20 @@ describe('planBridge', () => {
     expect(diagonal.valid).toBe(false);
     expect(diagonal.reason).toContain('droit');
 
-    setTile(map, 8, 3, TILE_KIND_INDEX.grass, 5);
+    const steepBanks = makeMap();
+    setTile(steepBanks, 4, 3, TILE_KIND_INDEX.water, 0);
+    setTile(steepBanks, 5, 3, TILE_KIND_INDEX.water, 0);
+    setTile(steepBanks, 3, 3, TILE_KIND_INDEX.grass, 6);
+    setTile(steepBanks, 6, 3, TILE_KIND_INDEX.grass, 4);
     const slope = planBridge({
-      map,
-      from: { x: 2, y: 3 },
-      to: { x: 8, y: 3 },
+      map: steepBanks,
+      from: { x: 3, y: 3 },
+      to: { x: 6, y: 3 },
       settings: { kind: 'road', material: 'wood' },
       budget: 1_000_000,
     });
     expect(slope.valid).toBe(false);
-    expect(slope.reason).toContain('même hauteur');
+    expect(slope.reason).toContain('dénivelées');
 
     const flat = makeMap();
     const tooLong = planBridge({
@@ -219,9 +268,10 @@ describe('planBridge', () => {
     expect(tooLong.reason).toContain('portée');
   });
 
-  it('refuse une culée sur l’eau et un tablier sous le relief', () => {
+  it('recale une culée saisie sur l’eau et refuse une berge inconstructible', () => {
     const map = makeMap();
     setTile(map, 2, 4, TILE_KIND_INDEX.water, 0);
+    setTile(map, 3, 4, TILE_KIND_INDEX.water, 0);
     const abutment = planBridge({
       map,
       from: { x: 2, y: 4 },
@@ -229,8 +279,24 @@ describe('planBridge', () => {
       settings: { kind: 'road', material: 'wood' },
       budget: 1_000_000,
     });
-    expect(abutment.valid).toBe(false);
-    expect(abutment.reason).toContain('culée');
+    // Le joueur part depuis l'eau : la culée est ramenée sur la berge (1).
+    expect(abutment.valid).toBe(true);
+    expect(abutment.from).toEqual({ x: 1, y: 4 });
+    expect(abutment.to).toEqual({ x: 4, y: 4 });
+
+    const occupied = makeMap();
+    setTile(occupied, 4, 4, TILE_KIND_INDEX.water, 0);
+    setTile(occupied, 5, 4, TILE_KIND_INDEX.water, 0);
+    setTile(occupied, 6, 4, TILE_KIND_INDEX.house, 4);
+    const blocked = planBridge({
+      map: occupied,
+      from: { x: 3, y: 4 },
+      to: { x: 7, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(blocked.valid).toBe(false);
+    expect(blocked.reason).toContain('culée');
 
     const raised = makeMap();
     setTile(raised, 5, 4, TILE_KIND_INDEX.grass, 6);
@@ -297,6 +363,51 @@ describe('planBridge', () => {
       length: 7,
       direction: 'x',
     });
+  });
+
+  it('recale le tablier sur les berges sans traverser un lac que le drag évite (#243)', () => {
+    const river = makeMap();
+    setTile(river, 5, 4, TILE_KIND_INDEX.water, 0);
+    setTile(river, 6, 4, TILE_KIND_INDEX.water, 0);
+    expect(resolveBridgeSpan(river, { x: 2, y: 4 }, { x: 9, y: 4 })).toEqual({
+      from: { x: 4, y: 4 },
+      to: { x: 7, y: 4 },
+    });
+    // Le drag commence sur la rivière : la rive ouest est retrouvée dans la
+    // marge de deux tuiles.
+    expect(resolveBridgeSpan(river, { x: 5, y: 4 }, { x: 6, y: 4 })).toEqual({
+      from: { x: 4, y: 4 },
+      to: { x: 7, y: 4 },
+    });
+
+    const lake = makeMap(32, 12);
+    for (let x = 3; x <= 20; x += 1) setTile(lake, x, 4, TILE_KIND_INDEX.water, 0);
+    // Petit geste au milieu du lac : aucun pont démesuré n'est fabriqué.
+    expect(resolveBridgeSpan(lake, { x: 10, y: 4 }, { x: 12, y: 4 })).toBeNull();
+    const plan = planBridge({
+      map: lake,
+      from: { x: 10, y: 4 },
+      to: { x: 12, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(plan.valid).toBe(false);
+    expect(plan.reason).toContain('culée');
+  });
+
+  it('accepte un drag volontairement plus court que l’obstacle dans la marge de recalage', () => {
+    const map = makeMap();
+    for (const x of [5, 6, 7]) setTile(map, x, 4, TILE_KIND_INDEX.water, 0);
+    const plan = planBridge({
+      map,
+      from: { x: 6, y: 4 },
+      to: { x: 7, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(plan.valid).toBe(true);
+    expect(plan.from).toEqual({ x: 4, y: 4 });
+    expect(plan.to).toEqual({ x: 8, y: 4 });
   });
 });
 

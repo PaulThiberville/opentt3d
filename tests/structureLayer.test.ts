@@ -48,12 +48,14 @@ describe('StructureLayer', () => {
       layer.setStructures([bridge, tunnel], map);
       expect(layer.count).toBe(2);
       expect(layer.triangleCount).toBeGreaterThan(20);
-      expect(layer.drawCallCount).toBe(2);
+      // Base + galerie intérieure + détail : la galerie est un mesh non éclairé
+      // distinct pour garder l'obscurité du tunnel (#244).
+      expect(layer.drawCallCount).toBe(3);
       expect(layer.detailShown).toBe(true);
 
       layer.setQuality('low');
       expect(layer.detailShown).toBe(false);
-      expect(layer.drawCallCount).toBe(1);
+      expect(layer.drawCallCount).toBe(2);
     } finally {
       layer.dispose();
     }
@@ -92,6 +94,42 @@ describe('StructureLayer', () => {
       expect(alongY.maxZ).toBeCloseTo(10, 5);
       expect(alongY.minX).toBeGreaterThanOrEqual(5);
       expect(alongY.maxX).toBeLessThanOrEqual(6);
+    } finally {
+      layer.dispose();
+    }
+  });
+
+  it('construit une galerie sombre reliée aux deux portails (#244)', () => {
+    const map = makeMap();
+    const layer = new StructureLayer();
+    try {
+      layer.setStructures([tunnel], map);
+      const interior = layer.group.children.find(
+        (child) => child.name === 'structure-tunnel-interior',
+      );
+      expect(interior).toBeInstanceOf(THREE.Mesh);
+      if (!(interior instanceof THREE.Mesh)) return;
+      expect(interior.material).toBeInstanceOf(THREE.MeshBasicMaterial);
+      expect((interior.material as THREE.MeshBasicMaterial).vertexColors).toBe(true);
+      const positions = interior.geometry.getAttribute('position');
+      expect(positions.count).toBeGreaterThan(30);
+      let minX = Number.POSITIVE_INFINITY;
+      let maxX = Number.NEGATIVE_INFINITY;
+      let minY = Number.POSITIVE_INFINITY;
+      let maxY = Number.NEGATIVE_INFINITY;
+      for (let i = 0; i < positions.count; i += 1) {
+        minX = Math.min(minX, positions.getX(i));
+        maxX = Math.max(maxX, positions.getX(i));
+        minY = Math.min(minY, positions.getY(i));
+        maxY = Math.max(maxY, positions.getY(i));
+      }
+      // La galerie relie bien les deux portails (centres 3,5 et 8,5) et reste
+      // sous le relief, avec un plafond au-dessus du radier.
+      expect(minX).toBeLessThan(3.6);
+      expect(maxX).toBeGreaterThan(8.4);
+      expect(maxX - minX).toBeGreaterThan(4.8);
+      expect(minY).toBeGreaterThanOrEqual(2);
+      expect(maxY).toBeGreaterThan(minY + 0.3);
     } finally {
       layer.dispose();
     }

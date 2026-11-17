@@ -39,10 +39,16 @@ const MATERIAL_COLOURS: Record<BridgeMaterial, { deck: number; side: number; rai
 };
 
 const PORTAL_COLOUR = 0x6b655b;
-const PORTAL_DARK = 0x1f2226;
+const PORTAL_STONE_LIGHT = 0x8c8579;
+const TUNNEL_FLOOR_COLOUR = 0x151513;
+const TUNNEL_DEEP_COLOUR = 0x030405;
+const TUNNEL_WALL_COLOUR = 0x4a463e;
+const TUNNEL_CEILING_COLOUR = 0x302d28;
 const DECK_THICKNESS = 0.13;
 const RAIL_HEIGHT = 0.24;
 const PILLAR_INTERVAL = 3;
+const TUNNEL_CLEARANCE = 0.9;
+const TUNNEL_MIN_CLEARANCE = 0.34;
 const DETAIL_RANGE_MEDIUM = 48;
 const DETAIL_RANGE_HIGH = 76;
 
@@ -352,8 +358,10 @@ export class StructureLayer {
   readonly group = new THREE.Group();
 
   private baseMesh: THREE.Mesh;
+  private interiorMesh: THREE.Mesh;
   private detailMesh: THREE.Mesh;
   private material: THREE.MeshLambertMaterial;
+  private interiorMaterial: THREE.MeshBasicMaterial;
   private structures: StructureSnapshot[] = [];
   private map: MapSnapshot | null = null;
   private signature = '';
@@ -370,13 +378,27 @@ export class StructureLayer {
       vertexColors: true,
       side: THREE.DoubleSide,
     });
+    // Les parois de tunnel sont volontairement non éclairées : un matériau
+    // Lambert laisserait le soleil éclairer l'intérieur de la galerie. Le
+    // dégradé de couleurs vers le noir suggère la profondeur (#244).
+    this.interiorMaterial = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      // Seules les faces tournées vers l'intérieur de la galerie sont rendues :
+      // depuis l'extérieur, on voit les parois opposées par l'ouverture du
+      // portail, jamais la boîte noire posée sur le terrain (#244).
+      side: THREE.BackSide,
+      fog: true,
+    });
     this.baseMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.material);
     this.baseMesh.name = 'structure-base';
     this.baseMesh.receiveShadow = true;
+    this.interiorMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.interiorMaterial);
+    this.interiorMesh.name = 'structure-tunnel-interior';
+    this.interiorMesh.receiveShadow = false;
     this.detailMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.material);
     this.detailMesh.name = 'structure-detail';
     this.detailMesh.receiveShadow = true;
-    this.group.add(this.baseMesh, this.detailMesh);
+    this.group.add(this.baseMesh, this.interiorMesh, this.detailMesh);
     this.group.visible = false;
   }
 
@@ -384,13 +406,23 @@ export class StructureLayer {
     return this.structures.length;
   }
 
+  /** Ouvrages résolus (snapshot + inférence), utilisés aussi par les véhicules. */
+  get items(): readonly StructureSnapshot[] {
+    return this.structures;
+  }
+
   get triangleCount(): number {
-    return triangleCount(this.baseMesh.geometry) + triangleCount(this.detailMesh.geometry);
+    return (
+      triangleCount(this.baseMesh.geometry) +
+      triangleCount(this.interiorMesh.geometry) +
+      triangleCount(this.detailMesh.geometry)
+    );
   }
 
   get drawCallCount(): number {
     let calls = 0;
     if (this.baseMesh.geometry.getAttribute('position')) calls += 1;
+    if (this.interiorMesh.geometry.getAttribute('position')) calls += 1;
     if (this.detailVisible && this.detailMesh.geometry.getAttribute('position')) calls += 1;
     return calls;
   }
@@ -468,19 +500,22 @@ export class StructureLayer {
     const map = this.map;
     if (!map || this.structures.length === 0) {
       this.replaceGeometry(this.baseMesh, null);
+      this.replaceGeometry(this.interiorMesh, null);
       this.replaceGeometry(this.detailMesh, null);
       this.group.visible = false;
       return;
     }
 
     const base = createWriter();
+    const interior = createWriter();
     const detail = createWriter();
     for (const structure of this.structures) {
       if (structure.kind === 'bridge') this.emitBridge(base, detail, map, structure);
-      else this.emitTunnel(base, detail, map, structure);
+      else this.emitTunnel(base, interior, detail, map, structure);
     }
 
     this.replaceGeometry(this.baseMesh, writerToGeometry(base));
+    this.replaceGeometry(this.interiorMesh, writerToGeometry(interior));
     this.replaceGeometry(this.detailMesh, writerToGeometry(detail));
     this.baseMesh.castShadow = this.shadows;
     this.group.visible = this.structures.length > 0;
@@ -757,79 +792,345 @@ export class StructureLayer {
 
   private emitTunnel(
     base: GeometryWriter,
+    interior: GeometryWriter,
     detail: GeometryWriter,
     map: MapSnapshot,
     structure: StructureSnapshot & { kind: 'tunnel' },
   ): void {
     const dir = directionOf(structure);
     const perp = { x: -dir.y, y: dir.x };
+    const alongX = dir.x !== 0;
+    const tiles =
+      Math.abs(structure.to.x - structure.from.x) + Math.abs(structure.to.y - structure.from.y) + 1;
     const portalColour = new THREE.Color(PORTAL_COLOUR);
-    const dark = new THREE.Color(PORTAL_DARK);
+    const stoneLight = new THREE.Color(PORTAL_STONE_LIGHT);
+    const floorColour = new THREE.Color(TUNNEL_FLOOR_COLOUR);
+    const deep = new THREE.Color(TUNNEL_DEEP_COLOUR);
+    const wallNear = new THREE.Color(TUNNEL_WALL_COLOUR);
+    const ceilingNear = new THREE.Color(TUNNEL_CEILING_COLOUR);
+    const trackColour = new THREE.Color(0x3b362d);
+    const floorY =
+      (structure.portalHeight > 0
+        ? structure.portalHeight * 0.5
+        : sampleHeightWorld(
+            map,
+            (structure.from.x + structure.to.x) / 2 + 0.5,
+            (structure.from.y + structure.to.y) / 2 + 0.5,
+          )) + 0.02;
+    const halfWidth = structure.transport === 'road' ? 0.36 : 0.3;
+    const inner = halfWidth - 0.035;
+
+    // Le plafond reste sous le relief traversé. Sur un tunnel peu profond,
+    // une galerie pleine hauteur dépasserait de la colline ; on abaisse donc
+    // la voûte jusqu'à laisser quelques centimètres de roche au-dessus.
+    let clearance = TUNNEL_CLEARANCE;
+    if (tiles > 2) {
+      let lowestTop = Number.POSITIVE_INFINITY;
+      for (let i = 1; i < tiles - 1; i += 1) {
+        const cx = structure.from.x + dir.x * i + 0.5;
+        const cz = structure.from.y + dir.y * i + 0.5;
+        lowestTop = Math.min(lowestTop, sampleHeightWorld(map, cx, cz));
+      }
+      if (Number.isFinite(lowestTop)) {
+        clearance = Math.max(
+          TUNNEL_MIN_CLEARANCE,
+          Math.min(TUNNEL_CLEARANCE, lowestTop - floorY - 0.06),
+        );
+      }
+    }
+    const ceilingY = floorY + clearance;
+
+    // Galerie : radier, parois et plafond. Les couleurs s'assombrissent vers
+    // le milieu du tunnel, ce qui donne l'obscurité d'un vrai souterrain sans
+    // texture ni lumière supplémentaire.
+    for (let i = 0; i < tiles - 1; i += 1) {
+      const ax = structure.from.x + dir.x * i + 0.5;
+      const az = structure.from.y + dir.y * i + 0.5;
+      const bx = ax + dir.x;
+      const bz = az + dir.y;
+      const depth = tiles <= 2 ? 0.5 : Math.min(i + 1, tiles - 1 - i) / (tiles - 1);
+      const shade = Math.min(1, depth * 1.2);
+      const wall = wallNear.clone().lerp(deep, shade);
+      const ceiling = ceilingNear.clone().lerp(deep, Math.min(1, shade * 1.12));
+      const ground = floorColour.clone().lerp(deep, Math.min(1, shade * 0.9));
+
+      // Paroi gauche et paroi droite.
+      quad(
+        interior,
+        { x: ax + perp.x * inner, y: floorY, z: az + perp.y * inner },
+        { x: bx + perp.x * inner, y: floorY, z: bz + perp.y * inner },
+        { x: bx + perp.x * inner, y: ceilingY, z: bz + perp.y * inner },
+        { x: ax + perp.x * inner, y: ceilingY, z: az + perp.y * inner },
+        wall,
+      );
+      quad(
+        interior,
+        { x: bx - perp.x * inner, y: floorY, z: bz - perp.y * inner },
+        { x: ax - perp.x * inner, y: floorY, z: az - perp.y * inner },
+        { x: ax - perp.x * inner, y: ceilingY, z: az - perp.y * inner },
+        { x: bx - perp.x * inner, y: ceilingY, z: bz - perp.y * inner },
+        wall,
+      );
+      // Plafond et radier.
+      quad(
+        interior,
+        { x: ax + perp.x * inner, y: ceilingY, z: az + perp.y * inner },
+        { x: bx + perp.x * inner, y: ceilingY, z: bz + perp.y * inner },
+        { x: bx - perp.x * inner, y: ceilingY, z: bz - perp.y * inner },
+        { x: ax - perp.x * inner, y: ceilingY, z: az - perp.y * inner },
+        ceiling,
+      );
+      quad(
+        interior,
+        { x: ax - perp.x * inner, y: floorY, z: az - perp.y * inner },
+        { x: bx - perp.x * inner, y: floorY, z: bz - perp.y * inner },
+        { x: bx + perp.x * inner, y: floorY, z: bz + perp.y * inner },
+        { x: ax + perp.x * inner, y: floorY, z: az + perp.y * inner },
+        ground,
+      );
+
+      // Chaussée ou voie ferrée au fond de la galerie : sans cela, le tunnel
+      // ressemble à un simple trou noir et le raccord au portail est illisible.
+      if (structure.transport === 'rail') {
+        for (const offset of [-0.13, 0.13] as const) {
+          const railColour = trackColour.clone().lerp(deep, shade * 0.6);
+          quad(
+            interior,
+            {
+              x: ax + perp.x * offset - 0.025,
+              y: floorY + 0.012,
+              z: az + perp.y * offset - 0.025,
+            },
+            {
+              x: bx + perp.x * offset - 0.025,
+              y: floorY + 0.012,
+              z: bz + perp.y * offset - 0.025,
+            },
+            {
+              x: bx + perp.x * offset + 0.035,
+              y: floorY + 0.012,
+              z: bz + perp.y * offset + 0.035,
+            },
+            {
+              x: ax + perp.x * offset + 0.035,
+              y: floorY + 0.012,
+              z: az + perp.y * offset + 0.035,
+            },
+            railColour,
+          );
+        }
+      } else {
+        const lane = trackColour.clone().lerp(deep, shade * 0.7);
+        quad(
+          interior,
+          { x: ax + perp.x * 0.2, y: floorY + 0.01, z: az + perp.y * 0.2 },
+          { x: bx + perp.x * 0.2, y: floorY + 0.01, z: bz + perp.y * 0.2 },
+          { x: bx - perp.x * 0.2, y: floorY + 0.01, z: bz - perp.y * 0.2 },
+          { x: ax - perp.x * 0.2, y: floorY + 0.01, z: az - perp.y * 0.2 },
+          lane,
+        );
+      }
+
+      // Nervures de pierre tous les deux segments : elles donnent l'échelle
+      // de la galerie quand la caméra s'approche du portail.
+      if (i > 0 && i % 2 === 0) {
+        const rib = wallNear
+          .clone()
+          .lerp(stoneLight, 0.25)
+          .lerp(deep, shade * 0.75);
+        for (const side of [1, -1] as const) {
+          quad(
+            interior,
+            {
+              x: ax + perp.x * (inner - 0.004) * side,
+              y: floorY + 0.05,
+              z: az + perp.y * (inner - 0.004) * side,
+            },
+            {
+              x: ax + dir.x * 0.06 + perp.x * (inner - 0.004) * side,
+              y: floorY + 0.05,
+              z: az + dir.y * 0.06 + perp.y * (inner - 0.004) * side,
+            },
+            {
+              x: ax + dir.x * 0.06 + perp.x * (inner - 0.004) * side,
+              y: ceilingY - 0.04,
+              z: az + dir.y * 0.06 + perp.y * (inner - 0.004) * side,
+            },
+            {
+              x: ax + perp.x * (inner - 0.004) * side,
+              y: ceilingY - 0.04,
+              z: az + perp.y * (inner - 0.004) * side,
+            },
+            rib,
+          );
+        }
+      }
+    }
+
+    // Portails : cadre de pierre et linteau, alignés sur le radier de la
+    // galerie pour que le raccord soit continu.
     for (const end of [structure.from, structure.to]) {
       const cx = end.x + 0.5;
       const cz = end.y + 0.5;
-      const ground = sampleHeightWorld(map, cx, cz);
-      const frameHeight = 1.15;
-      const postHeight = frameHeight;
+      const ground = floorY;
+      const frameHeight = clearance + 0.2;
       for (const side of [1, -1] as const) {
-        const px = cx + perp.x * 0.36 * side;
-        const pz = cz + perp.y * 0.36 * side;
-        box(base, px, ground + postHeight / 2, pz, 0.18, postHeight, 0.18, portalColour);
-        box(
-          detail,
-          px,
-          ground + postHeight + 0.06,
-          pz,
-          0.26,
-          0.12,
-          0.26,
-          new THREE.Color(0x8c8579),
-        );
+        const px = cx + perp.x * (halfWidth + 0.05) * side;
+        const pz = cz + perp.y * (halfWidth + 0.05) * side;
+        box(base, px, ground + frameHeight / 2, pz, 0.18, frameHeight, 0.18, portalColour);
+        box(detail, px, ground + frameHeight + 0.06, pz, 0.26, 0.12, 0.26, stoneLight);
       }
       // Linteau horizontal, orienté perpendiculairement à l'axe.
-      const acrossX = Math.abs(perp.x) * 0.98 + Math.abs(dir.x) * 0.2;
-      const acrossZ = Math.abs(perp.y) * 0.98 + Math.abs(dir.y) * 0.2;
-      box(base, cx, ground + frameHeight + 0.06, cz, acrossX, 0.2, acrossZ, portalColour);
-      // Seuil au sol : matérialise l'entrée même sans découpe du terrain.
-      box(base, cx, ground + 0.05, cz, acrossX * 0.9, 0.1, acrossZ * 0.9, portalColour);
-      // Ouverture sombre, légèrement en retrait du portail.
-      const inward = { x: -dir.x * 0.08, y: -dir.y * 0.08 };
+      const acrossX = Math.abs(perp.x) * (halfWidth * 2 + 0.3) + Math.abs(dir.x) * 0.22;
+      const acrossZ = Math.abs(perp.y) * (halfWidth * 2 + 0.3) + Math.abs(dir.y) * 0.22;
+      box(base, cx, ground + frameHeight + 0.05, cz, acrossX, 0.2, acrossZ, portalColour);
+      // Clé de voûte, visible en détail.
+      box(
+        detail,
+        cx,
+        ground + frameHeight + 0.18,
+        cz,
+        alongX ? 0.2 : 0.32,
+        0.12,
+        alongX ? 0.32 : 0.2,
+        stoneLight,
+      );
+      // Seuil au sol : simple liseré de chaque côté pour ne pas masquer la
+      // chaussée qui entre dans la galerie.
+      for (const side of [1, -1] as const) {
+        box(
+          base,
+          cx + perp.x * (halfWidth + 0.05) * side,
+          ground + 0.045,
+          cz + perp.y * (halfWidth + 0.05) * side,
+          alongX ? 0.2 : 0.1,
+          0.04,
+          alongX ? 0.1 : 0.2,
+          portalColour,
+        );
+      }
+      // Boyau d'entrée : un court renfoncement de pierre, fermé par un fond
+      // sombre. La galerie complète existe sous le relief, mais la pente de
+      // terrain la recouvre : ce renfoncement donne au portail sa profondeur
+      // visible et empêche de voir la colline (ou le ciel) à travers (#244).
+      const inwardSign = end === structure.from ? 1 : -1;
+      const throatDepth = 0.46;
+      const throatX = cx + dir.x * inwardSign * throatDepth * 0.5;
+      const throatZ = cz + dir.y * inwardSign * throatDepth * 0.5;
+      const throatAlongX = alongX ? throatDepth : 0.06;
+      const throatAlongZ = alongX ? 0.06 : throatDepth;
+      for (const side of [1, -1] as const) {
+        box(
+          base,
+          throatX + perp.x * (halfWidth + 0.01) * side,
+          (floorY + ceilingY) / 2,
+          throatZ + perp.y * (halfWidth + 0.01) * side,
+          throatAlongX,
+          clearance,
+          throatAlongZ,
+          stoneLight,
+        );
+      }
+      box(
+        base,
+        throatX,
+        ceilingY + 0.02,
+        throatZ,
+        alongX ? throatDepth : halfWidth * 2,
+        0.05,
+        alongX ? halfWidth * 2 : throatDepth,
+        stoneLight,
+      );
+      // Chaussée ou voie dans le renfoncement : l'infrastructure extérieure se
+      // prolonge dans la galerie. Sans cela, l'ouverture n'est qu'un rectangle
+      // noir sans échelle.
+      box(
+        base,
+        throatX,
+        floorY + 0.012,
+        throatZ,
+        alongX ? throatDepth : halfWidth * 1.75,
+        0.024,
+        alongX ? halfWidth * 1.75 : throatDepth,
+        new THREE.Color(structure.transport === 'road' ? 0x7c7c7e : 0x3a352c),
+      );
+      if (structure.transport === 'road') {
+        for (const depth of [0.12, 0.3] as const) {
+          const markX = cx + dir.x * inwardSign * depth;
+          const markZ = cz + dir.y * inwardSign * depth;
+          box(
+            base,
+            markX,
+            floorY + 0.03,
+            markZ,
+            alongX ? 0.12 : 0.035,
+            0.012,
+            alongX ? 0.035 : 0.12,
+            new THREE.Color(0xd8d4c4),
+          );
+        }
+      } else {
+        for (const offset of [-0.12, 0.12] as const) {
+          box(
+            base,
+            throatX + perp.x * offset,
+            floorY + 0.03,
+            throatZ + perp.y * offset,
+            alongX ? throatDepth : 0.035,
+            0.012,
+            alongX ? 0.035 : throatDepth,
+            new THREE.Color(0x8a8172),
+          );
+        }
+      }
+      // Nervures de pierre dans le renfoncement : elles donnent la profondeur
+      // de la galerie même quand la caméra est presque dans l'axe.
+      for (const depth of [0.16, 0.34] as const) {
+        const ribX = cx + dir.x * inwardSign * depth;
+        const ribZ = cz + dir.y * inwardSign * depth;
+        for (const side of [1, -1] as const) {
+          box(
+            base,
+            ribX + perp.x * (halfWidth + 0.005) * side,
+            (floorY + ceilingY) / 2,
+            ribZ + perp.y * (halfWidth + 0.005) * side,
+            alongX ? 0.035 : 0.04,
+            clearance - 0.08,
+            alongX ? 0.04 : 0.035,
+            stoneLight,
+          );
+        }
+      }
+      const backX = cx + dir.x * inwardSign * throatDepth;
+      const backZ = cz + dir.y * inwardSign * throatDepth;
+      const dark = new THREE.Color(TUNNEL_DEEP_COLOUR);
       quad(
         base,
-        { x: cx + inward.x - perp.x * 0.3, y: ground + 0.12, z: cz + inward.y - perp.y * 0.3 },
-        { x: cx + inward.x + perp.x * 0.3, y: ground + 0.12, z: cz + inward.y + perp.y * 0.3 },
-        {
-          x: cx + inward.x + perp.x * 0.3,
-          y: ground + frameHeight - 0.05,
-          z: cz + inward.y + perp.y * 0.3,
-        },
-        {
-          x: cx + inward.x - perp.x * 0.3,
-          y: ground + frameHeight - 0.05,
-          z: cz + inward.y - perp.y * 0.3,
-        },
+        { x: backX + perp.x * inner, y: floorY + 0.01, z: backZ + perp.y * inner },
+        { x: backX - perp.x * inner, y: floorY + 0.01, z: backZ - perp.y * inner },
+        { x: backX - perp.x * inner, y: ceilingY - 0.01, z: backZ - perp.y * inner },
+        { x: backX + perp.x * inner, y: ceilingY - 0.01, z: backZ + perp.y * inner },
         dark,
       );
     }
-    // Key- stone / arche centrale en détail.
-    const centre = structureCentre(structure);
-    const ground = sampleHeightWorld(map, centre.x, centre.y);
-    box(detail, centre.x, ground + 1.25, centre.y, 0.34, 0.12, 0.34, new THREE.Color(0x8c8579));
   }
 
   clear(): void {
     this.structures = [];
     this.map = null;
     this.replaceGeometry(this.baseMesh, null);
+    this.replaceGeometry(this.interiorMesh, null);
     this.replaceGeometry(this.detailMesh, null);
     this.group.visible = false;
   }
 
   dispose(): void {
-    this.group.remove(this.baseMesh, this.detailMesh);
+    this.group.remove(this.baseMesh, this.interiorMesh, this.detailMesh);
     this.baseMesh.geometry.dispose();
+    this.interiorMesh.geometry.dispose();
     this.detailMesh.geometry.dispose();
     this.material.dispose();
+    this.interiorMaterial.dispose();
     this.structures = [];
     this.map = null;
     this.group.clear();

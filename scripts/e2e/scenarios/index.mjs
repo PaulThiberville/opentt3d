@@ -14,6 +14,7 @@ import { roadSlope } from './roadSlope.mjs';
 import { saveLoad } from './save-load.mjs';
 import { signals } from './signals.mjs';
 import { soloMock } from './solo.mjs';
+import { bridge243, tunnel244 } from './structures.mjs';
 import { wasm } from './wasm.mjs';
 
 export const scenarios = [
@@ -25,6 +26,8 @@ export const scenarios = [
   busStop245,
   depot233,
   depot247,
+  bridge243,
+  tunnel244,
   saveLoad,
   netLocal,
   lateJoin,
