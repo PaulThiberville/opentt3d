@@ -54,6 +54,8 @@ const LAYER_IDS = {
   trackBits: 6,
   // #156 : couche de signaux ajoutée en version 2 du snapshot carte.
   signalData: 7,
+  // #231 : sens de circulation des routes (version 3).
+  roadData: 8,
 };
 
 /**
