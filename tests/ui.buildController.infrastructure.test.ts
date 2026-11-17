@@ -224,12 +224,16 @@ describe('BuildController : ponts et tunnels', () => {
     const plan = lastPlan(previews);
     expect(plan?.tool).toBe('bridge');
     expect(plan?.valid).toBe(true);
-    expect(plan?.tiles).toHaveLength(7);
-    expect(plan?.bridge).toMatchObject({ kind: 'rail', material: 'suspension', span: 6 });
+    // Les culées sont ramenées au bord de l'eau (#243).
+    expect(plan?.from).toEqual({ x: 3, y: 4 });
+    expect(plan?.to).toEqual({ x: 7, y: 4 });
+    expect(plan?.tiles).toHaveLength(5);
+    expect(plan?.bridge).toMatchObject({ kind: 'rail', material: 'suspension', span: 4 });
     expect(describeBuildPlan(plan, 'bridge')?.text.toLowerCase()).toContain('suspendu');
     controller.handleEnd({ x: 8, y: 4 });
     expect(commits).toHaveLength(1);
     expect(commits[0]?.bridge?.material).toBe('suspension');
+    expect(commits[0]?.to).toEqual({ x: 7, y: 4 });
   });
 
   it('projette un drag diagonal sur l’axe dominant au lieu de le refuser', () => {
@@ -257,11 +261,12 @@ describe('BuildController : ponts et tunnels', () => {
     // Le geste descend de trois tuiles : l'axe X doit être conservé.
     controller.handleBegin({ x: 2, y: 2 });
     controller.handleMove({ x: 6, y: 5 });
-    expect(lastPlan(previews)?.to).toEqual({ x: 6, y: 2 });
+    // L'axe X est conservé, puis les culées sont recalées sur la route (3..5).
+    expect(lastPlan(previews)?.to).toEqual({ x: 5, y: 2 });
     expect(lastPlan(previews)?.valid).toBe(true);
     controller.handleEnd({ x: 6, y: 5 });
     expect(commits).toHaveLength(1);
-    expect(commits[0]?.to).toEqual({ x: 6, y: 2 });
+    expect(commits[0]?.to).toEqual({ x: 5, y: 2 });
   });
 
   it('trouve la sortie du tunnel quand le drag s’arrête sur le relief', () => {

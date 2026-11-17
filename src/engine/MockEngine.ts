@@ -777,6 +777,15 @@ function surfaceCost(
 
   if (kind === 'aircraft') return SURFACE_GOAL;
 
+  // Un pont ou un tunnel porte une voie au-dessus/en dessous du terrain : les
+  // tuiles intermédiaires gardent leur type d'origine (herbe, eau…) et ne sont
+  // reconnues que par les drapeaux de l'ouvrage (#244).
+  const structureTransport = structureTransportAt(world, index);
+  if (structureTransport !== null) {
+    if (kind === 'road') return structureTransport === 'road' ? SURFACE_ROUTE : Infinity;
+    if (kind === 'train') return structureTransport === 'rail' ? SURFACE_ROUTE : Infinity;
+  }
+
   switch (tile) {
     case K.road:
       return kind === 'road' ? SURFACE_ROUTE : Infinity;
@@ -3119,6 +3128,25 @@ function updateVehiclesTransforms(world: MockWorld): void {
       vehicle.direction = directionFromVector(position.dx, position.dy);
     }
     const ground = sampleHeightWorld(map, vehicle.x, vehicle.y);
+    const tileX = Math.floor(vehicle.x);
+    const tileY = Math.floor(vehicle.y);
+    const tileIndexNow =
+      tileX >= 0 && tileY >= 0 && tileX < world.width && tileY < world.height
+        ? tileIndex(tileX, tileY, world.width)
+        : -1;
+    // Ne cherche l'ouvrage que sur une tuile de tunnel : les véhicules en
+    // surface sont la grande majorité et cette lecture est sur le chemin chaud
+    // du tick (#244).
+    const tunnelFlag =
+      tileIndexNow >= 0 && ((world.flags[tileIndexNow] ?? 0) & TILE_FLAG.TUNNEL) !== 0;
+    const structure = tunnelFlag ? structureAtTile(world, tileIndexNow) : null;
+    // Dans une galerie, le véhicule roule au niveau du radier du tunnel, pas
+    // sur la colline au-dessus (#244). Le z du snapshot ne doit donc pas suivre
+    // le terrain traversé.
+    const tunnelFloor =
+      structure?.type === 'tunnel' && structure.portalHeight !== undefined
+        ? structure.portalHeight * 0.5
+        : null;
     if (vehicle.kind === 'aircraft') {
       vehicle.z = ground + 6.5 + Math.sin(world.tick * 0.02 + vehicle.id) * 0.4;
       vehicle.pitch = 0;
@@ -3126,9 +3154,11 @@ function updateVehiclesTransforms(world: MockWorld): void {
       vehicle.z = 0.12;
       vehicle.pitch = 0;
     } else {
-      vehicle.z = ground + 0.08;
+      vehicle.z = (tunnelFloor ?? ground) + 0.08;
       const horizontal = Math.hypot(position.dx, position.dy);
-      if (horizontal > 1e-6) {
+      if (tunnelFloor !== null) {
+        vehicle.pitch = 0;
+      } else if (horizontal > 1e-6) {
         const ahead = sampleHeightWorld(map, position.x + position.dx, position.y + position.dy);
         vehicle.pitch = Math.atan2(ahead - ground, horizontal);
       } else {

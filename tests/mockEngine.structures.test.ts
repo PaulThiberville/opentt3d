@@ -102,7 +102,7 @@ describe('MockEngine : ponts', () => {
     for (const tile of plan.tiles) {
       expect((built.flags[tile.index] ?? 0) & TILE_FLAG.BRIDGE).toBe(TILE_FLAG.BRIDGE);
     }
-    for (const end of [site.from, site.to]) {
+    for (const end of [plan.from, plan.to]) {
       const index = tileIndex(end.x, end.y, built.width);
       expect(built.kind[index]).toBe(TILE_KIND_INDEX.bridge);
       expect(built.owner[index]).toBe(0);
@@ -112,18 +112,18 @@ describe('MockEngine : ponts', () => {
       after.structures?.find(
         (structure) =>
           structure.kind === 'bridge' &&
-          structure.from.x === site.from.x &&
-          structure.from.y === site.from.y &&
-          structure.to.x === site.to.x &&
-          structure.to.y === site.to.y,
+          structure.from.x === plan.from.x &&
+          structure.from.y === plan.from.y &&
+          structure.to.x === plan.to.x &&
+          structure.to.y === plan.to.y,
       ),
     ).toMatchObject({
       kind: 'bridge',
       company: 0,
       transport: 'rail',
       material: 'wood',
-      from: site.from,
-      to: site.to,
+      from: plan.from,
+      to: plan.to,
     });
     expect((after.companies[0]?.money ?? 0) - moneyBefore).toBe(-plan.cost);
     expect(after.news.some((item) => item.text.includes('Pont en bois construit'))).toBe(true);
@@ -133,6 +133,13 @@ describe('MockEngine : ponts', () => {
     const engine = await createEngine(77);
     const map = mapOf(engine);
     const site = findBridge(map);
+    const plan = planBridge({
+      map,
+      from: site.from,
+      to: site.to,
+      settings: { kind: 'rail', material: 'wood' },
+      budget: 10_000_000,
+    });
     const structuresBefore = engine.snapshot().structures?.length ?? 0;
     engine.send({
       type: 'build',
@@ -144,13 +151,13 @@ describe('MockEngine : ponts', () => {
     });
     engine.snapshot();
     // Ctrl+Z ne démolit qu'une culée : OpenTTD retire tout l'ouvrage.
-    engine.send({ type: 'build', tool: 'clear', company: 0, from: site.from });
+    engine.send({ type: 'build', tool: 'clear', company: 0, from: plan.from });
     const after = engine.snapshot();
     expect(after.structures).toHaveLength(structuresBefore);
     const restored = after.map;
     if (!restored) throw new Error('la démolition doit invalider la carte');
-    for (let x = site.from.x; x <= site.to.x; x += 1) {
-      const index = tileIndex(x, site.from.y, restored.width);
+    for (let x = plan.from.x; x <= plan.to.x; x += 1) {
+      const index = tileIndex(x, plan.from.y, restored.width);
       expect(restored.kind[index]).toBe(map.kind[index]);
       expect(restored.owner[index]).toBe(map.owner[index]);
     }
