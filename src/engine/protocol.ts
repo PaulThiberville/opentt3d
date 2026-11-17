@@ -27,6 +27,51 @@ export const RAIL_TYPE_INDEX: Record<RailType, number> = {
 
 export const RAIL_TYPES: readonly RailType[] = ['rail', 'electrified', 'monorail', 'maglev'];
 
+/**
+ * Sens de circulation d'une route à sens unique (#231).
+ *
+ * Les quatre valeurs sont absolues (elles ne dépendent pas de l'axe de la
+ * tuile) : c'est le sens que suivent les véhicules sur la chaussée. L'absence
+ * de sens unique est représentée par `null` côté snapshot (`roadData` = 0).
+ */
+export type RoadOneWay = 'north' | 'east' | 'south' | 'west';
+
+/** Ordre stable du cycle de sens et index dans `roadData`. */
+export const ROAD_ONEWAY_DIRECTIONS: readonly RoadOneWay[] = ['north', 'east', 'south', 'west'];
+
+/** Index stable de `RoadOneWay` dans la couche `roadData` (1..4). */
+export const ROAD_ONEWAY_INDEX: Record<RoadOneWay, number> = {
+  north: 1,
+  east: 2,
+  south: 3,
+  west: 4,
+};
+
+/** Lit un octet de `roadData` ; 0 (ou une valeur inconnue) = double sens. */
+export function roadOneWayFromIndex(value: number | undefined): RoadOneWay | null {
+  if (value === undefined || value < 1 || value > ROAD_ONEWAY_DIRECTIONS.length) return null;
+  return ROAD_ONEWAY_DIRECTIONS[value - 1] ?? null;
+}
+
+/** Axe d'une route à sens unique (`x` est-ouest, `y` nord-sud). */
+export function roadOneWayAxis(direction: RoadOneWay): 'x' | 'y' {
+  return direction === 'east' || direction === 'west' ? 'x' : 'y';
+}
+
+/** Vecteur unitaire du sens de circulation, en coordonnées tuiles. */
+export function roadOneWayVector(direction: RoadOneWay): { x: number; y: number } {
+  switch (direction) {
+    case 'north':
+      return { x: 0, y: -1 };
+    case 'east':
+      return { x: 1, y: 0 };
+    case 'south':
+      return { x: 0, y: 1 };
+    case 'west':
+      return { x: -1, y: 0 };
+  }
+}
+
 /** Type de signal avancé (#156). `path` correspond au signal PBS d'OpenTTD. */
 export type SignalKind = 'block' | 'path' | 'entry' | 'exit' | 'combo';
 
@@ -151,6 +196,12 @@ export interface MapSnapshot {
    * mécanique. Voir `src/game/signalRules.ts` pour l'encodage.
    */
   signalData?: Uint8Array;
+  /**
+   * Uint8Array, sens de circulation par tuile (#231). 0 = double sens ;
+   * 1..4 = sens unique nord, est, sud, ouest (`ROAD_ONEWAY_INDEX`). Optionnel :
+   * un moteur ou une sauvegarde antérieure retombe sur le double sens.
+   */
+  roadData?: Uint8Array;
 }
 
 export type VehicleKind = 'train' | 'road' | 'ship' | 'aircraft';
@@ -299,6 +350,11 @@ export interface VehicleSnapshot {
   z: number;
   /** Direction OpenTTD 0..255. */
   direction: number;
+  /**
+   * Tangage en radians (#232) : positif quand le véhicule monte. Optionnel :
+   * le mock le fournit, le pont WASM non (le rendu le déduit alors de `z`).
+   */
+  pitch?: number;
   /** Vitesse en tuiles par jour de jeu (approximation d'affichage). */
   speed: number;
   /** 0 = arrêté, 1 = en route, 2 = en gare, 3 = en dépôt, 4 = en attente. */

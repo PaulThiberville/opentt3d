@@ -144,3 +144,30 @@ describe('describeBuildPlan', () => {
     expect(describeBuildPlan(null, null)).toBeNull();
   });
 });
+
+describe('BuildController : sens unique (#231)', () => {
+  it('cycle le sens avec R et transmet le sens au plan', () => {
+    const { controller, previews } = harness();
+    controller.setTool('road');
+    expect(controller.buildSettings.road.direction).toBe('both');
+    expect(controller.rotate()).toBe(true);
+    expect(controller.buildSettings.road.direction).toBe('east');
+
+    controller.handleHover({ x: 4, y: 4 });
+    const plan = previews[previews.length - 1];
+    expect(plan?.road?.oneWay).toBe('east');
+    expect(plan?.axis).toBe('x');
+    expect(plan?.valid).toBe(true);
+  });
+
+  it('refuse un glissement en L en sens unique', () => {
+    const { controller, notices, commits } = harness();
+    controller.setTool('road');
+    controller.rotate();
+    controller.handleBegin({ x: 2, y: 2 });
+    controller.handleMove({ x: 5, y: 5 });
+    controller.handleEnd({ x: 5, y: 5 });
+    expect(commits).toHaveLength(0);
+    expect(notices.some((text) => text.includes('segment droit'))).toBe(true);
+  });
+});

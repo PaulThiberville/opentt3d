@@ -3,6 +3,7 @@ import type { VehicleSnapshot } from '../src/engine/protocol';
 import {
   VehicleInterpolator,
   modelKindFor,
+  segmentPitch,
   type RenderVehicle,
 } from '../src/game/vehicleInterpolation';
 import { lerpAngle, lerpDirection, normalizeAngle, smoothstep01 } from '../src/game/interpolation';
@@ -78,6 +79,37 @@ describe('interpolation des véhicules', () => {
     expect(out[0]?.z).toBeCloseTo(3);
     interpolator.interpolate(from, to, 1, out);
     expect(out[0]?.x).toBe(2);
+  });
+
+  it('interpole le tangage fourni par le moteur (#232)', () => {
+    const interpolator = new VehicleInterpolator();
+    const out: RenderVehicle[] = [];
+    const from = [vehicle({ id: 8, x: 0, y: 0, z: 1, pitch: 0.1 })];
+    const to = [vehicle({ id: 8, x: 1, y: 0, z: 1.3, pitch: 0.3 })];
+    interpolator.interpolate(from, to, 0.5, out);
+    expect(out[0]?.pitch).toBeCloseTo(0.2);
+    interpolator.interpolate(from, to, 1, out);
+    expect(out[0]?.pitch).toBeCloseTo(0.3);
+  });
+
+  it('déduit le tangage du déplacement quand le moteur ne le fournit pas', () => {
+    const from = vehicle({ id: 9, x: 2, y: 3, z: 1 });
+    const to = vehicle({ id: 9, x: 2, y: 4, z: 1.5 });
+    expect(segmentPitch(from, to)).toBeCloseTo(Math.atan2(0.5, 1));
+    expect(segmentPitch(to, from)).toBeCloseTo(Math.atan2(-0.5, 1));
+
+    const interpolator = new VehicleInterpolator();
+    const out: RenderVehicle[] = [];
+    interpolator.interpolate([from], [to], 0.5, out);
+    expect(out[0]?.pitch).toBeCloseTo(Math.atan2(0.5, 1));
+  });
+
+  it('garde les navires et avions horizontaux', () => {
+    const from = vehicle({ id: 10, kind: 'ship', x: 0, y: 0, z: 0 });
+    const to = vehicle({ id: 10, kind: 'ship', x: 1, y: 1, z: 2 });
+    expect(segmentPitch(from, to)).toBe(0);
+    const plane = vehicle({ id: 11, kind: 'aircraft', x: 0, y: 0, z: 5 });
+    expect(segmentPitch(plane, { ...plane, z: 9 })).toBe(0);
   });
 
   it('recale les téléportations au lieu de traverser la carte', () => {

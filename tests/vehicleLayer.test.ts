@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { InstancedMesh } from 'three';
+import { InstancedMesh } from 'three';
 import type { RenderVehicle } from '../src/game/vehicleInterpolation';
 import {
   SHIP_WATERLINE_OFFSET,
@@ -94,6 +94,21 @@ describe('VehicleLayer : uploads conditionnels', () => {
     expect(matrix[13]).toBeCloseTo(z + SHIP_WATERLINE_OFFSET, 6);
     // Aucun autre décalage ne vient flotter le modèle au-dessus de l'eau.
     expect(matrix[13]).toBeLessThan(waterSurfaceHeight(0) + 0.02);
+    layer.dispose();
+  });
+
+  it('incline le véhicule selon le tangage (#232), sans quart de tour parasite', () => {
+    const layer = new VehicleLayer();
+    layer.update([vehicle({ id: 12, kind: 'road', model: 'bus', direction: 64, pitch: 0.3 })]);
+    const mesh = layer.group.children.find(
+      (child): child is InstancedMesh => child instanceof InstancedMesh,
+    );
+    if (!mesh) throw new Error('mesh de véhicule absent');
+    const matrix = mesh.instanceMatrix.array as Float32Array;
+    // Le modèle est orienté +X : sa colonne locale X porte le tangage.
+    expect(matrix[0]).toBeCloseTo(Math.cos(0.3), 4);
+    expect(matrix[1]).toBeCloseTo(Math.sin(0.3), 4);
+    expect(matrix[2]).toBeCloseTo(0, 4);
     layer.dispose();
   });
 

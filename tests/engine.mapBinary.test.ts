@@ -25,7 +25,7 @@ describe('décodeur de snapshot carte', () => {
     expect(decoded.tick).toBe(4321);
     expect(decoded.sequence).toBe(7);
     expect(decoded.header.magic).toBe(0x314d544f);
-    expect(decoded.header.version).toBe(2);
+    expect(decoded.header.version).toBe(3);
     expect(decoded.header.dataOffset).toBe(MAP_DATA_OFFSET);
     expect(decoded.map.width).toBe(4);
     expect(decoded.map.height).toBe(2);
@@ -102,12 +102,21 @@ describe('décodeur de snapshot carte', () => {
     const decoded = decodeMapSnapshot(bytes);
     expect(decoded.header.version).toBe(1);
     expect(decoded.map.signalData).toEqual(new Uint8Array(4));
+    expect(decoded.map.roadData).toEqual(new Uint8Array(4));
     expect(decoded.map.trackBits).toHaveLength(4);
+  });
+
+  it('lit une carte v2 sans couche de sens unique (#231)', () => {
+    const bytes = buildMapFixture({ width: 2, height: 2, version: 2 });
+    const decoded = decodeMapSnapshot(bytes);
+    expect(decoded.header.version).toBe(2);
+    expect(decoded.map.signalData).toHaveLength(4);
+    expect(decoded.map.roadData).toEqual(new Uint8Array(4));
   });
 
   it('refuse une version inconnue', () => {
     const bytes = buildMapFixture();
-    setHeaderU16(bytes, 4, 3);
+    setHeaderU16(bytes, 4, 4);
     expect(() => decodeMapSnapshot(bytes)).toThrow(/Version de snapshot carte non supportée/);
   });
 

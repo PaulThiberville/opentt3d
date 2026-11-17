@@ -283,7 +283,7 @@ export class WorldView {
     const from = interpolation.from?.vehicles ?? [];
     const to = interpolation.to?.vehicles ?? [];
     this.interpolator.interpolate(from, to, interpolation.alpha, this.renderVehicles);
-    this.vehicles.update(this.renderVehicles);
+    this.vehicles.update(this.renderVehicles, this.currentMap);
     this.vehicles.updateAnimation(deltaSeconds);
     this.vehicles.setSelected(this.selectedVehicle);
 

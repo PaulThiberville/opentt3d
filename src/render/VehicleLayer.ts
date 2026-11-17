@@ -13,6 +13,8 @@
 
 import * as THREE from 'three';
 import type { RenderVehicle } from '../game/vehicleInterpolation';
+import { TILE_KIND_INDEX, type MapSnapshot } from '../engine/protocol';
+import { sampleHeightWorld } from '../game/mapGrid';
 import { companyColour, hexToRgb } from './tileVisuals';
 import { createModelMaterial } from './models/materials';
 import {
@@ -141,8 +143,12 @@ export class VehicleLayer {
   private matrix = new THREE.Matrix4();
   private position = new THREE.Vector3();
   private quaternion = new THREE.Quaternion();
+  private yawQuaternion = new THREE.Quaternion();
+  private pitchQuaternion = new THREE.Quaternion();
+  private pitchAxis = new THREE.Vector3(0, 0, 1);
   private scale = new THREE.Vector3(1, 1, 1);
   private up = new THREE.Vector3(0, 1, 0);
+  private map: MapSnapshot | null = null;
   private tint = new THREE.Color();
   private modelCounts = new Map<VehicleVariant, number>();
   private colourCache = new Map<number, { r: number; g: number; b: number }>();
@@ -186,7 +192,8 @@ export class VehicleLayer {
   }
 
   /** Met à jour toutes les instances à partir des véhicules interpolés. */
-  update(vehicles: readonly RenderVehicle[]): void {
+  update(vehicles: readonly RenderVehicle[], map: MapSnapshot | null = null): void {
+    this.map = map;
     const signature = vehicleSignature(vehicles);
     const colourSignature = vehicleColourSignature(vehicles);
     if (this.hasSignature && signature === this.lastSignature) {
@@ -222,7 +229,14 @@ export class VehicleLayer {
       if (index >= slot.capacity) continue;
 
       const yaw = directionToYaw(vehicle.direction);
-      this.quaternion.setFromAxisAngle(this.up, yaw);
+      this.yawQuaternion.setFromAxisAngle(this.up, yaw);
+      const pitch = this.vehiclePitch(vehicle);
+      if (Number.isFinite(pitch) && Math.abs(pitch) > 1e-5) {
+        this.pitchQuaternion.setFromAxisAngle(this.pitchAxis, pitch);
+        this.quaternion.copy(this.yawQuaternion).multiply(this.pitchQuaternion);
+      } else {
+        this.quaternion.copy(this.yawQuaternion);
+      }
       const offset = vehicleGroundOffset(variant, slot.definition.groundOffset);
       this.position.set(vehicle.x, vehicle.z + offset, vehicle.y);
       this.matrix.compose(this.position, this.quaternion, this.scale);
@@ -253,6 +267,34 @@ export class VehicleLayer {
     this.collectRailSources(vehicles);
     this.slotsCreated = 0;
     this.updateHalo(vehicles);
+  }
+
+  /**
+   * Tangage d'un véhicule (#232) : valeur du moteur si elle existe, sinon
+   * pente du terrain le long de son axe de déplacement. Ce repli couvre les
+   * moteurs WASM antérieurs au champ `pitch` et les véhicules arrêtés sur une
+   * rampe. Les navires, avions et modèles non terrestres restent horizontaux.
+   */
+  private vehiclePitch(vehicle: RenderVehicle): number {
+    if (Number.isFinite(vehicle.pitch)) return vehicle.pitch as number;
+    if (vehicle.kind !== 'road' && vehicle.kind !== 'train') return 0;
+    const map = this.map;
+    if (!map) return 0;
+    const tileX = Math.floor(vehicle.x);
+    const tileY = Math.floor(vehicle.y);
+    if (tileX < 0 || tileY < 0 || tileX >= map.width || tileY >= map.height) return 0;
+    const kind = map.kind[tileY * map.width + tileX] ?? 0;
+    // Sur un pont/tunnel, le terrain sous le tablier ne donne pas la pente
+    // réelle : horizontal vaut mieux qu'un tangage faux quand le moteur ne
+    // fournit pas `pitch`.
+    if (kind === TILE_KIND_INDEX.bridge || kind === TILE_KIND_INDEX.tunnel) return 0;
+    const yaw = directionToYaw(vehicle.direction);
+    const forwardX = Math.cos(yaw);
+    const forwardZ = -Math.sin(yaw);
+    const half = 0.38;
+    const front = sampleHeightWorld(map, vehicle.x + forwardX * half, vehicle.y + forwardZ * half);
+    const back = sampleHeightWorld(map, vehicle.x - forwardX * half, vehicle.y - forwardZ * half);
+    return Math.atan2(front - back, half * 2);
   }
 
   /** Mémorise les positions des convois pour émettre la vapeur sans copie. */
@@ -561,6 +603,7 @@ export function vehicleSignature(vehicles: readonly RenderVehicle[]): number {
     hash = Math.imul(hash ^ quantize(vehicle.x), FNV_PRIME) >>> 0;
     hash = Math.imul(hash ^ quantize(vehicle.y), FNV_PRIME) >>> 0;
     hash = Math.imul(hash ^ quantize(vehicle.z), FNV_PRIME) >>> 0;
+    hash = Math.imul(hash ^ quantize(vehicle.pitch ?? 0), FNV_PRIME) >>> 0;
     hash = Math.imul(hash ^ (vehicle.direction & 255), FNV_PRIME) >>> 0;
     hash = Math.imul(hash ^ vehicle.status, FNV_PRIME) >>> 0;
     hash = Math.imul(hash ^ vehicle.company, FNV_PRIME) >>> 0;

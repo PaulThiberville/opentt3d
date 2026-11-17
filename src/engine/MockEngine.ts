@@ -14,9 +14,13 @@
 import {
   COMPANY_NONE,
   PROTOCOL_VERSION,
+  ROAD_ONEWAY_DIRECTIONS,
+  ROAD_ONEWAY_INDEX,
   TILE_FLAG,
   TILE_KIND_INDEX,
   TRACK_BIT_CROSSING_RAIL,
+  roadOneWayFromIndex,
+  roadOneWayVector,
   type CompanySnapshot,
   type DepotSnapshot,
   type DisasterKind,
@@ -32,6 +36,7 @@ import {
   type OrderComparator,
   type OrderCondition,
   type RailType,
+  type RoadOneWay,
   type SignalDirection,
   type StationSnapshot,
   type StructureSnapshot,
@@ -90,6 +95,7 @@ import {
   type BuildTransport,
   type DepotSettings,
   type LockSettings,
+  type RoadDirection,
   type SignalSettings,
   type SignalTrack,
   type StationSettings,
@@ -194,6 +200,8 @@ interface MockVehicle {
   routeOrders: number[];
   speed: number;
   direction: number;
+  /** Tangage de rendu (#232), recalculé à chaque tick. */
+  pitch: number;
   status: number;
   waitTicks: number;
   x: number;
@@ -409,6 +417,10 @@ interface MockWorld {
   trackBits: Uint8Array;
   /** Type de rail par tuile (#157). */
   railTypes: Uint8Array;
+  /** Sens de circulation par tuile (#231), 0 = double sens. */
+  roadData: Uint8Array;
+  /** Nombre de tuiles à sens unique (accélère le hash sans sens unique). */
+  roadCount: number;
   /** Bits de signal par tuile (#156), voir `signalRules.ts`. */
   signalData: Uint8Array;
   /** Nombre de tuiles portant un signal (accélère les snapshots sans signal). */
@@ -463,6 +475,8 @@ interface SerializedWorld {
   /** Absents des sauvegardes mock antérieures à #156/#157. */
   railTypes?: string;
   signalData?: string;
+  /** Sens de circulation (#231), absent des sauvegardes antérieures. */
+  roadData?: string;
   signalCount?: number;
   companies: (Omit<MockCompany, 'maxLoan' | 'monthsOfBankruptcy' | 'interestPaid'> & {
     maxLoan?: number;
@@ -591,10 +605,13 @@ function directionFromVector(dx: number, dy: number): number {
   return Math.round((angle / (Math.PI * 2)) * 256) & 255;
 }
 
-function stepDirection(current: number, target: number, maxStep: number): number {
-  const delta = ((target - current + 384) % 256) - 128;
-  if (Math.abs(delta) <= maxStep) return target & 255;
-  return (current + Math.sign(delta) * maxStep + 256) & 255;
+/**
+ * Direction de sortie d'un dépôt (#232) : `direction` est un DiagDirection
+ * mock (0 = NE, 1 = SE, 2 = SW, 3 = NW), converti dans la convention 0..255
+ * des véhicules. Un véhicule au dépôt fait face à la sortie, pas au nord.
+ */
+function depotDirection(direction: number): number {
+  return (((Math.round(direction) & 3) * 64 + 32) % 256) & 255;
 }
 
 /** Trace un chemin en L (horizontal puis vertical) le long des tuiles. */
@@ -651,6 +668,7 @@ interface RouteWorld {
   width: number;
   height: number;
   kind: Uint8Array;
+  roadData: Uint8Array;
   stations: readonly MockStation[];
   depots: readonly MockDepot[];
   structures: readonly MockStructure[];
@@ -776,6 +794,45 @@ function surfaceCost(
   }
 }
 
+/**
+ * Une route à sens unique n'autorise que le déplacement porté par `roadData`.
+ * Les ouvrages, gares et dépôts n'ont pas de sens (#231) : seule la tuile
+ * réellement routière contraint le passage.
+ */
+export function roadOneWayAllows(
+  roadData: Uint8Array,
+  index: number,
+  dx: number,
+  dy: number,
+): boolean {
+  const value = roadData[index] ?? 0;
+  if (value === 0) return true;
+  const direction = roadOneWayFromIndex(value);
+  if (!direction) return true;
+  const vector = roadOneWayVector(direction);
+  return vector.x === dx && vector.y === dy;
+}
+
+/** Vérifie l'entrée et la sortie d'une tuile route à sens unique. */
+function canTravelRoad(
+  world: RouteWorld,
+  fromIndex: number,
+  toIndex: number,
+  dx: number,
+  dy: number,
+): boolean {
+  if (
+    (world.kind[fromIndex] ?? 0) === K.road &&
+    !roadOneWayAllows(world.roadData, fromIndex, dx, dy)
+  ) {
+    return false;
+  }
+  if ((world.kind[toIndex] ?? 0) === K.road && !roadOneWayAllows(world.roadData, toIndex, dx, dy)) {
+    return false;
+  }
+  return true;
+}
+
 /** File de priorité binaire minimale, sans allocation par nœud. */
 class MinHeap {
   private readonly nodes: number[] = [];
@@ -876,6 +933,10 @@ function findSurfacePath(world: RouteWorld, kind: VehicleKind, start: P2, goal: 
       if (closed[next]) continue;
       const nx = next % world.width;
       const ny = Math.floor(next / world.width);
+      // Un sens unique interdit l'entrée et la sortie à contresens (#231).
+      if (!canTravelRoad(world, current, next, nx - x, ny - Math.floor(current / world.width))) {
+        continue;
+      }
       const stepCost = surfaceCost(world, kind, nx, ny, next === goalIndex);
       if (!Number.isFinite(stepCost)) continue;
       const tentative = (costs[current] ?? Infinity) + stepCost;
@@ -1401,6 +1462,7 @@ class WorldBuilder {
   readonly flags: Uint8Array;
   readonly trackBits: Uint8Array;
   readonly railTypes: Uint8Array;
+  readonly roadData: Uint8Array;
   readonly signalData: Uint8Array;
 
   readonly companies: MockCompany[];
@@ -1430,6 +1492,7 @@ class WorldBuilder {
     this.flags = new Uint8Array(size);
     this.trackBits = new Uint8Array(size);
     this.railTypes = new Uint8Array(size);
+    this.roadData = new Uint8Array(size);
     this.signalData = new Uint8Array(size);
     this.companies = [];
 
@@ -1996,6 +2059,7 @@ class WorldBuilder {
         }
         this.kind[index] = kindIndex;
         this.owner[index] = owner;
+        this.roadData[index] = 0;
         const previous = path[i - 1];
         const next = path[i + 1];
         let bits = 0;
@@ -2416,6 +2480,7 @@ class WorldBuilder {
         routeOrders: orders.map((_, index) => index),
         speed,
         direction: 0,
+        pitch: 0,
         status: 1,
         waitTicks: 0,
         x: 0,
@@ -2787,7 +2852,9 @@ class WorldBuilder {
       flags: this.flags,
       trackBits: this.trackBits,
       railTypes: this.railTypes,
+      roadData: this.roadData,
       signalData: this.signalData,
+      roadCount: 0,
       signalCount: 0,
       companies: this.companies,
       towns: this.towns,
@@ -2922,7 +2989,7 @@ function positionAlong(vehicle: MockVehicle): { x: number; y: number; dx: number
   const count = vehicle.path.length;
   const from = vehicle.path[vehicle.segment % count];
   const to = vehicle.path[(vehicle.segment + 1) % count];
-  if (!from || !to) return { x: 0, y: 0, dx: 1, dy: 0 };
+  if (!from || !to) return { x: 0, y: 0, dx: 0, dy: 0 };
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   return { x: from.x + dx * vehicle.segmentT, y: from.y + dy * vehicle.segmentT, dx, dy };
@@ -2960,6 +3027,7 @@ function mapSnapshotView(world: MockWorld): MapSnapshot {
     flags: world.flags,
     trackBits: world.trackBits,
     railTypes: world.railTypes,
+    roadData: world.roadData,
     signalData: world.signalData,
   };
 }
@@ -2970,18 +3038,29 @@ function updateVehiclesTransforms(world: MockWorld): void {
     const position = positionAlong(vehicle);
     vehicle.x = position.x;
     vehicle.y = position.y;
-    vehicle.direction = stepDirection(
-      vehicle.direction,
-      directionFromVector(position.dx, position.dy),
-      12,
-    );
+    const moving = position.dx !== 0 || position.dy !== 0;
+    // Direction exacte du segment : l'ancien lissage par tick (12/256) faisait
+    // rouler les véhicules en travers des virages à 90° (#232). L'interpolation
+    // de rendu lisse la rotation entre deux snapshots.
+    if (moving) {
+      vehicle.direction = directionFromVector(position.dx, position.dy);
+    }
     const ground = sampleHeightWorld(map, vehicle.x, vehicle.y);
     if (vehicle.kind === 'aircraft') {
       vehicle.z = ground + 6.5 + Math.sin(world.tick * 0.02 + vehicle.id) * 0.4;
+      vehicle.pitch = 0;
     } else if (vehicle.kind === 'ship') {
       vehicle.z = 0.12;
+      vehicle.pitch = 0;
     } else {
       vehicle.z = ground + 0.08;
+      const horizontal = Math.hypot(position.dx, position.dy);
+      if (horizontal > 1e-6) {
+        const ahead = sampleHeightWorld(map, position.x + position.dx, position.y + position.dy);
+        vehicle.pitch = Math.atan2(ahead - ground, horizontal);
+      } else {
+        vehicle.pitch = 0;
+      }
     }
   }
 }
@@ -3186,6 +3265,32 @@ function railTypeFromCommand(
     parseRailType(command.options?.rail) ??
     fallback
   );
+}
+
+/** Sens unique demandé par une commande route (#231). */
+function roadOneWayFromCommand(command: Extract<EngineCommand, { type: 'build' }>): {
+  oneWay: RoadOneWay | null;
+  error: string | null;
+} {
+  const options = command.options;
+  const raw =
+    optionText(options, 'one_way') ??
+    optionText(options, 'oneway') ??
+    optionText(options, 'road_direction') ??
+    optionText(options, 'sense');
+  if (!raw || raw === 'both' || raw === 'two-way' || raw === 'twoway' || raw === 'bidirectional') {
+    return { oneWay: null, error: null };
+  }
+  const named = ROAD_ONEWAY_DIRECTIONS.find((direction) => direction === raw);
+  if (named) return { oneWay: named, error: null };
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric)) {
+    return { oneWay: roadOneWayFromIndex(Math.trunc(numeric)), error: null };
+  }
+  return {
+    oneWay: null,
+    error: '« options.one_way » inconnu (north, east, south, west, both).',
+  };
 }
 
 function nearestTownName(world: MockWorld, x: number, y: number): string {
@@ -3643,6 +3748,7 @@ function applyCrossing(
   world.trackBits[tile.index] = (tile.connections & 0x0f) | (rail ? TRACK_BIT_CROSSING_RAIL : 0);
   world.owner[tile.index] = command.company;
   world.flags[tile.index] = 0;
+  writeRoadData(world, tile.index, 0);
   completeBuild(
     world,
     company,
@@ -3903,6 +4009,15 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
 
   const tool = command.tool;
   const axis = command.options?.axis === 'y' ? 'y' : 'x';
+  let roadDirection: RoadDirection = 'both';
+  if (tool === 'road') {
+    const parsed = roadOneWayFromCommand(command);
+    if (parsed.error) {
+      addNews(world, 'error', `Construction impossible : ${parsed.error}`);
+      return;
+    }
+    roadDirection = parsed.oneWay ?? 'both';
+  }
   const plan = planBuild({
     map: mapSnapshotView(world),
     tool,
@@ -3912,6 +4027,7 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     company: command.company,
     budget: company.money,
     ...(tool === 'rail' ? { railType: railTypeFromCommand(command) } : {}),
+    ...(tool === 'road' ? { roadDirection } : {}),
   });
 
   if (!plan.valid) {
@@ -3952,6 +4068,7 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
         world.flags[tile.index] = wasBridge ? TILE_FLAG.WATER : 0;
       }
       world.railTypes[tile.index] = 0;
+      writeRoadData(world, tile.index, 0);
       writeSignalData(world, tile.index, 0);
       const x = tile.index % world.width;
       const y = Math.floor(tile.index / world.width);
@@ -3971,6 +4088,24 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     return;
   }
 
+  // Conversion d'un tronçon existant au sens unique : aucun terrassement,
+  // seule la couche `roadData` change (#231).
+  if (tool === 'road' && plan.road?.convert) {
+    const oneWay = plan.road.oneWay ?? null;
+    for (const tile of plan.tiles) {
+      writeRoadData(world, tile.index, oneWay ? ROAD_ONEWAY_INDEX[oneWay] : 0);
+    }
+    company.money -= Math.round(plan.cost * priceFactor(world));
+    world.mapDirty = true;
+    world.mapVersion += 1;
+    addNews(
+      world,
+      'info',
+      `${oneWay ? 'Sens unique' : 'Double sens'} : ${plan.tiles.length} tuile${plan.tiles.length > 1 ? 's' : ''} pour ${Math.round(plan.cost)} £.`,
+    );
+    return;
+  }
+
   for (const tile of plan.tiles) {
     world.kind[tile.index] = BUILT_KIND[tool];
     world.owner[tile.index] = command.company;
@@ -3982,8 +4117,11 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
       if (type === 'electrified') {
         world.flags[tile.index] = TILE_FLAG.ELECTRIFIED;
       }
+      writeRoadData(world, tile.index, 0);
     } else {
       world.railTypes[tile.index] = 0;
+      const oneWay = plan.road?.oneWay ?? null;
+      writeRoadData(world, tile.index, oneWay ? ROAD_ONEWAY_INDEX[oneWay] : 0);
     }
     writeSignalData(world, tile.index, 0);
   }
@@ -4128,7 +4266,8 @@ function buyVehicle(
     currentOrder: 0,
     routeOrders: [],
     speed: model.speed,
-    direction: 0,
+    direction: depotDirection(depot.direction),
+    pitch: 0,
     status: 3,
     waitTicks: 0,
     x: centre.x,
@@ -5993,6 +6132,8 @@ function sendVehicleToDepot(world: MockWorld, vehicle: MockVehicle): boolean {
   vehicle.segmentStops = [null];
   vehicle.status = 3;
   vehicle.waitTicks = 0;
+  vehicle.direction = depotDirection(depot.direction);
+  vehicle.pitch = 0;
   vehicle.x = centre.x;
   vehicle.y = centre.y;
   addNews(world, 'info', `Véhicule #${vehicle.id} envoyé au dépôt ${depot.id}.`);
@@ -6131,6 +6272,14 @@ function writeSignalData(world: MockWorld, index: number, value: number): void {
   world.signalData[index] = value;
 }
 
+/** Écrit le sens d'une route et tient le compteur de hash à jour (#231). */
+function writeRoadData(world: MockWorld, index: number, value: number): void {
+  const previous = world.roadData[index] ?? 0;
+  if (previous === 0 && value !== 0) world.roadCount += 1;
+  else if (previous !== 0 && value === 0) world.roadCount -= 1;
+  world.roadData[index] = value;
+}
+
 /**
  * Recalcule l'état rouge/vert des signaux à partir de l'occupation réelle des
  * cantons. Le calcul est déterministe : il ne dépend que des positions des
@@ -6210,6 +6359,7 @@ function serializeWorld(world: MockWorld): SerializedWorld {
     flags: encodeBase64(world.flags),
     trackBits: encodeBase64(world.trackBits),
     railTypes: encodeBase64(world.railTypes),
+    roadData: encodeBase64(world.roadData),
     signalData: encodeBase64(world.signalData),
     signalCount: world.signalCount,
     companies: world.companies,
@@ -6232,6 +6382,7 @@ function serializeWorld(world: MockWorld): SerializedWorld {
       routeOrders: vehicle.routeOrders,
       speed: vehicle.speed,
       direction: vehicle.direction,
+      pitch: vehicle.pitch,
       status: vehicle.status,
       waitTicks: vehicle.waitTicks,
       x: vehicle.x,
@@ -6346,6 +6497,7 @@ export class MockEngine implements EngineDriver {
           flags: world.flags.slice(),
           trackBits: world.trackBits.slice(),
           railTypes: world.railTypes.slice(),
+          roadData: world.roadData.slice(),
           signalData: world.signalData.slice(),
         }
       : null;
@@ -6516,6 +6668,7 @@ export class MockEngine implements EngineDriver {
       y: vehicle.y,
       z: vehicle.z,
       direction: vehicle.direction,
+      pitch: vehicle.pitch,
       speed: Math.round(vehicle.speed),
       status: vehicle.status,
       cargo: {
@@ -6795,6 +6948,12 @@ export class MockEngine implements EngineDriver {
     ]) {
       for (let i = 0; i < layer.length; i += 1) hash.mixInt(layer[i] ?? 0);
     }
+    // Le sens des routes ne coûte rien tant qu'aucune tuile n'est à sens
+    // unique : le compteur suffit à distinguer les deux états.
+    hash.mixInt(world.roadCount);
+    if (world.roadCount > 0) {
+      for (let i = 0; i < world.roadData.length; i += 1) hash.mixInt(world.roadData[i] ?? 0);
+    }
     return hash.digest();
   }
 
@@ -6851,6 +7010,8 @@ export class MockEngine implements EngineDriver {
       railTypes: saved.railTypes
         ? decodeArray(saved.railTypes, expected)
         : new Uint8Array(expected),
+      roadData: saved.roadData ? decodeArray(saved.roadData, expected) : new Uint8Array(expected),
+      roadCount: 0,
       signalData: saved.signalData
         ? decodeArray(saved.signalData, expected)
         : new Uint8Array(expected),
@@ -6914,6 +7075,9 @@ export class MockEngine implements EngineDriver {
     let signalCount = 0;
     for (const value of world.signalData) if (value !== 0) signalCount += 1;
     world.signalCount = signalCount;
+    let roadCount = 0;
+    for (const value of world.roadData) if (value !== 0) roadCount += 1;
+    world.roadCount = roadCount;
     const validGroups = new Set(world.groups.map((group) => group.id));
     world.vehicles = saved.vehicles.map((vehicle) => {
       const orders =
@@ -6972,6 +7136,9 @@ export class MockEngine implements EngineDriver {
     });
     if (!saved.depots) world.depots = legacyDepots(world);
     normaliseDepotDirections(world);
+    // Recalcule position, direction et tangage (#232) : le mock ne sauvegarde
+    // que le chemin, l'orientation est dérivée du segment courant.
+    updateVehiclesTransforms(world);
     this.world = world;
     this.ready = true;
     this.loading = false;
