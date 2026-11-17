@@ -3,10 +3,11 @@
  *
  * Chaque ville reçoit un semis déterministe de props procéduraux — lampadaires,
  * bancs, arbres de rue, arrêts de bus, panneaux, jardins, clôtures et placettes
- * pavées — posés sur le relief. Le semis évite les bâtiments, l'eau, les
- * industries et les gares : les jardins et clôtures vont sur les tuiles libres
- * (herbe, clairière, terrain vague), les lampadaires et panneaux au coin des
- * tuiles de voirie, toujours hors de la chaussée et de la bordure.
+ * pavées — posés sur le relief. Le semis évite les bâtiments, l'eau, les berges
+ * noyées par une nappe surélevée, les industries et les gares : les jardins et
+ * clôtures vont sur les tuiles libres (herbe, clairière, terrain vague), les
+ * lampadaires et panneaux au coin des tuiles de voirie, toujours hors de la
+ * chaussée et de la bordure (#215).
  *
  * Budget : un lot `InstancedMesh` par type de prop, jamais un par objet. Seules
  * les villes proches de la caméra sont instanciées ; au-delà d'un seuil avec
@@ -20,12 +21,19 @@
 
 import * as THREE from 'three';
 import type { MapSnapshot, TownSnapshot } from '../engine/protocol';
-import { TILE_KIND_INDEX } from '../engine/protocol';
-import { cornerHeightWorld, sampleHeightWorld } from '../game/mapGrid';
+import { TILE_FLAG, TILE_KIND_INDEX } from '../engine/protocol';
+import {
+  HEIGHT_SCALE,
+  cornerHeightWorld,
+  isWaterKind,
+  sampleHeightWorld,
+  tileKindFromIndex,
+} from '../game/mapGrid';
 import { Prng, hashUnit2d } from '../game/prng';
 import { qualitySettings, type QualityLevel } from './quality';
 import { createModelMaterial } from './models/materials';
 import { createTownPropGeometry, type BuildingDetail, type TownPropKind } from './models/buildings';
+import { waterSurfaceHeight } from './waterSurface';
 
 /** Rayon de semis autour du centre-ville (tuiles). */
 const PROPS_RADIUS = 9;
@@ -50,6 +58,32 @@ const ROAD_KINDS = new Set<number>([
   TILE_KIND_INDEX.bridge,
   TILE_KIND_INDEX.tunnel,
 ]);
+
+/**
+ * Vrai si une tuile est inondable : drapeau d'eau, ou sol plus bas que la
+ * surface d'une nappe 4-voisine. Le second cas couvre les berges basses d'un
+ * canal surélevé : un banc ou un jardin y flotterait dans l'eau (#215).
+ */
+export function isWaterloggedPropTile(map: MapSnapshot, x: number, y: number): boolean {
+  if (x < 0 || y < 0 || x >= map.width || y >= map.height) return false;
+  const index = y * map.width + x;
+  if (((map.flags[index] ?? 0) & TILE_FLAG.WATER) !== 0) return true;
+  const top = (map.heightMap[index] ?? 0) * HEIGHT_SCALE;
+  for (const [dx, dy] of [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= map.width || ny >= map.height) continue;
+    const neighbour = ny * map.width + nx;
+    if (!isWaterKind(tileKindFromIndex(map.kind[neighbour] ?? 0))) continue;
+    if (waterSurfaceHeight(map.heightMap[neighbour] ?? 0) >= top - 0.02) return true;
+  }
+  return false;
+}
 
 interface PropPlacement {
   townId: number;
@@ -395,12 +429,15 @@ export function generateTownProps(
       if (kind === TILE_KIND_INDEX.road) {
         // Les lampadaires se posent au coin de la tuile de voirie, hors de la
         // chaussée (demi-largeur 0,34) et de la bordure : jamais sur l'asphalte.
+        // Une rue noyée par une nappe voisine ne reçoit aucun mobilier.
+        if (isWaterloggedPropTile(map, x, y)) continue;
         if (hashUnit2d(town.id * 29 + 3, x + 1, y + 5) > 0.42) {
           kerbs.push({ x, y, freeNeighbours: 0, roadX: 0, roadY: 0, nearRoad: true });
         }
         continue;
       }
       if (!FREE_KINDS.has(kind)) continue;
+      if (isWaterloggedPropTile(map, x, y)) continue;
       let freeNeighbours = 0;
       let roadX = 0;
       let roadY = 0;
@@ -684,6 +721,7 @@ export function computeTownPropsSignature(
         const kind = map.kind[index] ?? 0;
         mix(kind);
         mix(map.heightMap[index] ?? 0);
+        mix(map.flags[index] ?? 0);
       }
     }
   }

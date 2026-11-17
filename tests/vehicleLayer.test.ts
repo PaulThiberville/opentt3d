@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import type { InstancedMesh } from 'three';
 import type { RenderVehicle } from '../src/game/vehicleInterpolation';
-import { VehicleLayer } from '../src/render/VehicleLayer';
+import {
+  SHIP_WATERLINE_OFFSET,
+  VehicleLayer,
+  vehicleGroundOffset,
+} from '../src/render/VehicleLayer';
+import { waterSurfaceHeight } from '../src/render/waterSurface';
 
 function vehicle(overrides: Partial<RenderVehicle> = {}): RenderVehicle {
   return {
@@ -67,6 +73,27 @@ describe('VehicleLayer : uploads conditionnels', () => {
     vehicles[0]!.kind = 'train';
     layer.update(vehicles);
     expect(layer.matrixUploads).toBeGreaterThan(matrices);
+    layer.dispose();
+  });
+
+  it('cale la coque des bateaux sous la ligne de flottaison (#215)', () => {
+    // Le mock expose z = 0,12 pour les navires au niveau de la mer.
+    const z = 0.12;
+    expect(vehicleGroundOffset('ship', 0.01)).toBe(SHIP_WATERLINE_OFFSET);
+    expect(vehicleGroundOffset('bus-city', 0.01)).toBe(0.01);
+    expect(z + SHIP_WATERLINE_OFFSET).toBeLessThan(z);
+    // La coque est immergée : son bas passe sous la surface de l'eau.
+    expect(z + SHIP_WATERLINE_OFFSET).toBeLessThanOrEqual(waterSurfaceHeight(0) + 0.02);
+
+    const layer = new VehicleLayer();
+    layer.update([vehicle({ id: 7, kind: 'ship', model: 'ship', x: 20, y: 20, z })]);
+    const ships = layer.group.children.find((child) => child.name === 'vehicles-ship') as
+      InstancedMesh | undefined;
+    expect(ships).toBeDefined();
+    const matrix = ships!.instanceMatrix.array as Float32Array;
+    expect(matrix[13]).toBeCloseTo(z + SHIP_WATERLINE_OFFSET, 6);
+    // Aucun autre décalage ne vient flotter le modèle au-dessus de l'eau.
+    expect(matrix[13]).toBeLessThan(waterSurfaceHeight(0) + 0.02);
     layer.dispose();
   });
 

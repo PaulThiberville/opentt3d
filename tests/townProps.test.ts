@@ -8,6 +8,7 @@ import {
   generateTownProps,
   isPropFreeKind,
   isRoadKind,
+  isWaterloggedPropTile,
 } from '../src/render/TownPropsLayer';
 import {
   createTownPropGeometry,
@@ -103,6 +104,43 @@ describe('TownPropsLayer : semis déterministe', () => {
     }
     // Les rues de la ville reçoivent bien du mobilier.
     expect(placements.some((placement) => placement.kind === 'lamp')).toBe(true);
+  });
+
+  it('rejette une berge basse noyée par une nappe surélevée (#215)', () => {
+    const { map, town } = makeTownMap();
+    // Canal surélevé au niveau 7 : la bande de terre au niveau 0 qui le longe
+    // est sous la surface et ne doit recevoir aucun mobilier.
+    const baseX = 27;
+    const baseY = 32;
+    for (let x = baseX; x < baseX + 8; x += 1) {
+      map.kind[baseY * map.width + x] = TILE_KIND_INDEX.canal;
+      map.heightMap[baseY * map.width + x] = 7;
+      map.kind[(baseY + 1) * map.width + x] = TILE_KIND_INDEX.grass;
+      map.heightMap[(baseY + 1) * map.width + x] = 0;
+    }
+    expect(isWaterloggedPropTile(map, baseX + 2, baseY + 1)).toBe(true);
+    const placements = generateTownProps(town, map, 80);
+    for (const placement of placements) {
+      const x = Math.floor(placement.x);
+      const y = Math.floor(placement.z);
+      expect(isWaterloggedPropTile(map, x, y)).toBe(false);
+    }
+    // Un drapeau d'eau suffit, même sur une tuile libre en apparence.
+    map.flags[(baseY - 2) * map.width + baseX] = TILE_FLAG.WATER;
+    expect(isWaterloggedPropTile(map, baseX, baseY - 2)).toBe(true);
+    expect(
+      generateTownProps(town, map, 80).some(
+        (placement) =>
+          placement.x >= baseX &&
+          placement.x < baseX + 1 &&
+          placement.z >= baseY - 2 &&
+          placement.z < baseY - 1,
+      ),
+    ).toBe(false);
+    // La signature réagit au drapeau, sans attendre un changement de hauteur.
+    const before = computeTownPropsSignature([town], map, 'medium');
+    map.flags[(baseY - 2) * map.width + baseX] = 0;
+    expect(computeTownPropsSignature([town], map, 'medium')).not.toBe(before);
   });
 
   it('garde chaque prop dans sa tuile et centre les arrêts de bus', () => {

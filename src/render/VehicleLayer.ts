@@ -6,7 +6,9 @@
  * aucune allocation de géométrie par frame. La position provient de
  * `VehicleInterpolator` (déjà interpolée entre snapshots) ; l'orientation est
  * déduite de la direction 0..255. L'archétype est choisi de façon déterministe
- * à partir de la famille du contrat et de l'id du véhicule.
+ * à partir de la famille du contrat et de l'id du véhicule. Les bateaux sont
+ * enfoncés à leur ligne de flottaison : sans cela, leur coque flottait
+ * visiblement au-dessus de la nappe et ressemblait à un radeau (#215).
  */
 
 import * as THREE from 'three';
@@ -28,6 +30,22 @@ export function directionToYaw(direction: number): number {
   const dx = Math.sin(theta);
   const dy = -Math.cos(theta);
   return Math.atan2(-dy, dx);
+}
+
+/**
+ * Enfoncement de la coque d'un bateau sous `vehicle.z`, en unités monde.
+ *
+ * Le contrat moteur expose la hauteur de la voie d'eau (0,12 au niveau de la
+ * mer) alors que l'origine du modèle est le bas de la coque. Sans ce
+ * correctif, les bateaux flottaient visiblement au-dessus de la surface et
+ * ressemblaient à des radeaux colorés (#215). La valeur place la ligne de
+ * flottaison au ras de l'eau, avec la coque partiellement immergée.
+ */
+export const SHIP_WATERLINE_OFFSET = -0.19;
+
+/** Décalage vertical d'un archétype au-dessus de `vehicle.z`. */
+export function vehicleGroundOffset(variant: VehicleVariant, modelOffset: number): number {
+  return variant === 'ship' ? SHIP_WATERLINE_OFFSET : modelOffset;
 }
 
 interface ModelSlot {
@@ -205,7 +223,8 @@ export class VehicleLayer {
 
       const yaw = directionToYaw(vehicle.direction);
       this.quaternion.setFromAxisAngle(this.up, yaw);
-      this.position.set(vehicle.x, vehicle.z + slot.definition.groundOffset, vehicle.y);
+      const offset = vehicleGroundOffset(variant, slot.definition.groundOffset);
+      this.position.set(vehicle.x, vehicle.z + offset, vehicle.y);
       this.matrix.compose(this.position, this.quaternion, this.scale);
       slot.mesh.setMatrixAt(index, this.matrix);
 
