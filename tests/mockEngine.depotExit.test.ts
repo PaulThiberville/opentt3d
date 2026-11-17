@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MockEngine } from '../src/engine/MockEngine';
+import { MockEngine, depotDirection } from '../src/engine/MockEngine';
 import { TILE_KIND_INDEX, type DepotSnapshot, type MapSnapshot } from '../src/engine/protocol';
 import {
   directionFromIndex,
@@ -306,5 +306,250 @@ describe('MockEngine : sortie de dépôt (#233)', () => {
         `dépôt ${depot.id} (${depot.kind}) orienté ${directionFromIndex(depot.direction)}`,
       ).toBe(depot.kind === 'rail' ? TILE_KIND_INDEX.rail : TILE_KIND_INDEX.road);
     }
+  });
+});
+
+describe('MockEngine : rotation et itinéraires de dépôt (#247)', () => {
+  /** Plus grande zone plate constructible, avec ses dimensions réelles. */
+  function findFlatArea(
+    map: MapSnapshot,
+    maxWidth: number,
+    maxHeight: number,
+  ): { x: number; y: number; width: number; height: number } {
+    const natural = new Set([
+      TILE_KIND_INDEX.grass,
+      TILE_KIND_INDEX.clear,
+      TILE_KIND_INDEX.rough,
+      TILE_KIND_INDEX.trees,
+    ]);
+    for (const [width, height] of [
+      [maxWidth, maxHeight],
+      [12, 10],
+      [10, 8],
+      [8, 6],
+    ] as const) {
+      for (let y = 4; y + height < map.height - 4; y += 1) {
+        for (let x = 4; x + width < map.width - 4; x += 1) {
+          const base = map.heightMap[tileIndex(x, y, map.width)] ?? 0;
+          let ok = true;
+          for (let dy = 0; dy < height && ok; dy += 1) {
+            for (let dx = 0; dx < width; dx += 1) {
+              const index = tileIndex(x + dx, y + dy, map.width);
+              if (!natural.has(map.kind[index] ?? 0) || map.heightMap[index] !== base) {
+                ok = false;
+                break;
+              }
+            }
+          }
+          if (ok) return { x, y, width, height };
+        }
+      }
+    }
+    throw new Error('aucune zone plate constructible');
+  }
+
+  it('oriente chaque bus garé vers sa porte, dans les quatre orientations', async () => {
+    for (const testCase of CASES) {
+      const { engine, depot } = await buildCrossing(testCase);
+      engine.send({
+        type: 'vehicle',
+        action: 'buy',
+        company: 0,
+        depotId: depot.id,
+        model: 'bus_city',
+      });
+      const bus = engine.snapshot().vehicles.find((item) => item.status === 3);
+      if (!bus) throw new Error('bus au dépôt attendu');
+      const offset = directionOffset(testCase.direction);
+      const expected = Math.round((Math.atan2(offset.dx, -offset.dy) / (Math.PI * 2)) * 256) & 255;
+      expect(bus.direction, `bus garé ${testCase.direction}`).toBe(expected);
+      expect(bus.direction).toBe(depotDirection(depot.direction));
+      expect(bus.direction % 64).toBe(0);
+    }
+  });
+
+  it('ne traverse pas le dépôt et n’y arrive pas en sortant (#247)', async () => {
+    const engine = await createEngine();
+    const map = engine.snapshot().map;
+    if (!map) throw new Error('carte attendue');
+    const site = findFlatArea(map, 20, 14);
+    const cx = site.x + Math.floor(site.width / 2);
+    const cy = site.y + Math.floor(site.height / 2);
+    const build = (command: Parameters<MockEngine['send']>[0]): void => engine.send(command);
+    const road = (x: number, y: number): void =>
+      build({
+        type: 'build',
+        tool: 'road',
+        company: 0,
+        from: { x, y },
+        to: { x, y },
+        options: { axis: 'x' },
+      });
+
+    // Deux tronçons devant/derrière le dépôt et un contournement au sud : sans
+    // interdir la traversée du bâtiment, A* coupait par le dépôt (plus court)
+    // et déclenchait une arrivée fantôme juste après la porte.
+    for (let i = 1; i <= 3; i += 1) {
+      road(cx + i, cy);
+      road(cx - i, cy);
+    }
+    for (let i = -3; i <= 3; i += 1) road(cx + i, cy + 1);
+    build({
+      type: 'build',
+      tool: 'depot',
+      company: 0,
+      from: { x: cx, y: cy },
+      options: { kind: 'road', direction: 'ne' },
+    });
+    const stationTile = { x: cx - 2, y: cy - 1 };
+    build({
+      type: 'build',
+      tool: 'station',
+      company: 0,
+      from: stationTile,
+      options: { kind: 'road', direction: 'ne' },
+    });
+
+    const snapshot = engine.snapshot();
+    const depot = snapshot.depots.find((item) => item.x === cx && item.y === cy);
+    const station = snapshot.stations.find(
+      (item) => item.kind === 'road' && Math.floor(item.x) === stationTile.x,
+    );
+    if (!depot) throw new Error('dépôt attendu');
+    if (!station) throw new Error('gare attendue');
+
+    engine.send({
+      type: 'vehicle',
+      action: 'buy',
+      company: 0,
+      depotId: depot.id,
+      model: 'bus_city',
+    });
+    const bus = engine.snapshot().vehicles.find((item) => item.status === 3);
+    if (!bus) throw new Error('bus attendu');
+    engine.send(orderVehicleCommand(0, bus.id, [stationOrderById(station.id), depotOrder(depot)]));
+    engine.send({ type: 'vehicle', action: 'start', company: 0, vehicle: bus.id });
+
+    const centre = { x: cx + 0.5, y: cy + 0.5 };
+    const path = await savedVehiclePath(engine, bus.id);
+    expect(path[0]).toEqual(centre);
+    expect(path[path.length - 1]).toEqual(centre);
+    const interiorDepotTiles = path
+      .slice(1, -1)
+      .filter((point) => Math.floor(point.x) === cx && Math.floor(point.y) === cy);
+    expect(interiorDepotTiles).toEqual([]);
+
+    const arrivals: number[] = [];
+    let arrivedAtDepot = false;
+    for (let step = 0; step < 240 && !arrivedAtDepot; step += 1) {
+      run(engine, 10);
+      const current = engine.snapshot();
+      for (const event of current.events) {
+        if (event.type !== 'vehicle_arrived' || event.vehicle !== bus.id) continue;
+        if (event.station === undefined) continue;
+        if (arrivals[arrivals.length - 1] === event.station) continue;
+        arrivals.push(event.station);
+        if (event.station === depot.id) arrivedAtDepot = true;
+      }
+    }
+    expect(arrivedAtDepot).toBe(true);
+    // Une seule arrivée à la gare, puis une seule au dépôt : l'ordre courant
+    // suit la tournée au lieu de boucler sur la porte.
+    expect(arrivals).toEqual([station.id, depot.id]);
+
+    const parked = engine.snapshot().vehicles.find((item) => item.id === bus.id);
+    expect(parked?.status).toBe(2);
+    expect(parked?.direction).toBe(depotDirection(depot.direction));
+  });
+
+  it('sort d’un dépôt dont la porte donne sur une route à sens unique', async () => {
+    const engine = await createEngine();
+    const map = engine.snapshot().map;
+    if (!map) throw new Error('carte attendue');
+    const site = findFlatArea(map, 20, 14);
+    const cx = site.x + 3;
+    const cy = site.y + 3;
+    const build = (command: Parameters<MockEngine['send']>[0]): void => engine.send(command);
+    const road = (x: number, y: number): void =>
+      build({
+        type: 'build',
+        tool: 'road',
+        company: 0,
+        from: { x, y },
+        to: { x, y },
+        options: { axis: 'x' },
+      });
+
+    // Boucle : les quatre coins restent à double sens, les côtés sont à sens
+    // unique. Le dépôt ouvre sur le côté nord, dans le sens de circulation.
+    for (let x = cx - 3; x <= cx + 3; x += 1) {
+      road(x, cy - 2);
+      road(x, cy + 2);
+    }
+    for (let y = cy - 1; y <= cy + 1; y += 1) {
+      road(cx - 3, y);
+      road(cx + 3, y);
+    }
+    const oneWay = (x: number, y: number, axis: 'x' | 'y', direction: string): void =>
+      build({
+        type: 'build',
+        tool: 'road',
+        company: 0,
+        from: { x, y },
+        to: { x, y },
+        options: { axis, one_way: direction },
+      });
+    for (let x = cx - 2; x <= cx + 2; x += 1) {
+      oneWay(x, cy - 2, 'x', 'east');
+      oneWay(x, cy + 2, 'x', 'west');
+    }
+    for (let y = cy - 1; y <= cy + 1; y += 1) {
+      oneWay(cx - 3, y, 'y', 'north');
+      oneWay(cx + 3, y, 'y', 'south');
+    }
+
+    const depotTile = { x: cx, y: cy - 3 };
+    build({ type: 'build', tool: 'depot', company: 0, from: depotTile, options: { kind: 'road' } });
+    const stationTile = { x: cx - 3, y: cy - 3 };
+    build({
+      type: 'build',
+      tool: 'station',
+      company: 0,
+      from: stationTile,
+      options: { kind: 'road', direction: 'ne' },
+    });
+
+    const snapshot = engine.snapshot();
+    const depot = snapshot.depots.find((item) => item.x === depotTile.x && item.y === depotTile.y);
+    const station = snapshot.stations.find(
+      (item) =>
+        item.kind === 'road' &&
+        Math.floor(item.x) === stationTile.x &&
+        Math.floor(item.y) === stationTile.y,
+    );
+    if (!depot) throw new Error('dépôt attendu');
+    if (!station) throw new Error('gare attendue');
+    expect(depot.direction).toBe(directionToIndex('se'));
+
+    const busId = await buyAndStart(engine, depot, station.id);
+    const path = await savedVehiclePath(engine, busId);
+    expect(path[0]).toEqual({ x: cx + 0.5, y: cy - 2.5 });
+    expect(path[1]).toEqual({ x: cx + 0.5, y: cy - 1.5 });
+    // La sortie emprunte le sens unique vers l'est, pas à contresens.
+    expect(path[2]).toEqual({ x: cx + 1.5, y: cy - 1.5 });
+
+    let arrived = false;
+    for (let step = 0; step < 120 && !arrived; step += 1) {
+      run(engine, 120);
+      arrived = engine
+        .snapshot()
+        .events.some(
+          (event) =>
+            event.type === 'vehicle_arrived' &&
+            event.vehicle === busId &&
+            event.station === station.id,
+        );
+    }
+    expect(arrived).toBe(true);
   });
 });

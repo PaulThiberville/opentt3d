@@ -1148,7 +1148,11 @@ export class ReportsPanel {
   }
 
   private renderVehicleRows(view: VehicleListPanelView, force: boolean): void {
-    const signature = JSON.stringify(view.rows);
+    // Les sélecteurs de groupe de chaque ligne sont construits à partir de
+    // `view.groups` : la signature doit inclure la liste des groupes, sinon un
+    // groupe créé n'apparaît pas dans les lignes tant qu'aucun véhicule ne
+    // change d'état (#164, révélé par les tests E2E).
+    const signature = JSON.stringify({ rows: view.rows, groups: view.groups });
     if (!force && this.signatures.get('vehicles') === signature) return;
     this.signatures.set('vehicles', signature);
     this.vehicleList.replaceChildren();
