@@ -616,6 +616,30 @@ export function axisForDrag(from: BuildPoint, to: BuildPoint): BuildAxis {
   return dx >= dy ? 'x' : 'y';
 }
 
+/**
+ * Destination d'un pont ou d'un tunnel : un drag à la souris est rarement
+ * parfaitement aligné sur la grille, alors qu'un ouvrage doit être rectiligne.
+ * On projette donc la cible sur l'axe dominant du geste (X ou Y), en gardant
+ * la distance parcourue sur cet axe. Un drag nul renvoie le point de départ :
+ * l'appelant décide alors de l'aperçu par défaut ou du message « glissez ».
+ */
+export function structureDragTarget(
+  from: BuildPoint,
+  hover: BuildPoint,
+  map: { width: number; height: number },
+): BuildPoint {
+  const start = buildTile(from);
+  const target = buildTile(hover);
+  if (start.x === target.x && start.y === target.y) return start;
+  const axis = axisForDrag(start, target);
+  const x = axis === 'x' ? target.x : start.x;
+  const y = axis === 'y' ? target.y : start.y;
+  return {
+    x: Math.max(0, Math.min(map.width - 1, x)),
+    y: Math.max(0, Math.min(map.height - 1, y)),
+  };
+}
+
 function occupancyReason(kind: TileKind, tool: BuildTool, flags = 0): string | null {
   if (tool === 'clear') {
     if (
@@ -2094,7 +2118,9 @@ function bridgeObstacleAt(
 /**
  * Motif de refus de l'accès à une rampe. Une culée posée au bord d'une falaise
  * ou d'un autre niveau produit un pont visuellement impossible : la rampe doit
- * rejoindre la terre ferme, à la même hauteur que la culée.
+ * rejoindre la terre ferme, au niveau de la culée ou une pente plus bas. Une
+ * berge en pente douce reste donc constructible, comme dans OpenTTD, sans
+ * accepter une rampe qui dégringole sur plusieurs niveaux.
  */
 function bridgeApproachReason(
   map: MapSnapshot,
@@ -2130,8 +2156,13 @@ function bridgeApproachReason(
     return 'L’accès à la rampe est occupé : dégagez une tuile devant la culée.';
   }
   const height = map.heightMap[index] ?? 0;
-  if (height !== abutmentHeight) {
-    return 'La rampe ne rejoint pas le sol : culée en falaise ou à un autre niveau.';
+  if (height > abutmentHeight) {
+    return 'La rampe ne peut pas monter : la culée est posée au pied d’une falaise.';
+  }
+  // Une pente relie la culée au sol sur une tuile ; au-delà, la rampe serait
+  // verticale et le tablier flotterait au-dessus du vide.
+  if (abutmentHeight - height > 1) {
+    return 'La rampe est trop raide : approchez la culée du bord de l’obstacle.';
   }
   return null;
 }
@@ -2194,7 +2225,9 @@ export function planBridge(options: BridgePlanOptions): BuildPlan {
   if (!traced) {
     return { ...plan, reason: 'Un pont doit être droit, sur un axe X ou Y.' };
   }
-  if (span === 0) return { ...plan, reason: 'Un pont relie deux tuiles distinctes.' };
+  if (span === 0) {
+    return { ...plan, reason: 'Glissez d’une culée à l’autre pour tracer le pont.' };
+  }
   if (length > MAX_BRIDGE_TILES) {
     return {
       ...plan,
@@ -2447,6 +2480,72 @@ export function planLinkedRoute(options: LinkedRouteOptions): LinkedRoutePlan | 
   return { pieces, cost };
 }
 
+export interface TunnelSpan {
+  from: BuildPoint;
+  to: BuildPoint;
+}
+
+export interface TunnelSpanOptions {
+  settings: TunnelSettings;
+  company?: number;
+}
+
+/**
+ * Cherche le portail de sortie d'un tunnel le long de l'axe du drag, comme le
+ * fait OpenTTD : le joueur désigne l'entrée et le tunnel ressort à la première
+ * brèche de même niveau. Sans cela, il fallait viser au pixel près une tuile
+ * de hauteur identique, et la moindre pente faisait échouer la pose.
+ *
+ * Le premier portail qui laisse du relief entre les deux gagne, exactement
+ * comme `CMD_BUILD_TUNNEL` : viser une tuile plus loin ne doit pas produire un
+ * plan que le moteur refuserait.
+ */
+export function resolveTunnelSpan(
+  map: MapSnapshot,
+  from: BuildPoint,
+  target: BuildPoint,
+  options: TunnelSpanOptions,
+): TunnelSpan | null {
+  const entrance = buildTile(from);
+  const goal = buildTile(target);
+  if (!inBounds(map, entrance.x, entrance.y)) return null;
+  if (goal.x === entrance.x && goal.y === entrance.y) return null;
+
+  const axis: BuildAxis = goal.x !== entrance.x ? 'x' : 'y';
+  const step = axis === 'x' ? Math.sign(goal.x - entrance.x) : Math.sign(goal.y - entrance.y);
+  if (step === 0) return null;
+
+  const portalHeight = map.heightMap[tileIndex(entrance.x, entrance.y, map.width)] ?? 0;
+  for (let distance = TUNNEL_MIN_TILES - 1; distance < TUNNEL_MAX_TILES; distance += 1) {
+    const x = entrance.x + (axis === 'x' ? step * distance : 0);
+    const y = entrance.y + (axis === 'y' ? step * distance : 0);
+    if (!inBounds(map, x, y)) return null;
+    const index = tileIndex(x, y, map.width);
+    if ((map.heightMap[index] ?? 0) !== portalHeight) continue;
+    if (structureEndReason(map, x, y, options.settings.kind, 'portail', options.company)) {
+      continue;
+    }
+
+    let maxMiddleHeight = portalHeight;
+    let blocked = false;
+    for (let offset = 1; offset < distance; offset += 1) {
+      const middleX = entrance.x + (axis === 'x' ? step * offset : 0);
+      const middleY = entrance.y + (axis === 'y' ? step * offset : 0);
+      const middle = tileIndex(middleX, middleY, map.width);
+      const middleKind = TILE_KINDS[map.kind[middle] ?? 0] ?? 'void';
+      if (middleKind === 'bridge' || middleKind === 'tunnel' || middleKind === 'aqueduct') {
+        blocked = true;
+        break;
+      }
+      maxMiddleHeight = Math.max(maxMiddleHeight, map.heightMap[middle] ?? 0);
+    }
+    // Sans relief plus haut que les portails, il n'y a rien à percer.
+    if (blocked || maxMiddleHeight <= portalHeight) continue;
+    return { from: entrance, to: { x, y } };
+  }
+  return null;
+}
+
 /** Plan d'un tunnel rectiligne entre deux portails (#155). */
 export function planTunnel(options: TunnelPlanOptions): BuildPlan {
   const map = options.map;
@@ -2467,6 +2566,12 @@ export function planTunnel(options: TunnelPlanOptions): BuildPlan {
   if (!traced) {
     return { ...plan, reason: 'Un tunnel doit être droit, sur un axe X ou Y.' };
   }
+  if (from.x === to.x && from.y === to.y) {
+    return {
+      ...plan,
+      reason: 'Glissez depuis le portail d’entrée vers le relief pour tracer le tunnel.',
+    };
+  }
   if (length < TUNNEL_MIN_TILES) {
     return {
       ...plan,
@@ -2486,7 +2591,7 @@ export function planTunnel(options: TunnelPlanOptions): BuildPlan {
   const toHeight = map.heightMap[tileIndex(to.x, to.y, map.width)] ?? 0;
   let reason: string | null = null;
   if (portalHeight !== toHeight) {
-    reason = 'Les deux portails d’un tunnel doivent être à la même hauteur.';
+    reason = `Les deux portails d’un tunnel doivent être à la même hauteur (${portalHeight} ≠ ${toHeight}).`;
   }
   reason =
     reason ??
