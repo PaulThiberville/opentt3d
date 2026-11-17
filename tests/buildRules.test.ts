@@ -229,7 +229,7 @@ describe('buildRules : commande moteur', () => {
       company: 0,
       from: { x: 2, y: 3 },
       to: { x: 5, y: 6 },
-      options: { axis: 'y' },
+      options: { axis: 'y', order: 'vertical' },
     });
   });
 

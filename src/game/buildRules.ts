@@ -17,10 +17,12 @@ import {
   COMPANY_NONE,
   TILE_FLAG,
   TILE_KIND_INDEX,
+  roadOneWayAxis,
   type BridgeMaterial,
   type EngineCommand,
   type MapSnapshot,
   type RailType,
+  type RoadOneWay,
   type SignalDirection,
   type SignalKind,
   type SignalTrack,
@@ -78,6 +80,34 @@ export interface RailSettings {
   type: RailType;
 }
 
+/**
+ * Sens de circulation d'une route (#231) : `both` pour une route classique à
+ * double sens, ou une direction cardinale pour une route à sens unique.
+ */
+export type RoadDirection = 'both' | RoadOneWay;
+
+/** Cycle du bouton « Pivoter » quand une route à sens unique est armée. */
+export const ROAD_DIRECTIONS: readonly RoadDirection[] = ['both', 'east', 'south', 'west', 'north'];
+
+/** Directions proposées par le sélecteur de sens unique (hors double sens). */
+export const ROAD_ONEWAY_DIRECTION_ORDER: readonly RoadOneWay[] = [
+  'east',
+  'south',
+  'west',
+  'north',
+];
+
+export function nextRoadDirection(direction: RoadDirection): RoadDirection {
+  if (direction === 'both') return 'east';
+  const index = ROAD_ONEWAY_DIRECTION_ORDER.indexOf(direction);
+  return ROAD_ONEWAY_DIRECTION_ORDER[(index + 1) % ROAD_ONEWAY_DIRECTION_ORDER.length] ?? 'east';
+}
+
+/** Réglages de l'outil route (#231). */
+export interface RoadSettings {
+  direction: RoadDirection;
+}
+
 export interface StationSettings {
   kind: BuildTransport;
   /** Nombre de quais (1..8). Ignoré pour une gare routière. */
@@ -131,6 +161,8 @@ export interface TunnelSettings {
 }
 
 export interface BuildSettings {
+  /** Sens de circulation des routes neuves (#231). */
+  road: RoadSettings;
   station: StationSettings;
   depot: DepotSettings;
   signal: SignalSettings;
@@ -464,6 +496,7 @@ export function nextDirection(direction: BuildDirection): BuildDirection {
 
 export function createBuildSettings(): BuildSettings {
   return {
+    road: { direction: 'both' },
     station: {
       kind: 'rail',
       platforms: 1,
@@ -485,6 +518,7 @@ export function createBuildSettings(): BuildSettings {
 /** Copie superficielle sûre : les sous-objets ne sont jamais partagés. */
 export function cloneBuildSettings(settings: BuildSettings): BuildSettings {
   return {
+    road: { ...settings.road },
     station: { ...settings.station },
     depot: { ...settings.depot },
     signal: { ...settings.signal },
@@ -514,6 +548,9 @@ export const BUILD_COST_PER_TILE: Record<PathBuildTool, number> = {
   clear: 40,
   canal: CANAL_COST_PER_TILE,
 };
+
+/** Surcoût par tuile d'une route à sens unique (#231) : marquage et panneaux. */
+export const ROAD_ONEWAY_SURCHARGE = 30;
 
 /** Surcoût par demi-niveau de dénivelé franchi (terrassement). */
 export const BUILD_SLOPE_COST = 80;
@@ -612,6 +649,8 @@ export interface BuildPlan {
   aqueduct?: { axis: BuildAxis; level: number };
   /** Passage à niveau résolu (#159). */
   crossing?: { network: BuildTransport; axis: BuildAxis };
+  /** Sens de circulation résolu d'une route (#231). */
+  road?: { direction: RoadDirection; oneWay: RoadOneWay | null; convert: boolean };
   /** Niveau d'eau visé par un canal ou un aqueduc (demi-niveaux). */
   waterLevel?: number;
   /** Type de rail posé ou visé par une conversion (#157). */
@@ -633,6 +672,8 @@ export interface BuildPlanOptions {
   maxTiles?: number;
   /** Type de rail pour l'outil `rail` (#157), `rail` par défaut. */
   railType?: RailType;
+  /** Sens de circulation pour l'outil `road` (#231), double sens par défaut. */
+  roadDirection?: RoadDirection;
 }
 
 /** Coordonnée de tuile entière, bornée à la carte par l'appelant. */
@@ -780,10 +821,46 @@ function occupancyReason(kind: TileKind, tool: BuildTool, flags = 0): string | n
   }
 }
 
-function tileCost(tool: PathBuildTool, heightDelta: number, railType: RailType = 'rail'): number {
+/** Voisin routier utilisable pour déduire l'axe d'une route existante. */
+function isRoadAxisNeighbour(kind: TileKind): boolean {
+  return (
+    kind === 'road' ||
+    kind === 'crossing' ||
+    kind === 'bridge' ||
+    kind === 'tunnel' ||
+    kind === 'station'
+  );
+}
+
+/**
+ * Axe d'une route déjà construite, déduit de ses voisins (#231).
+ *
+ * Un tronçon droit a des voisins sur un seul axe. Un virage, un T ou un
+ * carrefour renvoie `null` : OpenTTD interdit d'y appliquer un sens unique.
+ */
+function existingRoadAxis(map: MapSnapshot, x: number, y: number): BuildAxis | null {
+  const kindAt = (nx: number, ny: number): boolean => {
+    if (nx < 0 || ny < 0 || nx >= map.width || ny >= map.height) return false;
+    const index = tileIndex(nx, ny, map.width);
+    return isRoadAxisNeighbour(TILE_KINDS[map.kind[index] ?? 0] ?? 'void');
+  };
+  const horizontal = kindAt(x - 1, y) || kindAt(x + 1, y);
+  const vertical = kindAt(x, y - 1) || kindAt(x, y + 1);
+  if (horizontal && !vertical) return 'x';
+  if (vertical && !horizontal) return 'y';
+  return null;
+}
+
+function tileCost(
+  tool: PathBuildTool,
+  heightDelta: number,
+  railType: RailType = 'rail',
+  oneWay = false,
+): number {
   const slope = tool === 'clear' ? 0 : Math.abs(heightDelta) * BUILD_SLOPE_COST;
   if (tool === 'rail') return railBuildCost(railType) + slope;
-  return BUILD_COST_PER_TILE[tool] + slope;
+  const base = BUILD_COST_PER_TILE[tool] + (oneWay && tool === 'road' ? ROAD_ONEWAY_SURCHARGE : 0);
+  return base + slope;
 }
 
 /**
@@ -796,9 +873,12 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
   const tool = options.tool;
   const from = buildTile(options.from);
   const to = buildTile(options.to ?? options.from);
-  const axis = options.axis ?? axisForDrag(from, to);
+  let axis = options.axis ?? axisForDrag(from, to);
   const maxTiles = Math.max(1, options.maxTiles ?? MAX_BUILD_TILES);
   const railType: RailType = tool === 'rail' ? (options.railType ?? 'rail') : 'rail';
+  const roadDirection: RoadDirection = tool === 'road' ? (options.roadDirection ?? 'both') : 'both';
+  const oneWay: RoadOneWay | null = roadDirection === 'both' ? null : roadDirection;
+  let road = tool === 'road' ? { direction: roadDirection, oneWay, convert: false } : undefined;
   const empty: BuildPlan = {
     tool,
     from,
@@ -809,10 +889,35 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     valid: false,
     reason: null,
     ...(tool === 'rail' ? { railType } : {}),
+    ...(road ? { road } : {}),
   };
 
   if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
     return { ...empty, reason: 'Tracé hors de la carte.' };
+  }
+
+  // Une route à sens unique suit un seul axe et un seul sens : OpenTTD
+  // interdit les carrefours et virages à sens unique (DRD). On refuse donc un
+  // tracé en L ou un axe incompatible avant d'afficher le moindre fantôme.
+  if (oneWay) {
+    const requiredAxis = roadOneWayAxis(oneWay);
+    const single = from.x === to.x && from.y === to.y;
+    if (!single && from.x !== to.x && from.y !== to.y) {
+      return {
+        ...empty,
+        reason: 'Sens unique : tracez un segment droit, un axe à la fois.',
+      };
+    }
+    if (!single && axisForDrag(from, to) !== requiredAxis) {
+      return {
+        ...empty,
+        reason:
+          requiredAxis === 'x'
+            ? 'Sens unique est-ouest : tracez une route horizontale ou changez de sens (R).'
+            : 'Sens unique nord-sud : tracez une route verticale ou changez de sens (R).',
+      };
+    }
+    axis = requiredAxis;
   }
 
   const points = traceBuildPath(from, to, axis);
@@ -821,6 +926,57 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
       ...empty,
       reason: `Tronçon trop long (${points.length} tuiles, ${maxTiles} maximum).`,
     };
+  }
+
+  // Sens unique posé sur un tronçon déjà construit : on ne reconstruit rien,
+  // on change le marquage (coût réduit). Symétriquement, repasser un tronçon
+  // à sens unique en double sens est gratuit.
+  let convert = false;
+  if (tool === 'road') {
+    const kinds = points.map((point) => {
+      const index = tileIndex(point.x, point.y, map.width);
+      return TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    });
+    const anyRoad = kinds.some((kind) => kind === 'road');
+    const allRoad = kinds.every((kind) => kind === 'road');
+    if (anyRoad && oneWay) {
+      if (!allRoad) {
+        return {
+          ...empty,
+          reason: 'Sens unique : convertissez un tronçon routier d’un seul tenant.',
+        };
+      }
+      const requiredAxis = roadOneWayAxis(oneWay);
+      for (const point of points) {
+        const axisOfTile = existingRoadAxis(map, point.x, point.y);
+        if (axisOfTile === null) {
+          return {
+            ...empty,
+            reason: 'Sens unique : impossible sur un virage ou un carrefour.',
+          };
+        }
+        if (axisOfTile !== requiredAxis) {
+          return {
+            ...empty,
+            reason: 'Sens unique : le sens choisi ne correspond pas à l’axe de la route.',
+          };
+        }
+      }
+      convert = true;
+      road = { direction: roadDirection, oneWay, convert: true };
+    } else if (allRoad && !oneWay) {
+      // Double sens demandé sur une route déjà construite : n'accepter que si
+      // elle est effectivement à sens unique, pour ne pas transformer un clic
+      // sur une route existante en « reconstruction » silencieuse.
+      const hasOneWay = points.some((point) => {
+        const index = tileIndex(point.x, point.y, map.width);
+        return (map.roadData?.[index] ?? 0) !== 0;
+      });
+      if (hasOneWay) {
+        convert = true;
+        road = { direction: 'both', oneWay: null, convert: true };
+      }
+    }
   }
 
   const tiles: BuildPlanTile[] = [];
@@ -841,15 +997,36 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     if (tool !== 'clear') {
       if (previous) connections |= directionBit(point, previous);
       if (next) connections |= directionBit(point, next);
-      // Une tuile isolée reste une route droite est-ouest, lisible en 3D.
-      if (connections === 0) connections = CONNECT_EAST | CONNECT_WEST;
+      // Une tuile isolée reste une route droite, lisible en 3D : son axe suit
+      // le sens unique quand il y en a un, est-ouest sinon.
+      if (connections === 0) {
+        connections =
+          oneWay && roadOneWayAxis(oneWay) === 'y'
+            ? CONNECT_NORTH | CONNECT_SOUTH
+            : CONNECT_EAST | CONNECT_WEST;
+      }
     }
 
     const heightDelta = previousHeight === null ? 0 : height - previousHeight;
-    const costOfTile = tileCost(tool, heightDelta, railType);
+    const costOfTile = convert
+      ? oneWay
+        ? ROAD_ONEWAY_SURCHARGE
+        : 0
+      : tileCost(tool, heightDelta, railType, oneWay !== null);
     cost += costOfTile;
 
     let tileReason = occupancyReason(kind, tool, map.flags[index] ?? 0);
+    if (convert && kind === 'road') tileReason = null;
+    if (
+      !tileReason &&
+      convert &&
+      options.company !== undefined &&
+      options.company !== COMPANY_NONE &&
+      owner !== COMPANY_NONE &&
+      owner !== options.company
+    ) {
+      tileReason = 'Route appartenant à une autre entreprise.';
+    }
     if (
       !tileReason &&
       tool === 'clear' &&
@@ -892,6 +1069,7 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     valid: reason === null,
     reason,
     ...(tool === 'rail' ? { railType } : {}),
+    ...(road ? { road } : {}),
   };
 }
 
@@ -1018,6 +1196,18 @@ export function commandFromPlan(
       options: {
         axis: plan.axis,
         ...(plan.railType && plan.railType !== 'rail' ? { railType: plan.railType } : {}),
+      },
+    };
+  }
+  if (plan.tool === 'road') {
+    const oneWay = plan.road?.oneWay ?? null;
+    return {
+      ...base,
+      options: {
+        axis: plan.axis,
+        order: plan.axis === 'y' ? 'vertical' : 'horizontal',
+        ...(oneWay ? { one_way: oneWay } : plan.road?.convert ? { one_way: 'both' } : {}),
+        ...(plan.road?.convert ? { convert: true } : {}),
       },
     };
   }
