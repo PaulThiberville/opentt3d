@@ -3650,7 +3650,7 @@ function applyTunnel(
       world.flags[tile.index] = (world.flags[tile.index] ?? 0) | TILE_FLAG.TUNNEL;
     }
   }
-  const portalHeight = world.heightMap[tileIndex(plan.from.x, plan.from.y, world.width)] ?? 0;
+  const portalHeight = plan.tunnel.portalHeight;
   world.structures.push({
     id: nextStructureId(world),
     type: 'tunnel',

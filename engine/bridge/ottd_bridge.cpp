@@ -2582,7 +2582,7 @@ static const CommandErrorText COMMAND_ERROR_TEXTS[] = {
 	{STR_ERROR_TUNNEL_TOO_LONG,                   "TUNNEL_TOO_LONG",       "Tunnel trop long pour ce réglage de partie."},
 	{STR_ERROR_TUNNEL_THROUGH_MAP_BORDER,         "TUNNEL_THROUGH_MAP_BORDER", "Un tunnel ne peut pas traverser le bord de la carte."},
 	{STR_ERROR_ANOTHER_TUNNEL_IN_THE_WAY,         "ANOTHER_TUNNEL_IN_THE_WAY", "Un autre tunnel croise ce tracé."},
-	{STR_ERROR_SITE_UNSUITABLE_FOR_TUNNEL,        "SITE_UNSUITABLE_FOR_TUNNEL", "Emplacement inadapté : un portail doit être sur une pente régulière."},
+	{STR_ERROR_SITE_UNSUITABLE_FOR_TUNNEL,        "SITE_UNSUITABLE_FOR_TUNNEL", "Un tunnel doit partir d’une pente régulière (talus incliné dans l’axe) : rehaussez le portail ou choisissez une tuile en pente."},
 	{STR_ERROR_START_AND_END_MUST_BE_IN,          "INVALID_PARAMETER",     "Les deux extrémités doivent être alignées sur X ou Y."},
 };
 
@@ -3895,6 +3895,7 @@ bool BuildTunnel(CompanyID company, const JsonValue &root, CommandReply &reply)
 	 * ressort exactement sur l'autre tuile demandée. */
 	std::optional<CommandCost> failure;
 	TileIndex start_tile = INVALID_TILE;
+	bool exit_mismatch = false;
 	for (const TileIndex candidate : {from_tile, to_tile}) {
 		const TileIndex expected = candidate == from_tile ? to_tile : from_tile;
 		const CommandCost estimate = RunCompanyCommand<CMD_BUILD_TUNNEL>(
@@ -3903,16 +3904,27 @@ bool BuildTunnel(CompanyID company, const JsonValue &root, CommandReply &reply)
 			if (!failure.has_value()) failure = estimate;
 			continue;
 		}
-		if (_build_tunnel_endtile != expected) continue;
+		if (_build_tunnel_endtile != expected) {
+			/* L'entrée est valide, mais OpenTTD ressort avant la tuile
+			 * demandée (un creux au même niveau coupe le tracé). Le message
+			 * « pente régulière » serait trompeur : l'entrée est justement
+			 * une pente valide. */
+			exit_mismatch = true;
+			continue;
+		}
 		start_tile = candidate;
 		break;
 	}
 	if (start_tile == INVALID_TILE) {
+		if (exit_mismatch) {
+			return FailWith(reply, "TUNNEL_EXIT_MISMATCH",
+					"La sortie du tunnel ne correspond pas : un creux au niveau des portails coupe le tracé. Raccourcissez le tunnel ou déplacez la sortie.");
+		}
 		if (failure.has_value()) {
 			return FailFromCommand(reply, *failure, "COMMAND_FAILED", "Construction de tunnel refusée.");
 		}
 		return FailWith(reply, "SITE_UNSUITABLE_FOR_TUNNEL",
-				"Les deux portails doivent être sur des pentes opposées, à la même hauteur.");
+				"Un tunnel doit partir d’une pente régulière (talus incliné dans l’axe) : rehaussez le portail ou choisissez une tuile en pente.");
 	}
 
 	const CommandCost result = RunCompanyCommand<CMD_BUILD_TUNNEL>(

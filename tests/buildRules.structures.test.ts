@@ -379,13 +379,34 @@ describe('structureDragTarget', () => {
 });
 
 describe('planTunnel', () => {
+  /**
+   * Colline régulière au sens OpenTTD : `heightMap` stocke le coin nord de
+   * chaque tuile. Le portail (2,5) est un talus SW (les deux coins +x sont un
+   * niveau plus haut), la sortie (8,5) un talus NE complémentaire. Entre les
+   * deux, la crête monte à 7. Le coin nord de la sortie vaut donc 5 alors que
+   * la surface (`GetTileZ`) vaut 4 : c'est exactement le cas qui faisait
+   * choisir la mauvaise sortie et refusait le tunnel (#229).
+   */
   function moundMap(): MapSnapshot {
     const map = makeMap(24, 12);
-    for (let x = 4; x <= 6; x += 1) setTile(map, x, 5, TILE_KIND_INDEX.grass, 7);
+    const set = (x: number, y: number, height: number): void => {
+      map.heightMap[tileIndex(x, y, map.width)] = height;
+    };
+    // Portail d'entrée : talus SW (coins (3,5) et (3,6) surélevés).
+    set(3, 5, 5);
+    set(3, 6, 5);
+    // Crête.
+    for (let x = 4; x <= 7; x += 1) {
+      set(x, 5, 7);
+      set(x, 6, 7);
+    }
+    // Sortie : talus NE (coins nord et est surélevés), surface à 4.
+    set(8, 5, 5);
+    set(8, 6, 5);
     return map;
   }
 
-  it('accepte deux portails à la même hauteur séparés par du relief', () => {
+  it('accepte deux portails valides à la même surface séparés par du relief', () => {
     const plan = planTunnel({
       map: moundMap(),
       from: { x: 2, y: 5 },
@@ -396,12 +417,12 @@ describe('planTunnel', () => {
     });
     expect(plan.valid).toBe(true);
     expect(plan.tiles).toHaveLength(7);
-    expect(plan.tunnel).toMatchObject({ kind: 'rail', length: 7, depth: 3 });
+    expect(plan.tunnel).toMatchObject({ kind: 'rail', length: 7, depth: 3, portalHeight: 4 });
     expect(plan.cost).toBe(7 * TUNNEL_COST_PER_TILE.rail + 3 * 120);
     expect(plan.tunnel?.maintenance).toBe(Math.round(7 * 34));
   });
 
-  it('trouve la sortie au même niveau quand le drag s’arrête sur la colline', () => {
+  it('trouve la sortie à la même surface en ignorant le coin nord surélevé', () => {
     const map = moundMap();
     const span = resolveTunnelSpan(
       map,
@@ -409,7 +430,7 @@ describe('planTunnel', () => {
       { x: 5, y: 5 },
       { settings: { kind: 'rail' } },
     );
-    expect(span).toEqual({ from: { x: 2, y: 5 }, to: { x: 7, y: 5 } });
+    expect(span).toEqual({ from: { x: 2, y: 5 }, to: { x: 8, y: 5 } });
 
     const explicit = resolveTunnelSpan(
       map,
@@ -417,10 +438,33 @@ describe('planTunnel', () => {
       { x: 8, y: 5 },
       { settings: { kind: 'rail' } },
     );
-    expect(explicit?.to).toEqual({ x: 7, y: 5 });
+    expect(explicit?.to).toEqual({ x: 8, y: 5 });
   });
 
-  it('ne fabrique pas de sortie sans relief ou hors de portée', () => {
+  it('accepte le tracé depuis les deux portails (talus complémentaires)', () => {
+    const forward = planTunnel({
+      map: moundMap(),
+      from: { x: 2, y: 5 },
+      to: { x: 8, y: 5 },
+      settings: { kind: 'rail' },
+      budget: 1_000_000,
+    });
+    expect(forward.valid).toBe(true);
+
+    // Depuis la sortie : le talus NE devient l'entrée du tunnel, comme le
+    // fait le pont C++ qui essaie les deux extrémités.
+    const backward = planTunnel({
+      map: moundMap(),
+      from: { x: 8, y: 5 },
+      to: { x: 2, y: 5 },
+      settings: { kind: 'rail' },
+      budget: 1_000_000,
+    });
+    expect(backward.valid).toBe(true);
+    expect(backward.tunnel?.portalHeight).toBe(4);
+  });
+
+  it('ne fabrique pas de sortie sans relief, hors de portée ou derrière un creux', () => {
     const flat = resolveTunnelSpan(
       makeMap(),
       { x: 2, y: 5 },
@@ -449,7 +493,21 @@ describe('planTunnel', () => {
       budget: 1_000_000,
     });
     expect(flat.valid).toBe(false);
-    expect(flat.reason).toContain('relief');
+    expect(flat.reason).toContain('pente régulière');
+
+    // Entrée valide mais aucun relief : le tunnel ressortirait aussitôt.
+    const level = makeMap();
+    level.heightMap[tileIndex(3, 5, level.width)] = 5;
+    level.heightMap[tileIndex(3, 6, level.width)] = 5;
+    const noRelief = planTunnel({
+      map: level,
+      from: { x: 2, y: 5 },
+      to: { x: 8, y: 5 },
+      settings: { kind: 'road' },
+      budget: 1_000_000,
+    });
+    expect(noRelief.valid).toBe(false);
+    expect(noRelief.reason).toMatch(/relief|ressort trop tôt/);
 
     const diagonal = planTunnel({
       map: moundMap(),
@@ -462,7 +520,14 @@ describe('planTunnel', () => {
     expect(diagonal.reason).toContain('droit');
 
     const map = moundMap();
-    setTile(map, 8, 5, TILE_KIND_INDEX.grass, 5);
+    for (const [x, y] of [
+      [8, 5],
+      [9, 5],
+      [8, 6],
+      [9, 6],
+    ] as const) {
+      map.heightMap[tileIndex(x, y, map.width)] = 6;
+    }
     const mismatched = planTunnel({
       map,
       from: { x: 2, y: 5 },
@@ -472,6 +537,28 @@ describe('planTunnel', () => {
     });
     expect(mismatched.valid).toBe(false);
     expect(mismatched.reason).toContain('même hauteur');
+  });
+
+  it('refuse un creux qui couperait le tunnel avant la sortie demandée', () => {
+    const map = moundMap();
+    // La tuile 6 redescend à la surface des portails : OpenTTD ressortirait là.
+    for (const [x, y] of [
+      [6, 5],
+      [7, 5],
+      [6, 6],
+      [7, 6],
+    ] as const) {
+      map.heightMap[tileIndex(x, y, map.width)] = 4;
+    }
+    const plan = planTunnel({
+      map,
+      from: { x: 2, y: 5 },
+      to: { x: 8, y: 5 },
+      settings: { kind: 'rail' },
+      budget: 1_000_000,
+    });
+    expect(plan.valid).toBe(false);
+    expect(plan.reason).toContain('ressort trop tôt');
   });
 
   it('refuse un portail sur l’eau et un tunnel trop court', () => {

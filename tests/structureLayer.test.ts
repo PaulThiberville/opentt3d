@@ -59,6 +59,44 @@ describe('StructureLayer', () => {
     }
   });
 
+  it('couvre exactement les tuiles du plan (culées comprises) sur les deux axes', () => {
+    const map = makeMap(24, 24);
+    const layer = new StructureLayer();
+    const bounds = (): { minX: number; maxX: number; minZ: number; maxZ: number } => {
+      const base = layer.group.children.find((child) => child.name === 'structure-base');
+      if (!(base instanceof THREE.Mesh)) throw new Error('géométrie de base attendue');
+      const positions = base.geometry.getAttribute('position');
+      let minX = Number.POSITIVE_INFINITY;
+      let maxX = Number.NEGATIVE_INFINITY;
+      let minZ = Number.POSITIVE_INFINITY;
+      let maxZ = Number.NEGATIVE_INFINITY;
+      for (let i = 0; i < positions.count; i += 1) {
+        minX = Math.min(minX, positions.getX(i));
+        maxX = Math.max(maxX, positions.getX(i));
+        minZ = Math.min(minZ, positions.getZ(i));
+        maxZ = Math.max(maxZ, positions.getZ(i));
+      }
+      return { minX, maxX, minZ, maxZ };
+    };
+    try {
+      layer.setStructures([bridge], map);
+      const alongX = bounds();
+      expect(alongX.minX).toBeCloseTo(2, 5);
+      expect(alongX.maxX).toBeCloseTo(10, 5);
+      expect(alongX.minZ).toBeGreaterThanOrEqual(5);
+      expect(alongX.maxZ).toBeLessThanOrEqual(6);
+
+      layer.setStructures([{ ...bridge, from: { x: 5, y: 2 }, to: { x: 5, y: 9 } }], map);
+      const alongY = bounds();
+      expect(alongY.minZ).toBeCloseTo(2, 5);
+      expect(alongY.maxZ).toBeCloseTo(10, 5);
+      expect(alongY.minX).toBeGreaterThanOrEqual(5);
+      expect(alongY.maxX).toBeLessThanOrEqual(6);
+    } finally {
+      layer.dispose();
+    }
+  });
+
   it('bascule le détail selon la distance caméra', () => {
     const map = makeMap();
     const layer = new StructureLayer();
@@ -103,7 +141,7 @@ describe('StructureLayer', () => {
     });
   });
 
-  it('étend un pont hérité jusqu’aux culées et dessine des rampes continues', () => {
+  it('étend un pont hérité jusqu’aux culées sans déborder du tracé', () => {
     const map = makeMap(24, 16);
     for (let x = 5; x <= 8; x += 1) {
       const index = x + 5 * map.width;
@@ -133,13 +171,19 @@ describe('StructureLayer', () => {
       const positions = base.geometry.getAttribute('position');
       let minX = Number.POSITIVE_INFINITY;
       let maxX = Number.NEGATIVE_INFINITY;
+      let minZ = Number.POSITIVE_INFINITY;
+      let maxZ = Number.NEGATIVE_INFINITY;
       for (let i = 0; i < positions.count; i += 1) {
         minX = Math.min(minX, positions.getX(i));
         maxX = Math.max(maxX, positions.getX(i));
+        minZ = Math.min(minZ, positions.getZ(i));
+        maxZ = Math.max(maxZ, positions.getZ(i));
       }
-      // Les rampes dépassent les culées : le tablier ne finit pas en falaise.
-      expect(minX).toBeLessThan(4);
-      expect(maxX).toBeGreaterThan(10);
+      // L'empreinte couvre exactement les tuiles du plan (culées comprises).
+      expect(minX).toBeCloseTo(4, 5);
+      expect(maxX).toBeCloseTo(10, 5);
+      expect(minZ).toBeGreaterThanOrEqual(5);
+      expect(maxZ).toBeLessThanOrEqual(6);
     } finally {
       layer.dispose();
     }

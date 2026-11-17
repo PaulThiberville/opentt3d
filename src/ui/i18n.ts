@@ -401,7 +401,7 @@ const FR = {
     'Glissez d’une culée à l’autre : l’axe se cale automatiquement ; le matériau se choisit dans les options (M).',
   'toolbar.tunnel.label': 'Tunnels',
   'toolbar.tunnel.hint':
-    'Glissez depuis le portail d’entrée : le tunnel ressort au même niveau de l’autre côté du relief.',
+    'Glissez depuis un portail d’entrée en pente : le tunnel ressort à la même surface de l’autre côté du relief.',
   'toolbar.short.road': 'routes',
   'toolbar.short.rail': 'rails',
   'toolbar.short.station': 'gares',
@@ -543,7 +543,8 @@ const FR = {
   'build.bridgeMaterial': 'Matériau du pont',
   'build.bridgeNote': 'Glissez d’une culée à l’autre · tablier au-dessus de l’eau',
   'build.tunnelKind': 'Réseau du tunnel',
-  'build.tunnelNote': 'Entrée au niveau bas · sortie cherchée au même niveau sous le relief',
+  'build.tunnelNote':
+    'Entrée sur un talus régulier · sortie cherchée à la même surface sous le relief',
   'build.material.wood': 'Bois',
   'build.material.concrete': 'Béton',
   'build.material.steel': 'Acier',
@@ -577,7 +578,7 @@ const FR = {
   'build.hint.aqueduct': 'glissez d’une rive à l’autre',
   'build.hint.crossing': 'cliquez sur une voie droite',
   'build.hint.bridge': 'glissez d’une culée à l’autre, l’axe se cale tout seul',
-  'build.hint.tunnel': 'glissez depuis le portail d’entrée à travers le relief',
+  'build.hint.tunnel': 'glissez depuis un talus d’entrée à travers le relief',
   'build.idle': '{label} : {hint}{rotate} · clic droit annule · Échap quitte',
   'build.idle.rotate': ' · R pivote',
   'build.valid': '{label} : {detail}{count} · {cost}',

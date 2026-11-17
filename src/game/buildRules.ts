@@ -281,6 +281,75 @@ export const TUNNEL_MAINTENANCE_PER_TILE: Record<BuildTransport, number> = {
 export const TUNNEL_MIN_TILES = 3;
 export const TUNNEL_MAX_TILES = 40;
 
+/**
+ * Bits de pente OpenTTD (coins surélevés). `heightMap` stocke la hauteur du
+ * coin nord de chaque tuile ; les trois autres coins viennent des tuiles
+ * voisines, exactement comme `GetTileSlopeZ` dans OpenTTD.
+ */
+const SLOPE_W = 0x01;
+const SLOPE_S = 0x02;
+const SLOPE_E = 0x04;
+const SLOPE_N = 0x08;
+
+/** Pente et hauteur de surface d'une tuile, au sens OpenTTD. */
+export interface TileSlopeInfo {
+  /** Hauteur du coin le plus bas (GetTileZ), en demi-niveaux. */
+  z: number;
+  /** Bits de pente OpenTTD (0 = plat). */
+  slope: number;
+  /** Pente de plus d'un niveau : jamais un portail régulier. */
+  steep: boolean;
+}
+
+function cornerHeight(map: MapSnapshot, x: number, y: number): number {
+  // OpenTTD clampe les coins hors carte sur le bord (TileHeightOutsideMap).
+  const cx = Math.max(0, Math.min(map.width - 1, x));
+  const cy = Math.max(0, Math.min(map.height - 1, y));
+  return map.heightMap[tileIndex(cx, cy, map.width)] ?? 0;
+}
+
+/**
+ * Pente d'une tuile telle que la voit OpenTTD. Le mock ne fournit pas de bits
+ * de pente exploitables : on les dérive donc de `heightMap`, identique au pont
+ * C++ (`TileHeight` = coin nord), pour que UI, mock et WASM valident pareil.
+ */
+export function tileSlopeInfo(map: MapSnapshot, x: number, y: number): TileSlopeInfo {
+  if (!inBounds(map, x, y)) return { z: 0, slope: 0, steep: false };
+  const north = cornerHeight(map, x, y);
+  const west = cornerHeight(map, x + 1, y);
+  const east = cornerHeight(map, x, y + 1);
+  const south = cornerHeight(map, x + 1, y + 1);
+  const z = Math.min(north, west, east, south);
+  const highest = Math.max(north, west, east, south);
+  let slope = 0;
+  if (north > z) slope |= SLOPE_N;
+  if (west > z) slope |= SLOPE_W;
+  if (east > z) slope |= SLOPE_E;
+  if (south > z) slope |= SLOPE_S;
+  return { z, slope, steep: highest - z > 1 };
+}
+
+/** Hauteur du point le plus haut d'une tuile, pour la profondeur d'un tunnel. */
+function tileHighestCorner(map: MapSnapshot, x: number, y: number): number {
+  return Math.max(
+    cornerHeight(map, x, y),
+    cornerHeight(map, x + 1, y),
+    cornerHeight(map, x, y + 1),
+    cornerHeight(map, x + 1, y + 1),
+  );
+}
+
+/**
+ * Pente inclinée à faire gravir à un portail d'entrée selon l'axe du tunnel.
+ * Dans OpenTTD, +x correspond à la diagonale SW et +y à la diagonale SE.
+ */
+function inclinedSlopeForStep(stepX: number, stepY: number): number {
+  if (stepX > 0) return SLOPE_S | SLOPE_W;
+  if (stepX < 0) return SLOPE_N | SLOPE_E;
+  if (stepY > 0) return SLOPE_S | SLOPE_E;
+  return SLOPE_N | SLOPE_W;
+}
+
 export const STATION_MAX_PLATFORMS = 8;
 export const STATION_MAX_LENGTH = 16;
 
@@ -498,6 +567,8 @@ export interface TunnelPlanInfo {
   length: number;
   /** Épaisseur de terrain traversée, en demi-niveaux. */
   depth: number;
+  /** Hauteur de surface des portails (GetTileZ), en demi-niveaux. */
+  portalHeight: number;
   maintenance: number;
 }
 
@@ -2562,9 +2633,15 @@ export interface TunnelSpanOptions {
  * brèche de même niveau. Sans cela, il fallait viser au pixel près une tuile
  * de hauteur identique, et la moindre pente faisait échouer la pose.
  *
- * Le premier portail qui laisse du relief entre les deux gagne, exactement
- * comme `CMD_BUILD_TUNNEL` : viser une tuile plus loin ne doit pas produire un
- * plan que le moteur refuserait.
+ * OpenTTD compare la hauteur *de surface* (`GetTileZ`, coin le plus bas), pas
+ * la hauteur brute du coin nord. Sur une pente régulière, le portail de sortie
+ * a donc un coin nord un niveau plus haut que celui d'entrée : comparer
+ * `heightMap` sélectionnait la tuile plate une tuile trop loin et le pont C++
+ * refusait ensuite le tunnel (#229).
+ *
+ * La sortie est la *première* tuile de même surface, exactement comme
+ * `CMD_BUILD_TUNNEL` : viser une tuile plus loin ne doit pas produire un plan
+ * que le moteur refuserait.
  */
 export function resolveTunnelSpan(
   map: MapSnapshot,
@@ -2581,33 +2658,37 @@ export function resolveTunnelSpan(
   const step = axis === 'x' ? Math.sign(goal.x - entrance.x) : Math.sign(goal.y - entrance.y);
   if (step === 0) return null;
 
-  const portalHeight = map.heightMap[tileIndex(entrance.x, entrance.y, map.width)] ?? 0;
-  for (let distance = TUNNEL_MIN_TILES - 1; distance < TUNNEL_MAX_TILES; distance += 1) {
+  const portalHeight = tileSlopeInfo(map, entrance.x, entrance.y).z;
+  let maxMiddleHeight = portalHeight;
+  for (let distance = 1; distance < TUNNEL_MAX_TILES; distance += 1) {
     const x = entrance.x + (axis === 'x' ? step * distance : 0);
     const y = entrance.y + (axis === 'y' ? step * distance : 0);
     if (!inBounds(map, x, y)) return null;
-    const index = tileIndex(x, y, map.width);
-    if ((map.heightMap[index] ?? 0) !== portalHeight) continue;
-    if (structureEndReason(map, x, y, options.settings.kind, 'portail', options.company)) {
-      continue;
+    const info = tileSlopeInfo(map, x, y);
+
+    // Première brèche au même niveau : c'est la sortie qu'OpenTTD choisira.
+    if (info.z === portalHeight) {
+      const blocked = structureEndReason(
+        map,
+        x,
+        y,
+        options.settings.kind,
+        'portail',
+        options.company,
+      );
+      if (blocked) return null;
+      if (distance + 1 < TUNNEL_MIN_TILES) return null;
+      // Sans relief plus haut que les portails, il n'y a rien à percer.
+      if (maxMiddleHeight <= portalHeight) return null;
+      return { from: entrance, to: { x, y } };
     }
 
-    let maxMiddleHeight = portalHeight;
-    let blocked = false;
-    for (let offset = 1; offset < distance; offset += 1) {
-      const middleX = entrance.x + (axis === 'x' ? step * offset : 0);
-      const middleY = entrance.y + (axis === 'y' ? step * offset : 0);
-      const middle = tileIndex(middleX, middleY, map.width);
-      const middleKind = TILE_KINDS[map.kind[middle] ?? 0] ?? 'void';
-      if (middleKind === 'bridge' || middleKind === 'tunnel' || middleKind === 'aqueduct') {
-        blocked = true;
-        break;
-      }
-      maxMiddleHeight = Math.max(maxMiddleHeight, map.heightMap[middle] ?? 0);
+    const index = tileIndex(x, y, map.width);
+    const middleKind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    if (middleKind === 'bridge' || middleKind === 'tunnel' || middleKind === 'aqueduct') {
+      return null;
     }
-    // Sans relief plus haut que les portails, il n'y a rien à percer.
-    if (blocked || maxMiddleHeight <= portalHeight) continue;
-    return { from: entrance, to: { x, y } };
+    maxMiddleHeight = Math.max(maxMiddleHeight, tileHighestCorner(map, x, y));
   }
   return null;
 }
@@ -2621,11 +2702,17 @@ export function planTunnel(options: TunnelPlanOptions): BuildPlan {
   const axis = traced?.axis ?? 'x';
   const plan = emptyInfrastructurePlan('tunnel', from, to, axis);
   const length = Math.abs(to.x - from.x) + Math.abs(to.y - from.y) + 1;
-  const portalHeight = map.heightMap[tileIndex(from.x, from.y, map.width)] ?? 0;
+  // Hauteur de surface (GetTileZ) : sur une pente régulière, le coin nord du
+  // portail de sortie est un niveau plus haut. Comparer `heightMap` brut
+  // refusait des tunnels valides (#229).
+  const fromInfo = tileSlopeInfo(map, from.x, from.y);
+  const toInfo = tileSlopeInfo(map, to.x, to.y);
+  const portalHeight = fromInfo.z;
   plan.tunnel = {
     kind: options.settings.kind,
     length,
     depth: 0,
+    portalHeight,
     maintenance: Math.round(length * TUNNEL_MAINTENANCE_PER_TILE[options.settings.kind]),
   };
 
@@ -2654,15 +2741,29 @@ export function planTunnel(options: TunnelPlanOptions): BuildPlan {
     return { ...plan, reason: 'Tunnel hors de la carte.' };
   }
 
-  const toHeight = map.heightMap[tileIndex(to.x, to.y, map.width)] ?? 0;
   let reason: string | null = null;
-  if (portalHeight !== toHeight) {
-    reason = `Les deux portails d’un tunnel doivent être à la même hauteur (${portalHeight} ≠ ${toHeight}).`;
+  if (portalHeight !== toInfo.z) {
+    reason = `Les deux portails d’un tunnel doivent être à la même hauteur (${portalHeight} ≠ ${toInfo.z}).`;
   }
   reason =
     reason ??
     structureEndReason(map, from.x, from.y, options.settings.kind, 'portail', options.company) ??
     structureEndReason(map, to.x, to.y, options.settings.kind, 'portail', options.company);
+
+  // OpenTTD n'accepte de commencer un tunnel que sur une pente régulière
+  // (une tuile inclinée dans l'axe). L'autre portail peut être plat : OpenTTD
+  // le terrasse automatiquement. On accepte donc le tracé dès qu'un des deux
+  // portails est un talus valide, comme le fait le pont C++ (#229).
+  if (!reason) {
+    const stepX = Math.sign(to.x - from.x);
+    const stepY = Math.sign(to.y - from.y);
+    const fromCanStart = !fromInfo.steep && fromInfo.slope === inclinedSlopeForStep(stepX, stepY);
+    const toCanStart = !toInfo.steep && toInfo.slope === inclinedSlopeForStep(-stepX, -stepY);
+    if (!fromCanStart && !toCanStart) {
+      reason =
+        'Un tunnel doit partir d’une pente régulière : le portail d’entrée doit être un talus incliné dans l’axe (outil terrassement).';
+    }
+  }
 
   let maxMiddleHeight = portalHeight;
   const costPerTile = TUNNEL_COST_PER_TILE[options.settings.kind];
@@ -2672,10 +2773,16 @@ export function planTunnel(options: TunnelPlanOptions): BuildPlan {
     if (!point) continue;
     const index = tileIndex(point.x, point.y, map.width);
     const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
-    const height = map.heightMap[index] ?? 0;
     const middle = i > 0 && i < traced.points.length - 1;
     if (middle) {
-      maxMiddleHeight = Math.max(maxMiddleHeight, height);
+      const middleInfo = tileSlopeInfo(map, point.x, point.y);
+      // Un creux à la hauteur des portails arrête le tunnel avant la sortie
+      // demandée : OpenTTD ressortirait là, pas sur la tuile visée.
+      if (middleInfo.z === portalHeight) {
+        reason =
+          reason ?? 'Le tunnel ressort trop tôt : un creux au niveau des portails coupe le tracé.';
+      }
+      maxMiddleHeight = Math.max(maxMiddleHeight, tileHighestCorner(map, point.x, point.y));
       if (kind === 'bridge' || kind === 'tunnel') {
         reason = reason ?? 'Un ouvrage occupe déjà ce tracé.';
       }

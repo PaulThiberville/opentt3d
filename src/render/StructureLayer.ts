@@ -43,10 +43,6 @@ const PORTAL_DARK = 0x1f2226;
 const DECK_THICKNESS = 0.13;
 const RAIL_HEIGHT = 0.24;
 const PILLAR_INTERVAL = 3;
-/** Longueur d'une rampe, en tuiles (approche validée sur une tuile). */
-const RAMP_RUN = 1.45;
-/** Rampe allongée quand la tuile suivante est plate et constructible. */
-const RAMP_RUN_LONG = 2;
 const DETAIL_RANGE_MEDIUM = 48;
 const DETAIL_RANGE_HIGH = 76;
 
@@ -517,32 +513,52 @@ export class StructureLayer {
 
     // Le tablier doit rester au-dessus du relief hérité (anciennes cartes)
     // comme du niveau OpenTTD exposé par le moteur.
+    const groundAt: number[] = [];
     let highestGround = 0;
     for (let i = 0; i < tiles; i += 1) {
       const cx = structure.from.x + dir.x * i + 0.5;
       const cz = structure.from.y + dir.y * i + 0.5;
-      highestGround = Math.max(highestGround, sampleHeightWorld(map, cx, cz));
+      const ground = sampleHeightWorld(map, cx, cz);
+      groundAt.push(ground);
+      highestGround = Math.max(highestGround, ground);
     }
     const deckY = Math.max(structure.deckHeight * 0.5 + 0.34, highestGround + 0.55);
     const bottomY = deckY - DECK_THICKNESS;
     const alongX = dir.x !== 0;
 
-    const pointAt = (
+    /** Point du tablier : `perpOffset` écarte latéralement, `along` suit l'axe. */
+    const point = (
       cx: number,
       cz: number,
-      side: 1 | -1,
+      perpOffset: number,
       along: number,
       height: number,
     ): Point3 => ({
-      x: cx + dir.x * along + perp.x * halfWidth * side,
+      x: cx + dir.x * along + perp.x * perpOffset,
       y: height,
-      z: cz + dir.y * along + perp.y * halfWidth * side,
+      z: cz + dir.y * along + perp.y * perpOffset,
     });
+    /**
+     * Hauteur du tablier au bord extérieur d'une culée. La rampe descend sur la
+     * tuile de culée elle-même : l'empreinte rendue reste exactement celle du
+     * plan (#228), sans rallonge sur les tuiles voisines.
+     */
+    const rampEdgeHeight = (index: number, outward: 1 | -1): number => {
+      const cx = structure.from.x + dir.x * index + 0.5;
+      const cz = structure.from.y + dir.y * index + 0.5;
+      const edgeGround = sampleHeightWorld(
+        map,
+        cx + dir.x * outward * 0.5,
+        cz + dir.y * outward * 0.5,
+      );
+      const ground = Math.max(groundAt[index] ?? 0, edgeGround);
+      return Math.min(deckY - 0.02, ground + 0.07);
+    };
 
     for (let i = 0; i < tiles; i += 1) {
       const cx = structure.from.x + dir.x * i + 0.5;
       const cz = structure.from.y + dir.y * i + 0.5;
-      const ground = sampleHeightWorld(map, cx, cz);
+      const ground = groundAt[i] ?? 0;
       const kind = tileKindAt(map, structure.from.x + dir.x * i, structure.from.y + dir.y * i);
       const tileIndexNow = tileIndex(
         structure.from.x + dir.x * i,
@@ -551,42 +567,44 @@ export class StructureLayer {
       );
       const waterBelow =
         isWaterKind(kind) || ((map.flags[tileIndexNow] ?? 0) & TILE_FLAG.WATER) !== 0;
-      const isEnd = i === 0 || i === tiles - 1;
+      const isFirst = i === 0;
+      const isLast = i === tiles - 1;
+      const isEnd = isFirst || isLast;
+      const frontTop = isFirst ? rampEdgeHeight(i, -1) : deckY;
+      const backTop = isLast ? rampEdgeHeight(i, 1) : deckY;
+      const frontBottom = frontTop - DECK_THICKNESS;
+      const backBottom = backTop - DECK_THICKNESS;
 
       // Dalle : dessus, dessous et chants latéraux. Épaisseur faible pour
       // éviter l'effet « structure massive » des anciens tabliers.
-      const leftTopFront = pointAt(cx, cz, 1, -0.5, deckY);
-      const rightTopFront = pointAt(cx, cz, -1, -0.5, deckY);
-      const leftTopBack = pointAt(cx, cz, 1, 0.5, deckY);
-      const rightTopBack = pointAt(cx, cz, -1, 0.5, deckY);
-      const leftBottomFront = pointAt(cx, cz, 1, -0.5, bottomY);
-      const rightBottomFront = pointAt(cx, cz, -1, -0.5, bottomY);
-      const leftBottomBack = pointAt(cx, cz, 1, 0.5, bottomY);
-      const rightBottomBack = pointAt(cx, cz, -1, 0.5, bottomY);
+      const leftTopFront = point(cx, cz, halfWidth, -0.5, frontTop);
+      const rightTopFront = point(cx, cz, -halfWidth, -0.5, frontTop);
+      const leftTopBack = point(cx, cz, halfWidth, 0.5, backTop);
+      const rightTopBack = point(cx, cz, -halfWidth, 0.5, backTop);
+      const leftBottomFront = point(cx, cz, halfWidth, -0.5, frontBottom);
+      const rightBottomFront = point(cx, cz, -halfWidth, -0.5, frontBottom);
+      const leftBottomBack = point(cx, cz, halfWidth, 0.5, backBottom);
+      const rightBottomBack = point(cx, cz, -halfWidth, 0.5, backBottom);
       quad(base, leftTopFront, leftTopBack, rightTopBack, rightTopFront, deckColour);
       quad(base, rightBottomFront, rightBottomBack, leftBottomBack, leftBottomFront, sideColour);
       quad(base, leftTopFront, rightTopFront, rightBottomFront, leftBottomFront, sideColour);
       quad(base, rightTopBack, leftTopBack, leftBottomBack, rightBottomBack, sideColour);
       if (isEnd) {
-        const topLeft = i === 0 ? leftTopFront : leftTopBack;
-        const topRight = i === 0 ? rightTopFront : rightTopBack;
-        const bottomLeft = i === 0 ? leftBottomFront : leftBottomBack;
-        const bottomRight = i === 0 ? rightBottomFront : rightBottomBack;
+        const topLeft = isFirst ? leftTopFront : leftTopBack;
+        const topRight = isFirst ? rightTopFront : rightTopBack;
+        const bottomLeft = isFirst ? leftBottomFront : leftBottomBack;
+        const bottomRight = isFirst ? rightBottomFront : rightBottomBack;
         quad(base, topLeft, topRight, bottomRight, bottomLeft, sideColour);
       }
 
-      // Garde-corps visibles à tous les niveaux de détail.
+      // Garde-corps visibles à tous les niveaux de détail. Le ruban suit la
+      // pente de la culée pour rester solidaire du tablier.
       for (const side of [1, -1] as const) {
-        box(
-          base,
-          cx + perp.x * halfWidth * side * 0.94,
-          deckY + RAIL_HEIGHT / 2,
-          cz + perp.y * halfWidth * side * 0.94,
-          alongX ? 1 : 0.055,
-          RAIL_HEIGHT,
-          alongX ? 0.055 : 1,
-          railColour,
-        );
+        const railFrontTop = point(cx, cz, halfWidth * side * 0.94, -0.5, frontTop + RAIL_HEIGHT);
+        const railBackTop = point(cx, cz, halfWidth * side * 0.94, 0.5, backTop + RAIL_HEIGHT);
+        const railFrontBase = point(cx, cz, halfWidth * side * 0.94, -0.5, frontTop);
+        const railBackBase = point(cx, cz, halfWidth * side * 0.94, 0.5, backTop);
+        quad(base, railFrontTop, railBackTop, railBackBase, railFrontBase, railColour);
         if (!isEnd && i % 2 === 0) {
           box(
             detail,
@@ -605,14 +623,13 @@ export class StructureLayer {
       // tuiles `bridge`, il faut donc la dessiner ici.
       if (structure.transport === 'rail') {
         for (const offset of [-0.16, 0.16] as const) {
-          box(
+          const half = 0.035;
+          quad(
             base,
-            cx + perp.x * offset,
-            deckY + 0.015,
-            cz + perp.y * offset,
-            alongX ? 1 : 0.065,
-            0.03,
-            alongX ? 0.065 : 1,
+            point(cx, cz, offset - half, -0.5, frontTop + 0.02),
+            point(cx, cz, offset - half, 0.5, backTop + 0.02),
+            point(cx, cz, offset + half, 0.5, backTop + 0.02),
+            point(cx, cz, offset + half, -0.5, frontTop + 0.02),
             trackColour,
           );
         }
@@ -647,57 +664,6 @@ export class StructureLayer {
           );
         }
       }
-    }
-
-    // Rampes continues : le tablier descend sur deux tuiles d'approche au lieu
-    // de finir par une falaise verticale à l'aplomb de la culée.
-    for (const end of [0, tiles - 1] as const) {
-      if (tiles < 3) break;
-      const outward = end === 0 ? -1 : 1;
-      const cx = structure.from.x + dir.x * end + 0.5;
-      const cz = structure.from.y + dir.y * end + 0.5;
-      const edgeX = cx + dir.x * outward * 0.5;
-      const edgeZ = cz + dir.y * outward * 0.5;
-      const approachGround = sampleHeightWorld(
-        map,
-        cx + dir.x * outward * 1,
-        cz + dir.y * outward * 1,
-      );
-      const farGround = sampleHeightWorld(map, cx + dir.x * outward * 2, cz + dir.y * outward * 2);
-      const farKind = tileKindAt(
-        map,
-        Math.floor(cx + dir.x * outward * 2),
-        Math.floor(cz + dir.y * outward * 2),
-      );
-      const canExtend =
-        Math.abs(farGround - approachGround) < 0.05 &&
-        !isWaterKind(farKind) &&
-        farKind !== 'void' &&
-        farKind !== 'bridge' &&
-        farKind !== 'tunnel' &&
-        farKind !== 'aqueduct' &&
-        farKind !== 'house' &&
-        farKind !== 'industry' &&
-        farKind !== 'station';
-      const drop = Math.max(0.12, deckY - approachGround);
-      const run = Math.max(1.05, Math.min(canExtend ? RAMP_RUN_LONG : RAMP_RUN, drop * 1.7));
-      const endX = cx + dir.x * outward * (0.5 + run);
-      const endZ = cz + dir.y * outward * (0.5 + run);
-      const endTop = approachGround + 0.07;
-      const endBottom = approachGround + 0.02;
-      const topLeftEdge = pointAt(edgeX, edgeZ, 1, 0, deckY);
-      const topRightEdge = pointAt(edgeX, edgeZ, -1, 0, deckY);
-      const topLeftEnd = pointAt(endX, endZ, 1, 0, endTop);
-      const topRightEnd = pointAt(endX, endZ, -1, 0, endTop);
-      const bottomLeftEdge = pointAt(edgeX, edgeZ, 1, 0, bottomY);
-      const bottomRightEdge = pointAt(edgeX, edgeZ, -1, 0, bottomY);
-      const bottomLeftEnd = pointAt(endX, endZ, 1, 0, endBottom);
-      const bottomRightEnd = pointAt(endX, endZ, -1, 0, endBottom);
-      quad(base, topLeftEdge, topLeftEnd, topRightEnd, topRightEdge, deckColour);
-      quad(base, topLeftEdge, bottomLeftEdge, bottomLeftEnd, topLeftEnd, sideColour);
-      quad(base, topRightEdge, topRightEnd, bottomRightEnd, bottomRightEdge, sideColour);
-      quad(base, bottomLeftEdge, bottomRightEdge, bottomRightEnd, bottomLeftEnd, sideColour);
-      quad(base, topLeftEnd, bottomLeftEnd, bottomRightEnd, topRightEnd, sideColour);
     }
 
     // Détails propres au matériau : pas de poutres massives en bois sur les
