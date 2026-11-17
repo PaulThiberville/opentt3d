@@ -5,11 +5,6 @@ import { sampleHeightWorld } from '../src/game/mapGrid';
 import {
   SHORE_MAX_DISTANCE,
   WATER_BED_DROP,
-  WATER_CASCADE_MAX_RUN,
-  WATER_CASCADE_MIN_RUN,
-  WATER_CASCADE_RUN_RATIO,
-  WATER_CASCADE_TOP_INSET,
-  WATER_CASCADE_VERTICAL_START,
   WATER_DEPTH_RANGE,
   WATER_DEPTH_SPAN,
   WATER_FOAM_DEPTH,
@@ -18,9 +13,9 @@ import {
   WATER_RIPPLE_FADE_NEAR,
   WATER_RIPPLE_SCALE,
   WATER_SHADER_CONSTANTS,
+  WATER_SHORE_CLEARANCE,
   WATER_SHORE_FADE,
   WATER_SHORE_OVERLAP,
-  WATER_STEP_BED_MARGIN,
   WATER_WALL_EPSILON,
   WATER_WAVE_AMPLITUDE,
   buildShoreFields,
@@ -28,10 +23,6 @@ import {
   sampleCornerField,
   sampleField,
   waterBedHeight,
-  waterCascadeLateralOffset,
-  waterCascadeOffset,
-  waterCascadeRun,
-  waterCascadeSpan,
   waterDepthAt,
   waterDepthFactor,
   waterFoamAmount,
@@ -515,7 +506,6 @@ describe('parois de rive (#205)', () => {
     expect(wall).not.toBeNull();
     expect(wall?.water).toBe(true);
     expect(wall?.kind).toBe('lock');
-    expect(wall?.run).toBe(0);
     expect(wall?.bottom).toBeCloseTo(waterSurfaceHeight(0), 6);
     expect(wall?.top).toBeCloseTo(waterSurfaceHeight(4) + WATER_WAVE_AMPLITUDE, 6);
     expect((wall?.top ?? 0) - (wall?.bottom ?? 0)).toBeGreaterThan(1.9);
@@ -526,17 +516,17 @@ describe('parois de rive (#205)', () => {
     expect(bank).not.toBeNull();
     expect(bank?.water).toBe(false);
     expect(bank?.kind).toBe('bank');
-    expect(bank?.run).toBe(0);
     expect(bank?.bottom).toBeLessThan(waterSurfaceHeight(4));
   });
 
-  it('transforme une chute libre en rideau incliné, pas en cube', () => {
+  it('aplanie toute composante libre sur son niveau le plus bas (#242)', () => {
     const width = 8;
     const height = 8;
     const size = width * height;
     const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.grass);
     const heightMap = new Uint8Array(size).fill(2);
-    // Rivière haute (niveau 4) qui dévale dans une nappe basse (niveau 0).
+    // Rivière haute (niveau 4) raccordée 4-connexe à une nappe basse (niveau 0)
+    // sans écluse : les deux tuiles doivent être rendues au même niveau.
     kind[3 * width + 3] = TILE_KIND_INDEX.river;
     heightMap[3 * width + 3] = 4;
     kind[3 * width + 4] = TILE_KIND_INDEX.river;
@@ -552,139 +542,72 @@ describe('parois de rive (#205)', () => {
       trackBits: new Uint8Array(size),
     };
     const fields = buildWaterHeightFields(map);
-    const cascade = waterWallForEdge(map, fields, 3, 3, 1, 0);
-    expect(cascade).not.toBeNull();
-    expect(cascade?.water).toBe(true);
-    expect(cascade?.kind).toBe('cascade');
-    expect(cascade?.run).toBeGreaterThanOrEqual(WATER_CASCADE_MIN_RUN);
-    expect(cascade?.run).toBeLessThanOrEqual(WATER_CASCADE_MAX_RUN);
-    expect(cascade?.run).toBeCloseTo(
-      waterCascadeRun((cascade?.top ?? 0) - (cascade?.bottom ?? 0)),
-      6,
-    );
-    // Le rideau mord légèrement sur la nappe haute et avance vers la basse.
-    expect(waterCascadeOffset(0, cascade?.run ?? 0)).toBeCloseTo(-WATER_CASCADE_TOP_INSET, 6);
-    expect(waterCascadeOffset(1, cascade?.run ?? 0)).toBeCloseTo(cascade?.run ?? 0, 6);
-    let previous = -Infinity;
-    for (let step = 0; step <= 10; step += 1) {
-      const offset = waterCascadeOffset(step / 10, cascade?.run ?? 0);
-      expect(Number.isFinite(offset)).toBe(true);
-      expect(offset).toBeGreaterThanOrEqual(previous);
-      previous = offset;
-    }
-    // La course grandit avec la chute mais reste bornée.
-    expect(waterCascadeRun(0)).toBe(0);
-    expect(waterCascadeRun(1)).toBeGreaterThan(waterCascadeRun(0.4));
-    expect(waterCascadeRun(1)).toBeLessThanOrEqual(waterCascadeRun(4));
-    expect(waterCascadeRun(10)).toBe(WATER_CASCADE_MAX_RUN);
-    expect(WATER_CASCADE_RUN_RATIO).toBeGreaterThan(0);
-    expect(WATER_CASCADE_RUN_RATIO).toBeLessThan(1);
-  });
-
-  it('garde le haut du rideau vertical puis n’évase qu’en bas (#226)', () => {
-    const run = WATER_CASCADE_MAX_RUN;
-    const start = WATER_CASCADE_VERTICAL_START;
-    for (const t of [0, start * 0.5, start]) {
-      expect(waterCascadeOffset(t, run)).toBeLessThanOrEqual(0);
-    }
-    const high = waterCascadeOffset(start + (1 - start) / 3, run);
-    const low = waterCascadeOffset(1, run);
-    expect(high).toBeGreaterThan(0);
-    expect(low).toBeGreaterThan(high);
-    // Aux coins de l'arête le rideau reste exactement sur la marche : deux
-    // arêtes voisines partagent leurs extrémités, sans triangle isolé.
-    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
-      expect(waterCascadeLateralOffset(t, 0, run)).toBeCloseTo(0, 6);
-      expect(waterCascadeLateralOffset(t, 1, run)).toBeCloseTo(0, 6);
-      expect(waterCascadeLateralOffset(t, 0.5, run)).toBeCloseTo(waterCascadeOffset(t, run), 6);
-    }
-    // Le profil latéral est continu et symétrique.
-    for (let step = 0; step <= 20; step += 1) {
-      const u = step / 20;
-      expect(Number.isFinite(waterCascadeLateralOffset(1, u, run))).toBe(true);
-      expect(waterCascadeLateralOffset(1, u, run)).toBeCloseTo(
-        waterCascadeLateralOffset(1, 1 - u, run),
-        6,
-      );
-    }
-  });
-
-  it('fusionne les arêtes colinéaires en un seul rideau continu (#226)', () => {
-    const width = 10;
-    const height = 10;
-    const size = width * height;
-    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.grass);
-    const heightMap = new Uint8Array(size).fill(2);
-    // Trois tuiles hautes alignées qui dévalent dans une même nappe basse.
-    for (let x = 3; x <= 5; x += 1) {
-      kind[3 * width + x] = TILE_KIND_INDEX.river;
-      heightMap[3 * width + x] = 4;
-      kind[4 * width + x] = TILE_KIND_INDEX.river;
-      heightMap[4 * width + x] = 0;
-    }
-    const map: MapSnapshot = {
-      width,
-      height,
-      kind,
-      heightMap,
-      owner: new Uint8Array(size).fill(255),
-      slope: new Uint8Array(size),
-      flags: new Uint8Array(size),
-      trackBits: new Uint8Array(size),
-    };
-    const fields = buildWaterHeightFields(map);
-    const left = waterCascadeSpan(map, fields, 3, 3, 0, 1);
-    const middle = waterCascadeSpan(map, fields, 4, 3, 0, 1);
-    const right = waterCascadeSpan(map, fields, 5, 3, 0, 1);
-    expect(left.length).toBe(3);
-    expect(middle.length).toBe(3);
-    expect(right.length).toBe(3);
-    expect(left.uStart).toBeCloseTo(0, 6);
-    expect(left.uEnd).toBeCloseTo(1 / 3, 6);
-    expect(middle.uStart).toBeCloseTo(1 / 3, 6);
-    expect(middle.uEnd).toBeCloseTo(2 / 3, 6);
-    expect(right.uStart).toBeCloseTo(2 / 3, 6);
-    expect(right.uEnd).toBeCloseTo(1, 6);
-    // Une nappe aval de niveau différent clôt l'étendue.
-    heightMap[4 * width + 5] = 1;
-    const fields2 = buildWaterHeightFields(map);
-    const isolated = waterCascadeSpan(map, fields2, 5, 3, 0, 1);
-    expect(isolated.length).toBe(1);
-  });
-
-  it('creuse le lit rendu sous la nappe aval d’une marche (#226)', () => {
-    const width = 8;
-    const height = 8;
-    const size = width * height;
-    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.grass);
-    const heightMap = new Uint8Array(size).fill(2);
-    // Rivière large de trois tuiles : le coin échantillonné est entièrement
-    // entouré d'eau et ne subit pas la berge latérale.
-    for (let x = 2; x <= 4; x += 1) {
-      kind[3 * width + x] = TILE_KIND_INDEX.river;
-      heightMap[3 * width + x] = 4;
-      kind[4 * width + x] = TILE_KIND_INDEX.river;
-      heightMap[4 * width + x] = 0;
-    }
-    const map: MapSnapshot = {
-      width,
-      height,
-      kind,
-      heightMap,
-      owner: new Uint8Array(size).fill(255),
-      slope: new Uint8Array(size),
-      flags: new Uint8Array(size),
-      trackBits: new Uint8Array(size),
-    };
-    const fields = buildWaterHeightFields(map);
     const low = waterSurfaceHeight(0);
-    const high = 3 * width + 3;
-    // Le lit physique reste à son niveau, mais le maillage du terrain passe
-    // sous la nappe basse : aucune rampe de terre au-dessus de l'eau.
-    expect(fields.bed[high]).toBeCloseTo(waterBedHeight(4), 6);
-    expect(fields.bedRender[high]).toBeLessThan(low - WATER_STEP_BED_MARGIN + 1e-6);
-    const boundary = sampleCornerField(fields.bedRender, width, height, 3, 4);
-    expect(boundary).toBeLessThan(low - 0.1);
+    for (const x of [3, 4]) {
+      const index = 3 * width + x;
+      expect(fields.surface[index]).toBeCloseTo(low, 6);
+      expect(fields.bed[index]).toBeCloseTo(waterBedHeight(0), 6);
+      // Aucun cube d'eau : les deux surfaces sont strictement identiques.
+      expect(fields.surface[index] ?? 0).not.toBeGreaterThan(low + 1e-6);
+    }
+    // Plus aucune face verticale entre les deux tuiles de la composante.
+    expect(waterWallForEdge(map, fields, 3, 3, 1, 0)).toBeNull();
+    expect(waterWallForEdge(map, fields, 4, 3, -1, 0)).toBeNull();
+    // La carte source n'est pas modifiée : le moteur WASM garde son état.
+    expect(heightMap[3 * width + 3]).toBe(4);
+    expect(heightMap[3 * width + 4]).toBe(0);
+
+    // La berge naturelle est recarveé juste au-dessus de la nappe : la moyenne
+    // de coins du terrain ne recouvre plus le chenal d'une tuile. La berge
+    // reste sèche (lit rendu au-dessus de la surface).
+    const shore = 2 * width + 3;
+    expect(fields.bed[shore]).toBeCloseTo(1, 6);
+    expect(fields.bedRender[shore]).toBeCloseTo(low + WATER_SHORE_CLEARANCE, 6);
+    expect(fields.bedRender[shore] ?? 0).toBeGreaterThan(low);
+    const corner = sampleCornerField(fields.bedRender, width, height, 3, 3);
+    expect(corner).toBeLessThan(low);
+    // Une route mitoyenne n'est jamais descendue : elle resterait flottante.
+    const withRoad = { ...map, kind: map.kind.slice() };
+    withRoad.kind[shore] = TILE_KIND_INDEX.road;
+    const roadFields = buildWaterHeightFields(withRoad);
+    expect(roadFields.bedRender[shore]).toBeCloseTo(1, 6);
+  });
+
+  it('garde la dénivellation légitime d’une écluse', () => {
+    const map = stepMap();
+    const fields = buildWaterHeightFields(map);
+    const high = waterSurfaceHeight(4);
+    const low = waterSurfaceHeight(0);
+    // Le bief haut ne contient que des tuiles de niveau 4 : il reste à 4.
+    expect(fields.surface[6 + 5 * map.width]).toBeCloseTo(high, 6);
+    expect(fields.surface[4 + 5 * map.width]).toBeCloseTo(low, 6);
+    const wall = waterWallForEdge(map, fields, 5, 5, -1, 0);
+    expect(wall?.kind).toBe('lock');
+    expect(wall?.bottom ?? 0).toBeCloseTo(low, 6);
+    expect(wall?.top ?? 0).toBeCloseTo(high + WATER_WAVE_AMPLITUDE, 6);
+  });
+
+  it('crée une paroi minérale au bord de carte, jamais un mur d’eau', () => {
+    const width = 4;
+    const height = 4;
+    const size = width * height;
+    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.water);
+    const heightMap = new Uint8Array(size).fill(4);
+    const map: MapSnapshot = {
+      width,
+      height,
+      kind,
+      heightMap,
+      owner: new Uint8Array(size).fill(255),
+      slope: new Uint8Array(size),
+      flags: new Uint8Array(size),
+      trackBits: new Uint8Array(size),
+    };
+    const fields = buildWaterHeightFields(map);
+    const wall = waterWallForEdge(map, fields, 0, 1, -1, 0);
+    expect(wall).not.toBeNull();
+    expect(wall?.kind).toBe('bank');
+    expect(wall?.water).toBe(true);
   });
 
   it('ne crée aucune paroi quand la berge atteint la surface', () => {

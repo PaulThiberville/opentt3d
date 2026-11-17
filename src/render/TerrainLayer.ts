@@ -19,16 +19,16 @@
  *
  * L'eau est un second maillage par chunk : la nappe couvre l'eau et une
  * couronne de berge, ce qui remplace l'arête rectangulaire des quads par la
- * vraie intersection avec la pente du terrain (#204). Sa surface est posée
- * juste sous le dessus de la tuile et le lit est creusé d'un demi-niveau :
- * l'eau reste donc sous les routes, ponts et quais voisins, sans recouvrement
- * coplanaire ni z-fighting. Le shader mélange la teinte selon la profondeur
- * mesurée à la côte, anime la houle et les reflets, et dessine une écume
- * déterministe sur les berges. Les marches légitimes reçoivent un ouvrage
- * dédié (#214/#226) : rideau continu sur toute la largeur d'une marche,
- * vertical en haut puis incliné vers la nappe basse, avec écume transparente
- * au pied, bajoyer de pierre vertical autour d'une écluse, soutènement minéral
- * sous une berge (#205).
+ * vraie intersection avec la pente du terrain (#204). Chaque composante d'eau
+ * 4-connexe sans écluse est rendue à son niveau de surface le plus bas (#242) :
+ * toutes ses tuiles forment un seul plan horizontal, y compris avec le moteur
+ * WASM. Sa surface est posée juste sous le dessus de la tuile et le lit est
+ * creusé d'un demi-niveau : l'eau reste donc sous les routes, ponts et quais
+ * voisins, sans recouvrement coplanaire ni z-fighting. Le shader mélange la
+ * teinte selon la profondeur mesurée à la côte, anime la houle et les reflets,
+ * et dessine une écume déterministe sur les berges. Les seules marches qui
+ * subsistent sont celles d'une écluse : elles reçoivent un bajoyer de pierre
+ * vertical (#205/#242). Aucune cascade ni mur d'eau n'est généré.
  */
 
 import * as THREE from 'three';
@@ -38,11 +38,9 @@ import { hashUnit2d } from '../game/prng';
 import {
   TERRAIN_SKIN_COLOURS,
   WATER_DEEP_COLOUR,
-  WATER_MID_COLOUR,
   WATER_SHALLOW_COLOUR,
   glslLinearColour,
   hexToLinearRgb,
-  mixColour,
   rgbToHex,
   tileColour,
   waterColourAtDepth,
@@ -57,18 +55,12 @@ import {
 } from './terrainSurface';
 import {
   WATER_BED_DROP,
-  WATER_CASCADE_FOAM_LENGTH,
-  WATER_CASCADE_FOAM_LIFT,
-  WATER_CASCADE_LATERAL_SEGMENTS,
-  WATER_CASCADE_SEGMENTS,
   WATER_SHADER_CONSTANTS,
   buildShoreFields,
   buildWaterHeightFields,
   sampleCornerField,
   sampleField,
   waterBedHeight,
-  waterCascadeLateralOffset,
-  waterCascadeSpan,
   waterDepthAt,
   waterDepthFactor,
   waterWallForEdge,
@@ -83,12 +75,10 @@ const AO_STEP = 0.5;
 
 /**
  * Teintes des ouvrages de retenue : pierre claire au faîte, pierre sombre au
- * pied. Elles distinguent nettement un bajoyer d'écluse d'une cascade.
+ * pied. Elles distinguent nettement un bajoyer d'écluse d'une berge.
  */
 const LOCK_WALL_TOP_COLOUR = 0xb8b0a1;
 const LOCK_WALL_BOTTOM_COLOUR = 0x7b766b;
-/** Écume de cascade : turquoise très clair, jamais blanc pur. */
-const CASCADE_FOAM_COLOUR = 0xc7e3e2;
 
 /** Bornes et teintes injectées dans les shaders (une seule source de vérité). */
 const SKIN_SHADER_CONSTANTS = `
@@ -170,8 +160,6 @@ interface Chunk {
   ground: THREE.Mesh;
   water: THREE.Mesh | null;
   wall: THREE.Mesh | null;
-  cascade: THREE.Mesh | null;
-  foam: THREE.Mesh | null;
 }
 
 interface MapArrays {
@@ -214,8 +202,6 @@ export class TerrainLayer {
   private groundMaterial: THREE.MeshLambertMaterial;
   private waterMaterial: THREE.MeshPhongMaterial;
   private wallMaterial: THREE.MeshBasicMaterial;
-  private cascadeMaterial: THREE.MeshPhongMaterial;
-  private cascadeFoamMaterial: THREE.MeshBasicMaterial;
   private waterTime: { value: number } = { value: 0 };
   private nightUniform: { value: number } = { value: 0 };
   private skinUniform: { value: number } = { value: 1 };
@@ -393,8 +379,6 @@ ${SKIN_SHADER_CONSTANTS}`,
       side: THREE.DoubleSide,
       fog: true,
     });
-    this.cascadeMaterial = this.createCascadeMaterial();
-    this.cascadeFoamMaterial = this.createCascadeFoamMaterial();
     // Fond océanique : masque la découpe de la carte et donne une île crédible.
     this.oceanGeometry = new THREE.PlaneGeometry(1, 1);
     this.oceanGeometry.rotateX(-Math.PI / 2);
@@ -575,181 +559,6 @@ ${SKIN_NOISE_GLSL}`,
     return material;
   }
 
-  /**
-   * Matériau du rideau de cascade (#214).
-   *
-   * Opaque et éclairé comme l'eau, il ajoute une ondulation procédurale qui
-   * descend le long du rideau et blanchit le pied en écume. Aucun tri de
-   * transparence n'est nécessaire : le rideau est dessiné avant la nappe
-   * transparente et ferme complètement le vide de la marche.
-   */
-  private createCascadeMaterial(): THREE.MeshPhongMaterial {
-    const material = new THREE.MeshPhongMaterial({
-      color: 0xffffff,
-      vertexColors: true,
-      specular: 0xd8f3ff,
-      shininess: 140,
-      // Le rideau n'a de sens que vu depuis l'aval. Vu de l'amont, la nappe
-      // amont masque la chute : dessiner la face arrière ferait un mur de
-      // boîte au-dessus de l'eau.
-      side: THREE.FrontSide,
-      transparent: false,
-      depthWrite: true,
-      // Léger biais derrière la nappe : le pied du rideau ne peut pas clignoter
-      // avec le plan d'eau bas qu'il chevauche.
-      polygonOffset: true,
-      polygonOffsetFactor: 1,
-      polygonOffsetUnits: 1,
-    });
-    material.onBeforeCompile = (shader) => {
-      shader.uniforms.uTime = this.waterTime;
-      shader.uniforms.uNight = this.nightUniform;
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          '#include <common>',
-          `#include <common>
-attribute float aFoam;
-varying float vCascadeFoam;
-varying vec3 vCascadeWorld;
-varying float vCascadeDistance;`,
-        )
-        .replace(
-          '#include <begin_vertex>',
-          `#include <begin_vertex>
-  vec4 cascadeWorld = modelMatrix * vec4( transformed, 1.0 );
-  vCascadeWorld = cascadeWorld.xyz;
-  vCascadeDistance = -( modelViewMatrix * vec4( transformed, 1.0 ) ).z;
-  vCascadeFoam = aFoam;`,
-        );
-      shader.fragmentShader = shader.fragmentShader
-        .replace(
-          '#include <common>',
-          `#include <common>
-uniform float uTime;
-uniform float uNight;
-varying float vCascadeFoam;
-varying vec3 vCascadeWorld;
-varying float vCascadeDistance;
-${SKIN_NOISE_GLSL}`,
-        )
-        .replace(
-          '#include <color_fragment>',
-          `#include <color_fragment>
-  float cascadeFade = 1.0 - smoothstep( 80.0, 220.0, vCascadeDistance );
-  // Deux nappes de bruit défilant vers le bas : des filets d'eau verticaux,
-  // pas une texture statique plaquée sur un cube.
-  vec2 cascadeFlow = vec2( vCascadeWorld.x + vCascadeWorld.z, vCascadeWorld.y );
-  float cascadeStreak = skinNoise( vec2(
-    cascadeFlow.x * 6.5,
-    cascadeFlow.y * 2.4 - uTime * 2.8
-  ) );
-  float cascadeStreak2 = skinNoise( vec2(
-    cascadeFlow.x * 12.0 + 4.3,
-    cascadeFlow.y * 4.2 - uTime * 3.6
-  ) );
-  float cascadeFoam = smoothstep(
-    0.46,
-    0.78,
-    cascadeStreak * 0.72 + cascadeStreak2 * 0.34
-  );
-  vec3 cascadeDeep = vec3( 0.16, 0.44, 0.5 );
-  vec3 cascadeLight = vec3( 0.78, 0.92, 0.94 );
-  vec3 cascadeTint = mix( cascadeDeep, cascadeLight, cascadeFoam );
-  cascadeTint = mix( cascadeTint, cascadeLight, vCascadeFoam * 0.85 );
-  diffuseColor.rgb = mix(
-    diffuseColor.rgb,
-    cascadeTint,
-    ( 0.62 + cascadeFoam * 0.22 ) * cascadeFade
-  );
-  diffuseColor.rgb *= 1.0 + cascadeStreak2 * 0.12;`,
-        )
-        .replace(
-          '#include <emissivemap_fragment>',
-          `#include <emissivemap_fragment>
-  totalEmissiveRadiance += vec3( 0.025, 0.06, 0.085 ) * uNight;`,
-        );
-    };
-    material.customProgramCacheKey = () => 'opentt3d-waterfall-v1';
-    return material;
-  }
-
-  /**
-   * Matériau de l'écume au pied d'une chute (#226).
-   *
-   * Contrairement au rideau, l'écume est transparente : elle se fond dans la
-   * nappe basse au lieu de dessiner un tablier opaque en relief. Un bruit
-   * animé fait bouillonner la frange, et l'attribut `aAlpha` éteint le bord
-   * extérieur sans arête rectangulaire visible.
-   */
-  private createCascadeFoamMaterial(): THREE.MeshBasicMaterial {
-    const material = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      vertexColors: true,
-      transparent: true,
-      opacity: 1,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      fog: true,
-      // L'écume repose juste au-dessus de la nappe basse : le biais évite tout
-      // clignotement avec les quads d'eau qu'elle recouvre.
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1,
-    });
-    material.onBeforeCompile = (shader) => {
-      shader.uniforms.uTime = this.waterTime;
-      shader.uniforms.uNight = this.nightUniform;
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          '#include <common>',
-          `#include <common>
-attribute float aAlpha;
-varying float vFoamAlpha;
-varying vec3 vFoamWorld;
-varying float vFoamDistance;`,
-        )
-        .replace(
-          '#include <begin_vertex>',
-          `#include <begin_vertex>
-  vec4 foamWorld = modelMatrix * vec4( transformed, 1.0 );
-  vFoamWorld = foamWorld.xyz;
-  vFoamDistance = -( modelViewMatrix * vec4( transformed, 1.0 ) ).z;
-  vFoamAlpha = aAlpha;`,
-        );
-      shader.fragmentShader = shader.fragmentShader
-        .replace(
-          '#include <common>',
-          `#include <common>
-uniform float uTime;
-uniform float uNight;
-varying float vFoamAlpha;
-varying vec3 vFoamWorld;
-varying float vFoamDistance;
-${SKIN_NOISE_GLSL}`,
-        )
-        .replace(
-          '#include <color_fragment>',
-          `#include <color_fragment>
-  float foamFade = 1.0 - smoothstep( 75.0, 210.0, vFoamDistance );
-  float foamNoise = skinNoise( vec2(
-    vFoamWorld.x * 9.0 + vFoamWorld.z * 3.0,
-    vFoamWorld.z * 8.0 - uTime * 1.7
-  ) );
-  float foamNoise2 = skinNoise( vec2(
-    vFoamWorld.x * 17.0 - vFoamWorld.z * 5.0 + 4.1,
-    vFoamWorld.z * 15.0 + uTime * 2.3
-  ) );
-  float foamChurn = smoothstep( 0.32, 0.82, foamNoise * 0.7 + foamNoise2 * 0.42 );
-  vec3 foamTint = mix( vec3( 0.55, 0.78, 0.8 ), vec3( 0.92, 0.98, 0.98 ), 0.35 + foamChurn * 0.65 );
-  diffuseColor.rgb = mix( diffuseColor.rgb, foamTint, 0.35 + foamChurn * 0.45 );
-  diffuseColor.a *= vFoamAlpha * ( 0.45 + foamChurn * 0.55 ) * foamFade;
-  diffuseColor.rgb += vec3( 0.02, 0.035, 0.045 ) * uNight;`,
-        );
-    };
-    material.customProgramCacheKey = () => 'opentt3d-waterfall-foam-v1';
-    return material;
-  }
-
   /** Applique une carte complète (premier snapshot ou changement de carte). */
   setMap(map: MapSnapshot): void {
     const sizeChanged = !this.map || this.map.width !== map.width || this.map.height !== map.height;
@@ -880,14 +689,6 @@ ${SKIN_NOISE_GLSL}`,
       if (existing.wall) {
         this.group.remove(existing.wall);
         existing.wall.geometry.dispose();
-      }
-      if (existing.cascade) {
-        this.group.remove(existing.cascade);
-        existing.cascade.geometry.dispose();
-      }
-      if (existing.foam) {
-        this.group.remove(existing.foam);
-        existing.foam.geometry.dispose();
       }
       this.chunks.delete(key);
     }
@@ -1152,25 +953,17 @@ ${SKIN_NOISE_GLSL}`,
       this.group.add(water);
     }
 
-    // --- Parois de rive (#205), cascades (#226) et écume : une face par arête.
-    const { wall, cascade, foam } = this.buildWaterWalls(
-      map,
-      heightFields,
-      x0,
-      y0,
-      width,
-      height,
-      cx,
-      cy,
-    );
-    this.chunks.set(key, { cx, cy, ground, water, wall, cascade, foam });
+    // --- Parois de rive (#205) et bajoyers d'écluse : une face par arête.
+    const wall = this.buildWaterWalls(map, heightFields, x0, y0, width, height, cx, cy);
+    this.chunks.set(key, { cx, cy, ground, water, wall });
   }
 
   /**
-   * Construit les faces de niveau d'un chunk : bajoyers d'écluse, soutènements
-   * de berge et cascades naturelles (#205/#214). Le chunk propriétaire de la
-   * tuile d'eau haute est le seul à émettre la face, d'où l'absence de doublon
-   * aux jonctions.
+   * Construit les faces de niveau d'un chunk : bajoyers d'écluse et
+   * soutènements de berge (#205/#242). Le chunk propriétaire de la tuile d'eau
+   * haute est le seul à émettre la face, d'où l'absence de doublon aux
+   * jonctions. Aucune face de cascade : les nappes libres sont aplanies au
+   * rendu, seule une écluse crée une marche légitime.
    */
   private buildWaterWalls(
     map: MapSnapshot,
@@ -1181,31 +974,17 @@ ${SKIN_NOISE_GLSL}`,
     height: number,
     cx: number,
     cy: number,
-  ): { wall: THREE.Mesh | null; cascade: THREE.Mesh | null; foam: THREE.Mesh | null } {
+  ): THREE.Mesh | null {
     const wallPositions: number[] = [];
     const wallColours: number[] = [];
-    const cascadePositions: number[] = [];
-    const cascadeColours: number[] = [];
-    const cascadeFoam: number[] = [];
-    const cascadeIndices: number[] = [];
-    const foamPositions: number[] = [];
-    const foamColours: number[] = [];
-    const foamAlphas: number[] = [];
-    const foamIndices: number[] = [];
     const bankTop = { r: 0, g: 0, b: 0 };
     const bankBottom = { r: 0, g: 0, b: 0 };
     const lockTop = { r: 0, g: 0, b: 0 };
     const lockBottom = { r: 0, g: 0, b: 0 };
-    const cascadeTop = { r: 0, g: 0, b: 0 };
-    const cascadeBottom = { r: 0, g: 0, b: 0 };
-    const foamColour = { r: 0, g: 0, b: 0 };
     hexToLinearRgb(TERRAIN_SKIN_COLOURS.wetSand, bankTop);
     hexToLinearRgb(TERRAIN_SKIN_COLOURS.rockDark, bankBottom);
     hexToLinearRgb(LOCK_WALL_TOP_COLOUR, lockTop);
     hexToLinearRgb(LOCK_WALL_BOTTOM_COLOUR, lockBottom);
-    hexToLinearRgb(WATER_MID_COLOUR, cascadeTop);
-    hexToLinearRgb(mixColour(WATER_SHALLOW_COLOUR, CASCADE_FOAM_COLOUR, 0.42), cascadeBottom);
-    hexToLinearRgb(CASCADE_FOAM_COLOUR, foamColour);
 
     const pushWall = (
       x: number,
@@ -1215,28 +994,6 @@ ${SKIN_NOISE_GLSL}`,
     ): void => {
       wallPositions.push(x, y, z);
       wallColours.push(colour.r, colour.g, colour.b);
-    };
-    const pushCascade = (
-      x: number,
-      z: number,
-      y: number,
-      colour: { r: number; g: number; b: number },
-      foamAmount: number,
-    ): void => {
-      cascadePositions.push(x, y, z);
-      cascadeColours.push(colour.r, colour.g, colour.b);
-      cascadeFoam.push(foamAmount);
-    };
-    const pushFoam = (
-      x: number,
-      z: number,
-      y: number,
-      colour: { r: number; g: number; b: number },
-      alpha: number,
-    ): void => {
-      foamPositions.push(x, y, z);
-      foamColours.push(colour.r, colour.g, colour.b);
-      foamAlphas.push(alpha);
     };
 
     /** Paroi verticale : bajoyer de pierre ou soutènement de berge. */
@@ -1282,119 +1039,6 @@ ${SKIN_NOISE_GLSL}`,
       }
     };
 
-    /**
-     * Rideau de cascade : grille indexée continue sur toute la largeur de la
-     * marche, verticale en haut puis évasée vers la nappe basse (#226).
-     *
-     * Les bords latéraux restent exactement sur les coins de l'arête : deux
-     * arêtes voisines partagent leurs extrémités et le rideau ne laisse aucun
-     * triangle isolé aux angles. Les sommets sont partagés dans la grille,
-     * donc les normales sont lissées et les facettes ne réapparaissent pas.
-     * L'écume est un maillage séparé, transparent et posé sur la nappe basse.
-     */
-    const emitCascade = (
-      segment: WaterWallSegment,
-      dx: number,
-      dy: number,
-      wx: number,
-      wy: number,
-    ): void => {
-      const { x0: ax, z0: az, x1: bx, z1: bz, bottom, top, run } = segment;
-      const span = waterCascadeSpan(map, heightFields, wx, wy, dx, dy);
-      const rows = WATER_CASCADE_SEGMENTS;
-      const cols = WATER_CASCADE_LATERAL_SEGMENTS;
-      const curtainStart = cascadePositions.length / 3;
-      const bottomEdge: { x: number; z: number }[] = [];
-
-      for (let row = 0; row <= rows; row += 1) {
-        const t = row / rows;
-        const y = top + (bottom - top) * t;
-        const tint = t * t * (3 - 2 * t);
-        const colour = {
-          r: cascadeTop.r + (cascadeBottom.r - cascadeTop.r) * tint,
-          g: cascadeTop.g + (cascadeBottom.g - cascadeTop.g) * tint,
-          b: cascadeTop.b + (cascadeBottom.b - cascadeTop.b) * tint,
-        };
-        const foamAmount = Math.max(0, (t - 0.55) / 0.45);
-        for (let col = 0; col <= cols; col += 1) {
-          const u = span.uStart + (span.uEnd - span.uStart) * (col / cols);
-          const out = waterCascadeLateralOffset(t, u, run);
-          const x = ax + (bx - ax) * (col / cols) + dx * out;
-          const z = az + (bz - az) * (col / cols) + dy * out;
-          pushCascade(x, z, y, colour, foamAmount);
-          if (row === rows) bottomEdge.push({ x, z });
-        }
-      }
-      for (let row = 0; row < rows; row += 1) {
-        for (let col = 0; col < cols; col += 1) {
-          const a = curtainStart + row * (cols + 1) + col;
-          const b = a + 1;
-          const c = a + cols + 1;
-          const d = c + 1;
-          // Le rideau n'est visible que depuis l'aval : la face amont est
-          // laissée ouverte pour ne pas dessiner un mur vertical en boîte
-          // lorsqu'on regarde la chute depuis l'amont (#226).
-          if (dx === 1 || dy === -1) cascadeIndices.push(a, b, c, b, d, c);
-          else cascadeIndices.push(a, c, b, b, c, d);
-        }
-      }
-
-      // Écume au pied : frange horizontale qui épouse la nappe basse, bord
-      // extérieur ondulé et transparent. Une petite bande verticale de
-      // bouillonnement masque la jointure entre le rideau et l'eau.
-      const foamStart = foamPositions.length / 3;
-      const lipY = bottom + WATER_CASCADE_FOAM_LIFT;
-      const churnY = bottom + 0.1;
-      for (let col = 0; col <= cols; col += 1) {
-        const u = span.uStart + (span.uEnd - span.uStart) * (col / cols);
-        const inner = bottomEdge[col] ?? { x: ax, z: az };
-        const lateral = Math.sin(Math.PI * u);
-        const wave = 0.82 + 0.18 * Math.sin(u * 9.7 + ax * 1.7 + az * 1.3);
-        const tongue = WATER_CASCADE_FOAM_LENGTH * lateral ** 0.7 * wave;
-        // Bouillonnement vertical au contact du rideau.
-        pushFoam(inner.x + dx * 0.02, inner.z + dy * 0.02, bottom, foamColour, 0.88 * lateral);
-        pushFoam(inner.x + dx * 0.02, inner.z + dy * 0.02, churnY, foamColour, 0.16 * lateral);
-        // Frange horizontale, du pied du rideau vers la nappe basse.
-        pushFoam(inner.x, inner.z, lipY, foamColour, 0.9 * lateral);
-        pushFoam(inner.x + dx * tongue, inner.z + dy * tongue, lipY, cascadeBottom, 0.02);
-      }
-      for (let col = 0; col < cols; col += 1) {
-        const a = foamStart + col * 4;
-        const b = a + 1;
-        const c = a + 4;
-        const d = c + 1;
-        // Bande verticale de bouillonnement.
-        foamIndices.push(a, c, b, b, c, d);
-        // Frange horizontale.
-        foamIndices.push(a + 2, c + 2, b + 2, b + 2, c + 2, d + 2);
-      }
-
-      // Raccord de rive : aux deux extrémités du rideau, une joue verticale
-      // sombre ferme le vide entre la nappe haute et la berge basse. Sans
-      // elle, on voit la tranche du lit creusé comme un triangle sombre.
-      const sideWidth = 0.24;
-      const sideTop = {
-        r: bankBottom.r + (bankTop.r - bankBottom.r) * 0.28,
-        g: bankBottom.g + (bankTop.g - bankBottom.g) * 0.28,
-        b: bankBottom.b + (bankTop.b - bankBottom.b) * 0.28,
-      };
-      const sides: { x: number; z: number }[] = [];
-      if (span.uStart <= 1e-6) sides.push({ x: ax, z: az });
-      if (span.uEnd >= 1 - 1e-6) sides.push({ x: bx, z: bz });
-      for (const side of sides) {
-        const innerX = side.x;
-        const innerZ = side.z;
-        const outerX = innerX + dx * sideWidth;
-        const outerZ = innerZ + dy * sideWidth;
-        pushWall(innerX, innerZ, bottom, bankBottom);
-        pushWall(outerX, outerZ, bottom, bankBottom);
-        pushWall(outerX, outerZ, top, sideTop);
-        pushWall(innerX, innerZ, bottom, bankBottom);
-        pushWall(outerX, outerZ, top, sideTop);
-        pushWall(innerX, innerZ, top, sideTop);
-      }
-    };
-
     for (let ty = 0; ty < height; ty += 1) {
       for (let tx = 0; tx < width; tx += 1) {
         const wx = x0 + tx;
@@ -1408,61 +1052,23 @@ ${SKIN_NOISE_GLSL}`,
           [0, -1],
         ] as const) {
           const segment = waterWallForEdge(map, heightFields, wx, wy, dx, dy);
-          if (!segment) continue;
-          if (segment.kind === 'cascade') emitCascade(segment, dx, dy, wx, wy);
-          else emitWall(segment);
+          if (segment) emitWall(segment);
         }
       }
     }
 
-    let wall: THREE.Mesh | null = null;
-    if (wallPositions.length > 0) {
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(wallPositions, 3));
-      geometry.setAttribute('color', new THREE.Float32BufferAttribute(wallColours, 3));
-      geometry.computeVertexNormals();
-      geometry.computeBoundingSphere();
-      wall = new THREE.Mesh(geometry, this.wallMaterial);
-      wall.name = `shore-wall-${cx}-${cy}`;
-      wall.receiveShadow = true;
-      wall.renderOrder = 1;
-      this.group.add(wall);
-    }
-
-    let cascade: THREE.Mesh | null = null;
-    if (cascadePositions.length > 0) {
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(cascadePositions, 3));
-      geometry.setAttribute('color', new THREE.Float32BufferAttribute(cascadeColours, 3));
-      geometry.setAttribute('aFoam', new THREE.Float32BufferAttribute(cascadeFoam, 1));
-      geometry.setIndex(cascadeIndices);
-      geometry.computeVertexNormals();
-      geometry.computeBoundingSphere();
-      cascade = new THREE.Mesh(geometry, this.cascadeMaterial);
-      cascade.name = `waterfall-${cx}-${cy}`;
-      cascade.receiveShadow = true;
-      cascade.renderOrder = 1;
-      this.group.add(cascade);
-    }
-
-    let foam: THREE.Mesh | null = null;
-    if (foamPositions.length > 0) {
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(foamPositions, 3));
-      geometry.setAttribute('color', new THREE.Float32BufferAttribute(foamColours, 3));
-      geometry.setAttribute('aAlpha', new THREE.Float32BufferAttribute(foamAlphas, 1));
-      geometry.setIndex(foamIndices);
-      geometry.computeVertexNormals();
-      geometry.computeBoundingSphere();
-      foam = new THREE.Mesh(geometry, this.cascadeFoamMaterial);
-      foam.name = `waterfall-foam-${cx}-${cy}`;
-      foam.receiveShadow = false;
-      // Après la nappe transparente : l'écume se mélange à l'eau basse.
-      foam.renderOrder = 3;
-      this.group.add(foam);
-    }
-
-    return { wall, cascade, foam };
+    if (wallPositions.length === 0) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(wallPositions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(wallColours, 3));
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    const wall = new THREE.Mesh(geometry, this.wallMaterial);
+    wall.name = `shore-wall-${cx}-${cy}`;
+    wall.receiveShadow = true;
+    wall.renderOrder = 1;
+    this.group.add(wall);
+    return wall;
   }
 
   /**
@@ -1614,14 +1220,6 @@ ${SKIN_NOISE_GLSL}`,
         this.group.remove(chunk.wall);
         chunk.wall.geometry.dispose();
       }
-      if (chunk.cascade) {
-        this.group.remove(chunk.cascade);
-        chunk.cascade.geometry.dispose();
-      }
-      if (chunk.foam) {
-        this.group.remove(chunk.foam);
-        chunk.foam.geometry.dispose();
-      }
     }
     this.chunks.clear();
   }
@@ -1635,8 +1233,6 @@ ${SKIN_NOISE_GLSL}`,
     this.groundMaterial.dispose();
     this.waterMaterial.dispose();
     this.wallMaterial.dispose();
-    this.cascadeMaterial.dispose();
-    this.cascadeFoamMaterial.dispose();
     this.map = null;
     this.previous = null;
     this.shoreFields = null;
