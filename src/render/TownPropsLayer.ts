@@ -60,29 +60,75 @@ const ROAD_KINDS = new Set<number>([
 ]);
 
 /**
- * Vrai si une tuile est inondable : drapeau d'eau, ou sol plus bas que la
- * surface d'une nappe 4-voisine. Le second cas couvre les berges basses d'un
- * canal surélevé : un banc ou un jardin y flotterait dans l'eau (#215).
+ * Vrai si une tuile est inondable : drapeau d'eau, ou relief assez bas pour
+ * qu'une nappe voisine la recouvre. Le second cas couvre les berges basses
+ * d'un canal surélevé et, surtout, les **coins bas d'une berge en pente** : un
+ * banc ou un jardin posé sur le coin le plus bas se retrouverait sous la
+ * surface, comme un radeau (#215/#227).
+ *
+ * Le contrôle porte sur le voisinage complet (8-connexe, comme la couronne de
+ * rive) et sur la hauteur du coin le plus bas, pas seulement sur le dessus de
+ * la tuile : une pente peut descendre sous l'eau même si le centre de la tuile
+ * émerge encore.
  */
 export function isWaterloggedPropTile(map: MapSnapshot, x: number, y: number): boolean {
   if (x < 0 || y < 0 || x >= map.width || y >= map.height) return false;
   const index = y * map.width + x;
   if (((map.flags[index] ?? 0) & TILE_FLAG.WATER) !== 0) return true;
+  const kind = tileKindFromIndex(map.kind[index] ?? 0);
+  if (isWaterKind(kind) || kind === 'void') return true;
+  const reference = nearbyWaterSurface(map, x, y);
+  if (!Number.isFinite(reference)) return false;
   const top = (map.heightMap[index] ?? 0) * HEIGHT_SCALE;
-  for (const [dx, dy] of [
-    [1, 0],
-    [-1, 0],
-    [0, 1],
-    [0, -1],
-  ] as const) {
-    const nx = x + dx;
+  if (reference >= top - 0.02) return true;
+  const lowestCorner = Math.min(
+    cornerHeightWorld(map, x, y),
+    cornerHeightWorld(map, x + 1, y),
+    cornerHeightWorld(map, x, y + 1),
+    cornerHeightWorld(map, x + 1, y + 1),
+  );
+  // Une tuile plate au même niveau que l'eau reste sèche : la surface est
+  // juste sous son dessus. Dès qu'un coin descend sous la nappe, en revanche,
+  // un prop posé au plus bas serait immergé.
+  return reference > lowestCorner + 0.02;
+}
+
+/** Plus haute surface d'eau dans le voisinage 8-connexe, ou `-Infinity`. */
+export function nearbyWaterSurface(map: MapSnapshot, x: number, y: number): number {
+  let reference = -Infinity;
+  for (let dy = -1; dy <= 1; dy += 1) {
     const ny = y + dy;
-    if (nx < 0 || ny < 0 || nx >= map.width || ny >= map.height) continue;
-    const neighbour = ny * map.width + nx;
-    if (!isWaterKind(tileKindFromIndex(map.kind[neighbour] ?? 0))) continue;
-    if (waterSurfaceHeight(map.heightMap[neighbour] ?? 0) >= top - 0.02) return true;
+    if (ny < 0 || ny >= map.height) continue;
+    for (let dx = -1; dx <= 1; dx += 1) {
+      if (dx === 0 && dy === 0) continue;
+      const nx = x + dx;
+      if (nx < 0 || nx >= map.width) continue;
+      const neighbour = ny * map.width + nx;
+      if (!isWaterKind(tileKindFromIndex(map.kind[neighbour] ?? 0))) continue;
+      const surface = waterSurfaceHeight(map.heightMap[neighbour] ?? 0);
+      if (surface > reference) reference = surface;
+    }
   }
-  return false;
+  return reference;
+}
+
+/**
+ * Vrai si le pied d'un prop (`ground`, en unités monde) reste au-dessus de
+ * toute nappe voisine. Dernier garde-fou du semis : une famille de props ne
+ * doit jamais flotter, même si sa tuile a passé le filtre de pente.
+ */
+export function propFootAboveWater(
+  map: MapSnapshot,
+  x: number,
+  z: number,
+  ground: number,
+): boolean {
+  const tileX = Math.floor(x);
+  const tileY = Math.floor(z);
+  if (isWaterloggedPropTile(map, tileX, tileY)) return false;
+  const reference = nearbyWaterSurface(map, tileX, tileY);
+  if (!Number.isFinite(reference)) return true;
+  return ground >= reference + 0.02;
 }
 
 interface PropPlacement {
@@ -472,8 +518,10 @@ export function generateTownProps(
   if (plaza) {
     for (const tile of plaza) {
       if (placements.length >= limit) break;
+      const placement = makePlacement(town, map, tile, 'plaza', rng, 1.04);
+      if (!propFootAboveWater(map, placement.x, placement.z, placement.ground)) continue;
       used.add(tile.y * map.width + tile.x);
-      placements.push(makePlacement(town, map, tile, 'plaza', rng, 1.04));
+      placements.push(placement);
     }
   }
 
@@ -484,7 +532,9 @@ export function generateTownProps(
     if (placements.length >= limit || kerbCount >= kerbBudget) break;
     const roll = hashUnit2d(town.id * 71 + 13, tile.x + 9, tile.y + 3);
     const kind: TownPropKind = roll < 0.78 ? 'lamp' : 'sign';
-    placements.push(makeKerbPlacement(town, map, tile, kind, rng));
+    const placement = makeKerbPlacement(town, map, tile, kind, rng);
+    if (!propFootAboveWater(map, placement.x, placement.z, placement.ground)) continue;
+    placements.push(placement);
     kerbCount += 1;
   }
 
@@ -514,7 +564,9 @@ export function generateTownProps(
       else if (roll < 0.82) kind = 'garden';
       else kind = 'sign';
     }
-    placements.push(makePlacement(town, map, tile, kind, rng, 1));
+    const placement = makePlacement(town, map, tile, kind, rng, 1);
+    if (!propFootAboveWater(map, placement.x, placement.z, placement.ground)) continue;
+    placements.push(placement);
   }
   return placements;
 }
