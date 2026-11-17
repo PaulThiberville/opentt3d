@@ -3580,9 +3580,14 @@ std::optional<BridgeType> SelectBridgeType(const JsonValue *options, uint bridge
 
 /**
  * Vérifie qu'un pont franchit un obstacle réel et que ses deux rampes
- * rejoignent une approche plane. Sans ce garde-fou, OpenTTD accepte un pont
- * posé sur du terrain plat, puis le rendu produit un ouvrage massif et inutile.
- * Les mêmes invariants sont appliqués côté mock (`planBridge`, #201).
+ * rejoignent une approche constructible. Sans ce garde-fou, OpenTTD accepte un
+ * pont posé sur du terrain plat, puis le rendu produit un ouvrage massif et
+ * inutile. Les mêmes invariants sont appliqués côté mock (`planBridge`, #201).
+ *
+ * Une approche peut être au niveau de la culée ou une pente plus bas : les
+ * rives en pente douce sont normales et le tablier dessine sa rampe dessus.
+ * Au-delà d'un niveau, ou si le sol monte, la culée est au pied d'une falaise
+ * et l'ouvrage serait impossible.
  */
 bool ValidateBridgeLanding(TileIndex tile, uint expected_height)
 {
@@ -3598,7 +3603,7 @@ bool ValidateBridgeLanding(TileIndex tile, uint expected_height)
 		default:
 			break;
 	}
-	return TileHeight(tile) == expected_height;
+	return TileHeight(tile) <= expected_height && expected_height - TileHeight(tile) <= 1;
 }
 
 bool ValidateBridgeSpan(CommandReply &reply, int from_x, int from_y, int to_x, int to_y)
@@ -3622,7 +3627,7 @@ bool ValidateBridgeSpan(CommandReply &reply, int from_x, int from_y, int to_x, i
 	if (!ValidateBridgeLanding(TileXY(ax, ay), start_height) ||
 			!ValidateBridgeLanding(TileXY(bx, by), end_height)) {
 		return FailWith(reply, "BRIDGE_APPROACH",
-				"La rampe du pont doit rejoindre une approche plane au même niveau, sur la terre ferme.");
+				"La rampe du pont doit rejoindre la terre ferme, au niveau de la culée ou une pente plus bas.");
 	}
 
 	const uint bridge_len = GetTunnelBridgeLength(start, end);

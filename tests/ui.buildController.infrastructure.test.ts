@@ -163,15 +163,65 @@ describe('BuildController : ponts et tunnels', () => {
     expect(commits[0]?.bridge?.material).toBe('suspension');
   });
 
-  it('refuse un drag diagonal et ne commite rien', () => {
-    const { controller, previews, commits, notices } = harness();
+  it('projette un drag diagonal sur l’axe dominant au lieu de le refuser', () => {
+    const { controller, previews, commits } = harness();
     controller.setTool('bridge');
     controller.handleBegin({ x: 2, y: 2 });
     controller.handleMove({ x: 6, y: 6 });
-    expect(lastPlan(previews)?.valid).toBe(false);
+    const plan = lastPlan(previews);
+    expect(plan?.from).toEqual({ x: 2, y: 2 });
+    expect(plan?.to).toEqual({ x: 6, y: 2 });
+    expect(plan?.axis).toBe('x');
+    expect(plan?.valid).toBe(false);
     controller.handleEnd({ x: 6, y: 6 });
     expect(commits).toHaveLength(0);
-    expect(notices.some((text) => text.includes('droit'))).toBe(true);
+  });
+
+  it('construit un pont après un drag diagonal grâce au calage sur l’axe', () => {
+    const map = makeMap();
+    // Une route au milieu du tracé : le tablier a un obstacle réel à franchir.
+    setTile(map, 4, 2, TILE_KIND_INDEX.road, 0x0c, 0);
+    const { controller, previews, commits, settings } = harness(map);
+    settings.bridge = { kind: 'road', material: 'wood' };
+    controller.setSettings(settings);
+    controller.setTool('bridge');
+    // Le geste descend de trois tuiles : l'axe X doit être conservé.
+    controller.handleBegin({ x: 2, y: 2 });
+    controller.handleMove({ x: 6, y: 5 });
+    expect(lastPlan(previews)?.to).toEqual({ x: 6, y: 2 });
+    expect(lastPlan(previews)?.valid).toBe(true);
+    controller.handleEnd({ x: 6, y: 5 });
+    expect(commits).toHaveLength(1);
+    expect(commits[0]?.to).toEqual({ x: 6, y: 2 });
+  });
+
+  it('trouve la sortie du tunnel quand le drag s’arrête sur le relief', () => {
+    const map = makeMap();
+    for (let x = 4; x <= 6; x += 1) map.heightMap[x + 4 * map.width] = 7;
+    const { controller, previews, commits, settings } = harness(map);
+    settings.tunnel = { kind: 'rail' };
+    controller.setSettings(settings);
+    controller.setTool('tunnel');
+    controller.handleBegin({ x: 2, y: 4 });
+    // Le curseur est sur la colline (hauteur 7) et non sur un portail.
+    controller.handleMove({ x: 5, y: 5 });
+    const plan = lastPlan(previews);
+    expect(plan?.from).toEqual({ x: 2, y: 4 });
+    expect(plan?.to).toEqual({ x: 7, y: 4 });
+    expect(plan?.valid).toBe(true);
+    expect(plan?.tunnel?.depth).toBe(3);
+    controller.handleEnd({ x: 5, y: 5 });
+    expect(commits).toHaveLength(1);
+    expect(commits[0]?.to).toEqual({ x: 7, y: 4 });
+  });
+
+  it('refuse un clic sans drag avec un message explicite', () => {
+    const { controller, notices, commits } = harness();
+    controller.setTool('bridge');
+    controller.handleBegin({ x: 2, y: 2 });
+    controller.handleEnd({ x: 2, y: 2 });
+    expect(commits).toHaveLength(0);
+    expect(notices.some((text) => text.includes('Glissez d’une culée'))).toBe(true);
   });
 
   it('prévisualise et construit un tunnel entre deux portails', () => {

@@ -28,6 +28,8 @@ import {
   planTerraform,
   planTree,
   planTunnel,
+  resolveTunnelSpan,
+  structureDragTarget,
   type BuildPlan,
   type BuildPoint,
   type BuildSettings,
@@ -122,12 +124,14 @@ export class BuildController {
   /** Survol libre (hors drag) : aperçu d'une tuile. */
   handleHover(point: BuildPoint | null): void {
     if (!this.tool) return;
+    // Pendant un drag, la destination vient exclusivement de `handleMove`.
+    // Laisser le survol écrire `hover` ici ferait rater la mise à jour du plan
+    // (même tuile) et figerait l'aperçu sur la culée de départ.
+    if (this.dragging) return;
     if (samePoint(this.hover, point)) return;
     this.hover = point;
-    if (!this.dragging) {
-      if (point) this.refresh();
-      else this.clearPreview();
-    }
+    if (point) this.refresh();
+    else this.clearPreview();
   }
 
   /** Bouton gauche enfoncé : début d'un segment A→B. */
@@ -189,6 +193,44 @@ export class BuildController {
     this.plan = null;
     this.lastKey = '';
     this.options.onPreview(null);
+  }
+
+  /**
+   * Destination réelle d'un pont ou d'un tunnel.
+   *
+   * - un drag est projeté sur l'axe dominant pour garantir un ouvrage droit ;
+   * - un tunnel cherche sa sortie au même niveau le long de l'axe, comme
+   *   l'entrée OpenTTD, au lieu d'exiger que le curseur vise un portail ;
+   * - un simple survol garde l'aperçu par défaut de trois tuiles.
+   */
+  private structureTarget(
+    tool: 'bridge' | 'tunnel',
+    from: BuildPoint,
+    hover: BuildPoint | null,
+    map: MapSnapshot,
+    company: number | undefined,
+  ): BuildPoint {
+    const fallback = defaultStructureTarget(from, map);
+    if (!this.dragging || !hover) {
+      if (tool === 'bridge') return structureDragTarget(from, fallback, map);
+      return (
+        resolveTunnelSpan(map, from, fallback, {
+          settings: this.settings.tunnel,
+          ...(company !== undefined ? { company } : {}),
+        })?.to ?? fallback
+      );
+    }
+
+    const snapped = structureDragTarget(from, hover, map);
+    if (tool === 'bridge') return snapped;
+    if (snapped.x === from.x && snapped.y === from.y) return snapped;
+
+    return (
+      resolveTunnelSpan(map, from, snapped, {
+        settings: this.settings.tunnel,
+        ...(company !== undefined ? { company } : {}),
+      })?.to ?? snapped
+    );
   }
 
   private refresh(): void {
@@ -266,12 +308,10 @@ export class BuildController {
     } else if (tool === 'crossing') {
       plan = planCrossing({ ...shared });
     } else if (tool === 'bridge') {
-      const target = to ?? defaultStructureTarget(from, map);
+      const target = this.structureTarget('bridge', from, to ?? null, map, company?.id);
       plan = planBridge({ ...shared, to: target, settings: this.settings.bridge });
     } else if (tool === 'tunnel') {
-      // La portée d'un tunnel se lit dans le relief : on prévisualise un
-      // tunnel court vers l'est à défaut de drag.
-      const target = to ?? defaultStructureTarget(from, map);
+      const target = this.structureTarget('tunnel', from, to ?? null, map, company?.id);
       plan = planTunnel({ ...shared, to: target, settings: this.settings.tunnel });
     } else {
       plan = planBuild({
