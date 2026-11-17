@@ -334,8 +334,14 @@ describe('VehicleLayer et nouveaux modèles', () => {
         if (id !== null) seenIds.add(id);
         target.mesh.getMatrixAt(instance, matrix);
         matrix.decompose(position, quaternion, scale);
-        expect(position.y).toBeGreaterThan(0);
-        expect(position.y).toBeLessThan(0.1);
+        if (target.mesh.name === 'vehicles-ship') {
+          // La coque est enfoncée sous la ligne de flottaison (#215).
+          expect(position.y).toBeLessThan(0);
+          expect(position.y).toBeGreaterThan(-0.3);
+        } else {
+          expect(position.y).toBeGreaterThan(0);
+          expect(position.y).toBeLessThan(0.1);
+        }
       }
     }
     expect(seenIds.size).toBe(300);

@@ -5,6 +5,10 @@ import { sampleHeightWorld } from '../src/game/mapGrid';
 import {
   SHORE_MAX_DISTANCE,
   WATER_BED_DROP,
+  WATER_CASCADE_MAX_RUN,
+  WATER_CASCADE_MIN_RUN,
+  WATER_CASCADE_RUN_RATIO,
+  WATER_CASCADE_TOP_INSET,
   WATER_DEPTH_RANGE,
   WATER_DEPTH_SPAN,
   WATER_FOAM_DEPTH,
@@ -22,6 +26,8 @@ import {
   sampleCornerField,
   sampleField,
   waterBedHeight,
+  waterCascadeOffset,
+  waterCascadeRun,
   waterDepthAt,
   waterDepthFactor,
   waterFoamAmount,
@@ -504,6 +510,8 @@ describe('parois de rive (#205)', () => {
     const wall = waterWallForEdge(map, fields, 5, 5, -1, 0);
     expect(wall).not.toBeNull();
     expect(wall?.water).toBe(true);
+    expect(wall?.kind).toBe('lock');
+    expect(wall?.run).toBe(0);
     expect(wall?.bottom).toBeCloseTo(waterSurfaceHeight(0), 6);
     expect(wall?.top).toBeCloseTo(waterSurfaceHeight(4) + WATER_WAVE_AMPLITUDE, 6);
     expect((wall?.top ?? 0) - (wall?.bottom ?? 0)).toBeGreaterThan(1.9);
@@ -513,7 +521,60 @@ describe('parois de rive (#205)', () => {
     const bank = waterWallForEdge(map, fields, 6, 5, 1, 0);
     expect(bank).not.toBeNull();
     expect(bank?.water).toBe(false);
+    expect(bank?.kind).toBe('bank');
+    expect(bank?.run).toBe(0);
     expect(bank?.bottom).toBeLessThan(waterSurfaceHeight(4));
+  });
+
+  it('transforme une chute libre en rideau incliné, pas en cube', () => {
+    const width = 8;
+    const height = 8;
+    const size = width * height;
+    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.grass);
+    const heightMap = new Uint8Array(size).fill(2);
+    // Rivière haute (niveau 4) qui dévale dans une nappe basse (niveau 0).
+    kind[3 * width + 3] = TILE_KIND_INDEX.river;
+    heightMap[3 * width + 3] = 4;
+    kind[3 * width + 4] = TILE_KIND_INDEX.river;
+    heightMap[3 * width + 4] = 0;
+    const map: MapSnapshot = {
+      width,
+      height,
+      kind,
+      heightMap,
+      owner: new Uint8Array(size).fill(255),
+      slope: new Uint8Array(size),
+      flags: new Uint8Array(size),
+      trackBits: new Uint8Array(size),
+    };
+    const fields = buildWaterHeightFields(map);
+    const cascade = waterWallForEdge(map, fields, 3, 3, 1, 0);
+    expect(cascade).not.toBeNull();
+    expect(cascade?.water).toBe(true);
+    expect(cascade?.kind).toBe('cascade');
+    expect(cascade?.run).toBeGreaterThanOrEqual(WATER_CASCADE_MIN_RUN);
+    expect(cascade?.run).toBeLessThanOrEqual(WATER_CASCADE_MAX_RUN);
+    expect(cascade?.run).toBeCloseTo(
+      waterCascadeRun((cascade?.top ?? 0) - (cascade?.bottom ?? 0)),
+      6,
+    );
+    // Le rideau mord légèrement sur la nappe haute et avance vers la basse.
+    expect(waterCascadeOffset(0, cascade?.run ?? 0)).toBeCloseTo(-WATER_CASCADE_TOP_INSET, 6);
+    expect(waterCascadeOffset(1, cascade?.run ?? 0)).toBeCloseTo(cascade?.run ?? 0, 6);
+    let previous = -Infinity;
+    for (let step = 0; step <= 10; step += 1) {
+      const offset = waterCascadeOffset(step / 10, cascade?.run ?? 0);
+      expect(Number.isFinite(offset)).toBe(true);
+      expect(offset).toBeGreaterThanOrEqual(previous);
+      previous = offset;
+    }
+    // La course grandit avec la chute mais reste bornée.
+    expect(waterCascadeRun(0)).toBe(0);
+    expect(waterCascadeRun(1)).toBeGreaterThan(waterCascadeRun(0.4));
+    expect(waterCascadeRun(1)).toBeLessThanOrEqual(waterCascadeRun(4));
+    expect(waterCascadeRun(10)).toBe(WATER_CASCADE_MAX_RUN);
+    expect(WATER_CASCADE_RUN_RATIO).toBeGreaterThan(0);
+    expect(WATER_CASCADE_RUN_RATIO).toBeLessThan(1);
   });
 
   it('ne crée aucune paroi quand la berge atteint la surface', () => {
