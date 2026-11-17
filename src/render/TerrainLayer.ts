@@ -25,9 +25,10 @@
  * coplanaire ni z-fighting. Le shader mélange la teinte selon la profondeur
  * mesurée à la côte, anime la houle et les reflets, et dessine une écume
  * déterministe sur les berges. Les marches légitimes reçoivent un ouvrage
- * dédié (#214) : rideau de cascade incliné et animé entre deux nappes libres,
- * bajoyer de pierre vertical autour d'une écluse, soutènement minéral sous une
- * berge (#205).
+ * dédié (#214/#226) : rideau continu sur toute la largeur d'une marche,
+ * vertical en haut puis incliné vers la nappe basse, avec écume transparente
+ * au pied, bajoyer de pierre vertical autour d'une écluse, soutènement minéral
+ * sous une berge (#205).
  */
 
 import * as THREE from 'three';
@@ -58,6 +59,7 @@ import {
   WATER_BED_DROP,
   WATER_CASCADE_FOAM_LENGTH,
   WATER_CASCADE_FOAM_LIFT,
+  WATER_CASCADE_LATERAL_SEGMENTS,
   WATER_CASCADE_SEGMENTS,
   WATER_SHADER_CONSTANTS,
   buildShoreFields,
@@ -65,7 +67,8 @@ import {
   sampleCornerField,
   sampleField,
   waterBedHeight,
-  waterCascadeOffset,
+  waterCascadeLateralOffset,
+  waterCascadeSpan,
   waterDepthAt,
   waterDepthFactor,
   waterWallForEdge,
@@ -168,6 +171,7 @@ interface Chunk {
   water: THREE.Mesh | null;
   wall: THREE.Mesh | null;
   cascade: THREE.Mesh | null;
+  foam: THREE.Mesh | null;
 }
 
 interface MapArrays {
@@ -211,6 +215,7 @@ export class TerrainLayer {
   private waterMaterial: THREE.MeshPhongMaterial;
   private wallMaterial: THREE.MeshBasicMaterial;
   private cascadeMaterial: THREE.MeshPhongMaterial;
+  private cascadeFoamMaterial: THREE.MeshBasicMaterial;
   private waterTime: { value: number } = { value: 0 };
   private nightUniform: { value: number } = { value: 0 };
   private skinUniform: { value: number } = { value: 1 };
@@ -389,6 +394,7 @@ ${SKIN_SHADER_CONSTANTS}`,
       fog: true,
     });
     this.cascadeMaterial = this.createCascadeMaterial();
+    this.cascadeFoamMaterial = this.createCascadeFoamMaterial();
     // Fond océanique : masque la découpe de la carte et donne une île crédible.
     this.oceanGeometry = new THREE.PlaneGeometry(1, 1);
     this.oceanGeometry.rotateX(-Math.PI / 2);
@@ -583,7 +589,10 @@ ${SKIN_NOISE_GLSL}`,
       vertexColors: true,
       specular: 0xd8f3ff,
       shininess: 140,
-      side: THREE.DoubleSide,
+      // Le rideau n'a de sens que vu depuis l'aval. Vu de l'amont, la nappe
+      // amont masque la chute : dessiner la face arrière ferait un mur de
+      // boîte au-dessus de l'eau.
+      side: THREE.FrontSide,
       transparent: false,
       depthWrite: true,
       // Léger biais derrière la nappe : le pied du rideau ne peut pas clignoter
@@ -661,6 +670,83 @@ ${SKIN_NOISE_GLSL}`,
         );
     };
     material.customProgramCacheKey = () => 'opentt3d-waterfall-v1';
+    return material;
+  }
+
+  /**
+   * Matériau de l'écume au pied d'une chute (#226).
+   *
+   * Contrairement au rideau, l'écume est transparente : elle se fond dans la
+   * nappe basse au lieu de dessiner un tablier opaque en relief. Un bruit
+   * animé fait bouillonner la frange, et l'attribut `aAlpha` éteint le bord
+   * extérieur sans arête rectangulaire visible.
+   */
+  private createCascadeFoamMaterial(): THREE.MeshBasicMaterial {
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      transparent: true,
+      opacity: 1,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      fog: true,
+      // L'écume repose juste au-dessus de la nappe basse : le biais évite tout
+      // clignotement avec les quads d'eau qu'elle recouvre.
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = this.waterTime;
+      shader.uniforms.uNight = this.nightUniform;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+attribute float aAlpha;
+varying float vFoamAlpha;
+varying vec3 vFoamWorld;
+varying float vFoamDistance;`,
+        )
+        .replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+  vec4 foamWorld = modelMatrix * vec4( transformed, 1.0 );
+  vFoamWorld = foamWorld.xyz;
+  vFoamDistance = -( modelViewMatrix * vec4( transformed, 1.0 ) ).z;
+  vFoamAlpha = aAlpha;`,
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+uniform float uTime;
+uniform float uNight;
+varying float vFoamAlpha;
+varying vec3 vFoamWorld;
+varying float vFoamDistance;
+${SKIN_NOISE_GLSL}`,
+        )
+        .replace(
+          '#include <color_fragment>',
+          `#include <color_fragment>
+  float foamFade = 1.0 - smoothstep( 75.0, 210.0, vFoamDistance );
+  float foamNoise = skinNoise( vec2(
+    vFoamWorld.x * 9.0 + vFoamWorld.z * 3.0,
+    vFoamWorld.z * 8.0 - uTime * 1.7
+  ) );
+  float foamNoise2 = skinNoise( vec2(
+    vFoamWorld.x * 17.0 - vFoamWorld.z * 5.0 + 4.1,
+    vFoamWorld.z * 15.0 + uTime * 2.3
+  ) );
+  float foamChurn = smoothstep( 0.32, 0.82, foamNoise * 0.7 + foamNoise2 * 0.42 );
+  vec3 foamTint = mix( vec3( 0.55, 0.78, 0.8 ), vec3( 0.92, 0.98, 0.98 ), 0.35 + foamChurn * 0.65 );
+  diffuseColor.rgb = mix( diffuseColor.rgb, foamTint, 0.35 + foamChurn * 0.45 );
+  diffuseColor.a *= vFoamAlpha * ( 0.45 + foamChurn * 0.55 ) * foamFade;
+  diffuseColor.rgb += vec3( 0.02, 0.035, 0.045 ) * uNight;`,
+        );
+    };
+    material.customProgramCacheKey = () => 'opentt3d-waterfall-foam-v1';
     return material;
   }
 
@@ -799,6 +885,10 @@ ${SKIN_NOISE_GLSL}`,
         this.group.remove(existing.cascade);
         existing.cascade.geometry.dispose();
       }
+      if (existing.foam) {
+        this.group.remove(existing.foam);
+        existing.foam.geometry.dispose();
+      }
       this.chunks.delete(key);
     }
 
@@ -867,7 +957,7 @@ ${SKIN_NOISE_GLSL}`,
     // dessus. L'échantillonnage est identique à `sampleHeightWorld` (mêmes
     // coins, même bilinéaire), donc aucune couture aux jonctions de chunks.
     const bedAt = (x: number, z: number): number =>
-      sampleCornerField(heightFields.bed, map.width, map.height, x, z);
+      sampleCornerField(heightFields.bedRender, map.width, map.height, x, z);
 
     let vertex = 0;
     for (let gz = 0; gz < nz; gz += 1) {
@@ -1062,8 +1152,8 @@ ${SKIN_NOISE_GLSL}`,
       this.group.add(water);
     }
 
-    // --- Parois de rive (#205) et cascades (#214) : une face par arête.
-    const { wall, cascade } = this.buildWaterWalls(
+    // --- Parois de rive (#205), cascades (#226) et écume : une face par arête.
+    const { wall, cascade, foam } = this.buildWaterWalls(
       map,
       heightFields,
       x0,
@@ -1073,7 +1163,7 @@ ${SKIN_NOISE_GLSL}`,
       cx,
       cy,
     );
-    this.chunks.set(key, { cx, cy, ground, water, wall, cascade });
+    this.chunks.set(key, { cx, cy, ground, water, wall, cascade, foam });
   }
 
   /**
@@ -1091,26 +1181,31 @@ ${SKIN_NOISE_GLSL}`,
     height: number,
     cx: number,
     cy: number,
-  ): { wall: THREE.Mesh | null; cascade: THREE.Mesh | null } {
+  ): { wall: THREE.Mesh | null; cascade: THREE.Mesh | null; foam: THREE.Mesh | null } {
     const wallPositions: number[] = [];
     const wallColours: number[] = [];
     const cascadePositions: number[] = [];
     const cascadeColours: number[] = [];
     const cascadeFoam: number[] = [];
+    const cascadeIndices: number[] = [];
+    const foamPositions: number[] = [];
+    const foamColours: number[] = [];
+    const foamAlphas: number[] = [];
+    const foamIndices: number[] = [];
     const bankTop = { r: 0, g: 0, b: 0 };
     const bankBottom = { r: 0, g: 0, b: 0 };
     const lockTop = { r: 0, g: 0, b: 0 };
     const lockBottom = { r: 0, g: 0, b: 0 };
     const cascadeTop = { r: 0, g: 0, b: 0 };
     const cascadeBottom = { r: 0, g: 0, b: 0 };
-    const foam = { r: 0, g: 0, b: 0 };
+    const foamColour = { r: 0, g: 0, b: 0 };
     hexToLinearRgb(TERRAIN_SKIN_COLOURS.wetSand, bankTop);
     hexToLinearRgb(TERRAIN_SKIN_COLOURS.rockDark, bankBottom);
     hexToLinearRgb(LOCK_WALL_TOP_COLOUR, lockTop);
     hexToLinearRgb(LOCK_WALL_BOTTOM_COLOUR, lockBottom);
     hexToLinearRgb(WATER_MID_COLOUR, cascadeTop);
     hexToLinearRgb(mixColour(WATER_SHALLOW_COLOUR, CASCADE_FOAM_COLOUR, 0.42), cascadeBottom);
-    hexToLinearRgb(CASCADE_FOAM_COLOUR, foam);
+    hexToLinearRgb(CASCADE_FOAM_COLOUR, foamColour);
 
     const pushWall = (
       x: number,
@@ -1131,6 +1226,17 @@ ${SKIN_NOISE_GLSL}`,
       cascadePositions.push(x, y, z);
       cascadeColours.push(colour.r, colour.g, colour.b);
       cascadeFoam.push(foamAmount);
+    };
+    const pushFoam = (
+      x: number,
+      z: number,
+      y: number,
+      colour: { r: number; g: number; b: number },
+      alpha: number,
+    ): void => {
+      foamPositions.push(x, y, z);
+      foamColours.push(colour.r, colour.g, colour.b);
+      foamAlphas.push(alpha);
     };
 
     /** Paroi verticale : bajoyer de pierre ou soutènement de berge. */
@@ -1177,103 +1283,115 @@ ${SKIN_NOISE_GLSL}`,
     };
 
     /**
-     * Rideau de cascade : profil incurvé du haut de la nappe haute jusqu'au
-     * pied, puis lèvre et tablier d'écume sur la nappe basse.
+     * Rideau de cascade : grille indexée continue sur toute la largeur de la
+     * marche, verticale en haut puis évasée vers la nappe basse (#226).
+     *
+     * Les bords latéraux restent exactement sur les coins de l'arête : deux
+     * arêtes voisines partagent leurs extrémités et le rideau ne laisse aucun
+     * triangle isolé aux angles. Les sommets sont partagés dans la grille,
+     * donc les normales sont lissées et les facettes ne réapparaissent pas.
+     * L'écume est un maillage séparé, transparent et posé sur la nappe basse.
      */
-    const emitCascade = (segment: WaterWallSegment, dx: number, dy: number): void => {
+    const emitCascade = (
+      segment: WaterWallSegment,
+      dx: number,
+      dy: number,
+      wx: number,
+      wy: number,
+    ): void => {
       const { x0: ax, z0: az, x1: bx, z1: bz, bottom, top, run } = segment;
+      const span = waterCascadeSpan(map, heightFields, wx, wy, dx, dy);
       const rows = WATER_CASCADE_SEGMENTS;
-      const lefts: { x: number; z: number; y: number }[] = [];
-      const rights: { x: number; z: number; y: number }[] = [];
+      const cols = WATER_CASCADE_LATERAL_SEGMENTS;
+      const curtainStart = cascadePositions.length / 3;
+      const bottomEdge: { x: number; z: number }[] = [];
+
       for (let row = 0; row <= rows; row += 1) {
         const t = row / rows;
-        const out = waterCascadeOffset(t, run);
         const y = top + (bottom - top) * t;
         const tint = t * t * (3 - 2 * t);
-        lefts.push({ x: ax + dx * out, z: az + dy * out, y });
-        rights.push({ x: bx + dx * out, z: bz + dy * out, y });
         const colour = {
           r: cascadeTop.r + (cascadeBottom.r - cascadeTop.r) * tint,
           g: cascadeTop.g + (cascadeBottom.g - cascadeTop.g) * tint,
           b: cascadeTop.b + (cascadeBottom.b - cascadeTop.b) * tint,
         };
         const foamAmount = Math.max(0, (t - 0.55) / 0.45);
-        pushCascade(lefts[row]!.x, lefts[row]!.z, y, colour, foamAmount);
-        pushCascade(rights[row]!.x, rights[row]!.z, y, colour, foamAmount);
+        for (let col = 0; col <= cols; col += 1) {
+          const u = span.uStart + (span.uEnd - span.uStart) * (col / cols);
+          const out = waterCascadeLateralOffset(t, u, run);
+          const x = ax + (bx - ax) * (col / cols) + dx * out;
+          const z = az + (bz - az) * (col / cols) + dy * out;
+          pushCascade(x, z, y, colour, foamAmount);
+          if (row === rows) bottomEdge.push({ x, z });
+        }
       }
       for (let row = 0; row < rows; row += 1) {
-        const leftA = lefts[row]!;
-        const rightA = rights[row]!;
-        const leftB = lefts[row + 1]!;
-        const rightB = rights[row + 1]!;
-        const tA = row / rows;
-        const tB = (row + 1) / rows;
-        const colourA = {
-          r: cascadeTop.r + (cascadeBottom.r - cascadeTop.r) * tA,
-          g: cascadeTop.g + (cascadeBottom.g - cascadeTop.g) * tA,
-          b: cascadeTop.b + (cascadeBottom.b - cascadeTop.b) * tA,
-        };
-        const colourB = {
-          r: cascadeTop.r + (cascadeBottom.r - cascadeTop.r) * tB,
-          g: cascadeTop.g + (cascadeBottom.g - cascadeTop.g) * tB,
-          b: cascadeTop.b + (cascadeBottom.b - cascadeTop.b) * tB,
-        };
-        const foamA = Math.max(0, (tA - 0.55) / 0.45);
-        const foamB = Math.max(0, (tB - 0.55) / 0.45);
-        pushCascade(leftA.x, leftA.z, leftA.y, colourA, foamA);
-        pushCascade(rightA.x, rightA.z, rightA.y, colourA, foamA);
-        pushCascade(rightB.x, rightB.z, rightB.y, colourB, foamB);
-        pushCascade(leftA.x, leftA.z, leftA.y, colourA, foamA);
-        pushCascade(rightB.x, rightB.z, rightB.y, colourB, foamB);
-        pushCascade(leftB.x, leftB.z, leftB.y, colourB, foamB);
+        for (let col = 0; col < cols; col += 1) {
+          const a = curtainStart + row * (cols + 1) + col;
+          const b = a + 1;
+          const c = a + cols + 1;
+          const d = c + 1;
+          // Le rideau n'est visible que depuis l'aval : la face amont est
+          // laissée ouverte pour ne pas dessiner un mur vertical en boîte
+          // lorsqu'on regarde la chute depuis l'amont (#226).
+          if (dx === 1 || dy === -1) cascadeIndices.push(a, b, c, b, d, c);
+          else cascadeIndices.push(a, c, b, b, c, d);
+        }
       }
 
-      // Lèvre verticale puis tablier horizontal : l'écume déborde sur la nappe
-      // basse et masque l'arête droite du pied de chute. Le bord extérieur est
-      // ondulé, pour ne jamais dessiner une planche rectangulaire sur l'eau.
-      const lateral = 6;
+      // Écume au pied : frange horizontale qui épouse la nappe basse, bord
+      // extérieur ondulé et transparent. Une petite bande verticale de
+      // bouillonnement masque la jointure entre le rideau et l'eau.
+      const foamStart = foamPositions.length / 3;
       const lipY = bottom + WATER_CASCADE_FOAM_LIFT;
-      for (let step = 0; step < lateral; step += 1) {
-        const u0 = step / lateral;
-        const u1 = (step + 1) / lateral;
-        const inner0 = {
-          x: ax + (bx - ax) * u0 + dx * run,
-          z: az + (bz - az) * u0 + dy * run,
-        };
-        const inner1 = {
-          x: ax + (bx - ax) * u1 + dx * run,
-          z: az + (bz - az) * u1 + dy * run,
-        };
-        const tongue0 =
-          WATER_CASCADE_FOAM_LENGTH *
-          (0.62 + 0.38 * Math.sin(Math.PI * u0)) *
-          (0.86 + 0.14 * Math.sin(u0 * 9.7 + ax * 1.7 + az * 1.3));
-        const tongue1 =
-          WATER_CASCADE_FOAM_LENGTH *
-          (0.62 + 0.38 * Math.sin(Math.PI * u1)) *
-          (0.86 + 0.14 * Math.sin(u1 * 9.7 + ax * 1.7 + az * 1.3));
-        const outer0 = {
-          x: inner0.x + dx * tongue0,
-          z: inner0.z + dy * tongue0,
-        };
-        const outer1 = {
-          x: inner1.x + dx * tongue1,
-          z: inner1.z + dy * tongue1,
-        };
-        // Lèvre : raccorde le bas du rideau au tablier sans marche verticale.
-        pushCascade(inner0.x, inner0.z, bottom, foam, 1);
-        pushCascade(inner1.x, inner1.z, bottom, foam, 1);
-        pushCascade(inner1.x, inner1.z, lipY, foam, 1);
-        pushCascade(inner0.x, inner0.z, bottom, foam, 1);
-        pushCascade(inner1.x, inner1.z, lipY, foam, 1);
-        pushCascade(inner0.x, inner0.z, lipY, foam, 1);
-        // Tablier d'écume, bord extérieur ondulé.
-        pushCascade(inner0.x, inner0.z, lipY, foam, 1);
-        pushCascade(outer0.x, outer0.z, lipY, foam, 1);
-        pushCascade(outer1.x, outer1.z, lipY, foam, 1);
-        pushCascade(inner0.x, inner0.z, lipY, foam, 1);
-        pushCascade(outer1.x, outer1.z, lipY, foam, 1);
-        pushCascade(inner1.x, inner1.z, lipY, foam, 1);
+      const churnY = bottom + 0.1;
+      for (let col = 0; col <= cols; col += 1) {
+        const u = span.uStart + (span.uEnd - span.uStart) * (col / cols);
+        const inner = bottomEdge[col] ?? { x: ax, z: az };
+        const lateral = Math.sin(Math.PI * u);
+        const wave = 0.82 + 0.18 * Math.sin(u * 9.7 + ax * 1.7 + az * 1.3);
+        const tongue = WATER_CASCADE_FOAM_LENGTH * lateral ** 0.7 * wave;
+        // Bouillonnement vertical au contact du rideau.
+        pushFoam(inner.x + dx * 0.02, inner.z + dy * 0.02, bottom, foamColour, 0.88 * lateral);
+        pushFoam(inner.x + dx * 0.02, inner.z + dy * 0.02, churnY, foamColour, 0.16 * lateral);
+        // Frange horizontale, du pied du rideau vers la nappe basse.
+        pushFoam(inner.x, inner.z, lipY, foamColour, 0.9 * lateral);
+        pushFoam(inner.x + dx * tongue, inner.z + dy * tongue, lipY, cascadeBottom, 0.02);
+      }
+      for (let col = 0; col < cols; col += 1) {
+        const a = foamStart + col * 4;
+        const b = a + 1;
+        const c = a + 4;
+        const d = c + 1;
+        // Bande verticale de bouillonnement.
+        foamIndices.push(a, c, b, b, c, d);
+        // Frange horizontale.
+        foamIndices.push(a + 2, c + 2, b + 2, b + 2, c + 2, d + 2);
+      }
+
+      // Raccord de rive : aux deux extrémités du rideau, une joue verticale
+      // sombre ferme le vide entre la nappe haute et la berge basse. Sans
+      // elle, on voit la tranche du lit creusé comme un triangle sombre.
+      const sideWidth = 0.24;
+      const sideTop = {
+        r: bankBottom.r + (bankTop.r - bankBottom.r) * 0.28,
+        g: bankBottom.g + (bankTop.g - bankBottom.g) * 0.28,
+        b: bankBottom.b + (bankTop.b - bankBottom.b) * 0.28,
+      };
+      const sides: { x: number; z: number }[] = [];
+      if (span.uStart <= 1e-6) sides.push({ x: ax, z: az });
+      if (span.uEnd >= 1 - 1e-6) sides.push({ x: bx, z: bz });
+      for (const side of sides) {
+        const innerX = side.x;
+        const innerZ = side.z;
+        const outerX = innerX + dx * sideWidth;
+        const outerZ = innerZ + dy * sideWidth;
+        pushWall(innerX, innerZ, bottom, bankBottom);
+        pushWall(outerX, outerZ, bottom, bankBottom);
+        pushWall(outerX, outerZ, top, sideTop);
+        pushWall(innerX, innerZ, bottom, bankBottom);
+        pushWall(outerX, outerZ, top, sideTop);
+        pushWall(innerX, innerZ, top, sideTop);
       }
     };
 
@@ -1291,7 +1409,7 @@ ${SKIN_NOISE_GLSL}`,
         ] as const) {
           const segment = waterWallForEdge(map, heightFields, wx, wy, dx, dy);
           if (!segment) continue;
-          if (segment.kind === 'cascade') emitCascade(segment, dx, dy);
+          if (segment.kind === 'cascade') emitCascade(segment, dx, dy, wx, wy);
           else emitWall(segment);
         }
       }
@@ -1317,6 +1435,7 @@ ${SKIN_NOISE_GLSL}`,
       geometry.setAttribute('position', new THREE.Float32BufferAttribute(cascadePositions, 3));
       geometry.setAttribute('color', new THREE.Float32BufferAttribute(cascadeColours, 3));
       geometry.setAttribute('aFoam', new THREE.Float32BufferAttribute(cascadeFoam, 1));
+      geometry.setIndex(cascadeIndices);
       geometry.computeVertexNormals();
       geometry.computeBoundingSphere();
       cascade = new THREE.Mesh(geometry, this.cascadeMaterial);
@@ -1326,7 +1445,24 @@ ${SKIN_NOISE_GLSL}`,
       this.group.add(cascade);
     }
 
-    return { wall, cascade };
+    let foam: THREE.Mesh | null = null;
+    if (foamPositions.length > 0) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(foamPositions, 3));
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute(foamColours, 3));
+      geometry.setAttribute('aAlpha', new THREE.Float32BufferAttribute(foamAlphas, 1));
+      geometry.setIndex(foamIndices);
+      geometry.computeVertexNormals();
+      geometry.computeBoundingSphere();
+      foam = new THREE.Mesh(geometry, this.cascadeFoamMaterial);
+      foam.name = `waterfall-foam-${cx}-${cy}`;
+      foam.receiveShadow = false;
+      // Après la nappe transparente : l'écume se mélange à l'eau basse.
+      foam.renderOrder = 3;
+      this.group.add(foam);
+    }
+
+    return { wall, cascade, foam };
   }
 
   /**
@@ -1353,7 +1489,7 @@ ${SKIN_NOISE_GLSL}`,
         const offset = (hz * haloNx + hx) * 3;
         haloPositions[offset] = x;
         haloPositions[offset + 1] = sampleCornerField(
-          heightFields.bed,
+          heightFields.bedRender,
           map.width,
           map.height,
           x,
@@ -1482,6 +1618,10 @@ ${SKIN_NOISE_GLSL}`,
         this.group.remove(chunk.cascade);
         chunk.cascade.geometry.dispose();
       }
+      if (chunk.foam) {
+        this.group.remove(chunk.foam);
+        chunk.foam.geometry.dispose();
+      }
     }
     this.chunks.clear();
   }
@@ -1496,6 +1636,7 @@ ${SKIN_NOISE_GLSL}`,
     this.waterMaterial.dispose();
     this.wallMaterial.dispose();
     this.cascadeMaterial.dispose();
+    this.cascadeFoamMaterial.dispose();
     this.map = null;
     this.previous = null;
     this.shoreFields = null;
