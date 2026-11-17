@@ -1499,13 +1499,14 @@ export function createStationPlatformGeometry(detail: BuildingDetail): THREE.Buf
 }
 
 /**
- * Arrêt de bus en passage (#218) : abri vitré, panneau d'arrêt et banc posés
- * sur le bord de la tuile, chaussée centrale laissée entièrement libre.
+ * Arrêt de bus en passage (#218, compacté #245) : petit abri vitré, panneau
+ * d'arrêt et banc posés sur la seule bande de trottoir, chaussée centrale
+ * entièrement libre.
  *
  * L'axe de la route est X dans l'espace local ; la couche ville applique un
- * quart de tour pour une route Y. Le modèle est volontairement asymétrique
- * (il reste groupé côté +Z) : `fitFootprint` ne le recentre donc pas, sinon
- * l'abri se retrouverait au milieu des voies.
+ * quart de tour pour une route Y. L'abri occupe environ 0,35 tuile de large et
+ * 0,10 tuile de profondeur, collé au bord +Z : `fitFootprint` ne le recentre
+ * donc pas, sinon il se retrouverait au milieu des voies.
  */
 export function createBusStopGeometry(detail: BuildingDetail): THREE.BufferGeometry {
   const builder = new ModelBuilder();
@@ -1514,36 +1515,36 @@ export function createBusStopGeometry(detail: BuildingDetail): THREE.BufferGeome
   const glass = GLASS;
   const pavement = 0x9c968a;
 
-  // Trottoir fin : il marque le côté chaussée sans couvrir la voie centrale.
-  builder.box(0.04, 0, 0.32, 0.8, 0.022, 0.2, pavement);
-  // Quatre montants de l'abri, côté sud uniquement.
-  for (const x of [-0.24, 0.32]) {
-    for (const z of [0.24, 0.4]) {
-      builder.box(x, 0.022, z, 0.028, 0.5, 0.028, frame);
+  // Bande de trottoir : uniquement le bord extérieur, la chaussée reste nue.
+  builder.box(0, 0, 0.439, 0.34, 0.016, 0.098, pavement);
+  // Quatre montants fins de l'abri, côté trottoir uniquement.
+  for (const x of [-0.14, 0.14]) {
+    for (const z of [0.41, 0.478]) {
+      builder.box(x, 0.016, z, 0.019, 0.3, 0.019, frame);
     }
   }
   // Panneaux vitrés arrière et latéraux : ils s'allument la nuit via `aWindow`.
-  builder.box(0.04, 0.06, 0.398, 0.55, 0.32, 0.018, glass, { window: 0.85 });
-  builder.box(-0.24, 0.06, 0.32, 0.018, 0.32, 0.15, glass, { window: 0.7 });
-  builder.box(0.32, 0.06, 0.32, 0.018, 0.32, 0.15, glass, { window: 0.7 });
-  // Toit plat et banc.
-  builder.box(0.04, 0.522, 0.32, 0.64, 0.035, 0.25, roof, { finish: MODEL_FINISH.satin });
-  builder.box(0.04, 0.11, 0.37, 0.3, 0.04, 0.08, 0x7a5c3a);
+  builder.box(0, 0.05, 0.476, 0.25, 0.23, 0.012, glass, { window: 0.85 });
+  builder.box(-0.14, 0.05, 0.444, 0.012, 0.23, 0.058, glass, { window: 0.7 });
+  builder.box(0.14, 0.05, 0.444, 0.012, 0.23, 0.058, glass, { window: 0.7 });
+  // Toit plat et banc adossé à la vitre arrière.
+  builder.box(0, 0.318, 0.444, 0.31, 0.024, 0.088, roof, { finish: MODEL_FINISH.satin });
+  builder.box(0, 0.072, 0.457, 0.17, 0.035, 0.038, 0x7a5c3a);
   if (detail >= 1) {
-    builder.box(0.04, 0.15, 0.4, 0.3, 0.18, 0.018, 0x7a5c3a);
+    builder.box(0, 0.14, 0.475, 0.17, 0.11, 0.012, 0x7a5c3a);
     // Petit luminaire chaud sous l'auvent.
-    builder.box(0.04, 0.5, 0.215, 0.05, 0.02, 0.025, 0xfff0c0, {
+    builder.box(0, 0.31, 0.405, 0.035, 0.016, 0.018, 0xfff0c0, {
       glow: MODEL_GLOW.headlight,
     });
   }
   // Panneau d'arrêt : mât + plaque blanche teintée aux couleurs de l'entreprise.
-  builder.box(-0.4, 0, 0.3, 0.022, 0.66, 0.022, frame);
-  builder.box(-0.4, 0.52, 0.3, 0.18, 0.16, 0.028, PURE_WHITE);
-  builder.plane(-0.4, 0.6, 0.2845, 0.1, 0.055, 0x3d4a55, Math.PI, 0);
+  builder.box(-0.155, 0, 0.462, 0.017, 0.4, 0.017, frame);
+  builder.box(-0.155, 0.318, 0.462, 0.05, 0.075, 0.02, PURE_WHITE);
+  builder.plane(-0.155, 0.358, 0.4515, 0.03, 0.03, 0x3d4a55, Math.PI, 0);
   if (detail >= 2) {
-    builder.box(-0.4, 0.3, 0.3, 0.12, 0.045, 0.022, PURE_WHITE);
+    builder.box(-0.155, 0.25, 0.462, 0.04, 0.03, 0.018, PURE_WHITE);
     // Poubelle discrète à l'autre bout du trottoir.
-    builder.cylinder(0.37, 0.022, 0.31, 0.05, 0.12, 0x4a4f52, { segments: 8 });
+    builder.cylinder(0.15, 0.016, 0.425, 0.022, 0.08, 0x4a4f52, { segments: 8 });
   }
   return fitFootprint(builder.build(), 0.49, false);
 }

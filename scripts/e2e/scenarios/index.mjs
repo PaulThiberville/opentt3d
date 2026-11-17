@@ -4,6 +4,7 @@
  */
 
 import { lateJoin } from './late-join.mjs';
+import { busStop245 } from './busStop245.mjs';
 import { depot233 } from './depot233.mjs';
 import { netLocal } from './net-local.mjs';
 import { photoMode } from './photo.mjs';
@@ -20,6 +21,7 @@ export const scenarios = [
   reports,
   photoMode,
   roadSlope,
+  busStop245,
   depot233,
   saveLoad,
   netLocal,

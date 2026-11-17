@@ -818,8 +818,11 @@ export function roadMarkingPaths(plan: TrackTilePlan): Pt2[][] {
 export const ROAD_LANE_OFFSET = 0.22;
 
 /** Longueur du corps d'une flèche de sens unique, en tuiles. */
-const ONEWAY_ARROW_LENGTH = 0.34;
-const ONEWAY_ARROW_HEAD = 0.12;
+export const ONEWAY_ARROW_LENGTH = 0.34;
+/** Longueur de la pointe de la flèche, en tuiles. */
+export const ONEWAY_ARROW_HEAD = 0.12;
+/** Largeur du trait des flèches de sens unique, en tuiles. */
+export const ONEWAY_ARROW_WIDTH = 0.052;
 
 /**
  * Flèches blanches d'une route à sens unique (#231).
@@ -927,7 +930,8 @@ function emitRoadMarkings(writer: GeometryWriter, map: MapSnapshot, plan: TrackT
   const surface = buildRoadSurface(map, plan);
   for (const path of roadMarkingPaths(plan)) addMarkingRibbon(writer, surface, path);
   // Sens unique (#231) : flèches dans chaque voie, en plus de l'axe central.
-  for (const path of roadOneWayArrowPaths(plan)) addMarkingRibbon(writer, surface, path, 0.052);
+  for (const path of roadOneWayArrowPaths(plan))
+    addMarkingRibbon(writer, surface, path, ONEWAY_ARROW_WIDTH);
 }
 
 function emitRoadTile(
