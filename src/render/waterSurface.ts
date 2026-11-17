@@ -1,16 +1,20 @@
 /**
- * Surface d'eau : profondeur, houle, écume, cascades et parois de rive, sans
- * dépendance Three.js.
+ * Surface d'eau : profondeur, houle, écume et parois de rive, sans dépendance
+ * Three.js.
  *
  * L'eau reste un quad par tuile (deux triangles). Le relief des vagues vient
  * du shader, la profondeur d'un champ de distance calculé une fois par carte :
  * la teinte et l'écume suivent donc la distance à la côte sans ajouter de
  * géométrie. La nappe s'étend d'une couronne sous la berge (#204) et une paroi
- * ferme les marches légitimes entre deux niveaux (#205). Une chute libre entre
- * deux nappes devient un rideau continu sur toute la largeur de la marche,
- * vertical en haut puis évasé vers l'aval, avec une écume transparente au
- * pied ; une écluse garde un bajoyer de pierre (#214/#226). Les helpers sont
- * purs et testables sous Node.
+ * ferme les marches légitimes entre deux biefs d'écluse (#205/#242). Une écluse
+ * garde un bajoyer de pierre vertical ; aucune cascade ni mur d'eau n'est
+ * généré. Les helpers sont purs et testables sous Node.
+ *
+ * Nivellement (#242) : chaque composante d'eau 4-connexe sans écluse est
+ * rendue au niveau de surface le plus bas qu'elle contient. Une rivière qui
+ * « descend » par marches dans les données OpenTTD redevient donc un seul plan
+ * horizontal, au lieu d'empiler des cubes d'eau. Les écluses, qui séparent deux
+ * composantes, restent des barrières et conservent leur dénivellation.
  *
  * Modèle de hauteur (correctif #176) : dans le protocole, la hauteur d'une
  * tuile d'eau est le niveau de sa surface dans OpenTTD. La surface 3D est donc
@@ -19,8 +23,9 @@
  * pont, quai, berge), même au creux de la houle.
  */
 
-import type { MapSnapshot } from '../engine/protocol';
+import type { MapSnapshot, TileKind } from '../engine/protocol';
 import { HEIGHT_SCALE, isWaterKind, tileKindFromIndex } from '../game/mapGrid';
+import { waterRenderLevels } from '../game/waterLevels';
 
 /**
  * Décalage de la surface sous le dessus de la tuile, en unités monde.
@@ -70,6 +75,20 @@ export const WATER_SHORE_OVERLAP = 1;
  */
 export const WATER_SHORE_FADE = 0.22;
 
+/**
+ * Hauteur libre minimale d'une berge recarveé au-dessus de la nappe abaissée.
+ *
+ * Quand une composante est ramenée à un niveau plus bas (#242), la moyenne de
+ * coins du terrain masquerait la rivière : les tuiles de berge mitoyennes
+ * gardent leur altitude et recouvrent le plan d'eau, surtout sur un chenal
+ * d'une tuile de large. On abaisse donc le lit **rendu** de la couronne de
+ * berge naturelle à `surface + WATER_SHORE_CLEARANCE`. La berge reste sèche
+ * (au-dessus de la nappe), mais la pente ne dépasse plus la surface et la
+ * rivière reste visible. La valeur 0,12 garantit qu'un coin mêlant une tuile
+ * d'eau et trois tuiles de berge reste sous la surface.
+ */
+export const WATER_SHORE_CLEARANCE = 0.12;
+
 /** Distance maximale suivie pour les plages et les berges (en tuiles). */
 export const SHORE_MAX_DISTANCE = 8;
 
@@ -114,12 +133,16 @@ export interface WaterHeightFields {
   /**
    * Lit utilisé par le maillage du terrain.
    *
-   * Sous une marche de niveau, le lit physique d'une tuile haute reste à son
+   * Sous une marche d'écluse, le lit physique d'une tuile haute reste à son
    * niveau : l'interpolation bilinéaire des coins ferait remonter une grande
-   * rampe de terre au-dessus de la nappe basse, lue comme un plateau ou un
-   * triangle étiré. Les tuiles d'eau qui dominent une nappe plus basse sont
-   * donc creusées ici jusqu'à passer sous cette nappe : la rampe disparaît
-   * sous l'eau et le rideau de chute peut fermer proprement la marche.
+   * rampe de terre au-dessus de la nappe basse. Les tuiles d'eau qui dominent
+   * une nappe plus basse sont donc creusées ici jusqu'à passer sous cette
+   * nappe.
+   *
+   * Quand une composante libre est aplanie plus bas (#242), la couronne de
+   * berge naturelle est aussi abaissée juste au-dessus de la nouvelle surface
+   * (`WATER_SHORE_CLEARANCE`) : les coins du maillage ne recouvrent plus le
+   * chenal, la rivière reste visible et la berge reste sèche.
    */
   bedRender: Float32Array;
   /** Hauteur monde de la surface de l'eau (0 sur la terre). */
@@ -285,8 +308,12 @@ export function buildWaterHeightFields(map: MapSnapshot): WaterHeightFields {
   const shoreSurface = new Float32Array(size);
   const coverage = new Uint8Array(size);
   const isWater = new Uint8Array(size);
+  const lowered = new Uint8Array(size);
+  // Niveaux réellement rendus : une composante sans écluse est aplanie sur son
+  // niveau le plus bas (#242). Les écluses et la terre gardent leur hauteur.
+  const levels = waterRenderLevels(map);
   for (let index = 0; index < size; index += 1) {
-    const level = map.heightMap[index] ?? 0;
+    const level = levels[index] ?? 0;
     if (isWaterKind(tileKindFromIndex(map.kind[index] ?? 0))) {
       bed[index] = waterBedHeight(level);
       surface[index] = waterSurfaceHeight(level);
@@ -294,6 +321,7 @@ export function buildWaterHeightFields(map: MapSnapshot): WaterHeightFields {
       shoreSurface[index] = surface[index] ?? 0;
       coverage[index] = 1;
       isWater[index] = 1;
+      if (level < (map.heightMap[index] ?? 0)) lowered[index] = 1;
     } else {
       bed[index] = tileTopHeight(level);
     }
@@ -328,6 +356,36 @@ export function buildWaterHeightFields(map: MapSnapshot): WaterHeightFields {
       if (Number.isFinite(lowest)) {
         bedRender[index] = Math.min(bedRender[index] ?? 0, lowest - WATER_STEP_BED_MARGIN);
       }
+    }
+  }
+
+  // Rive recarveé sous une nappe abaissée (#242) : sans cela la moyenne de
+  // coins du terrain recouvre la rivière aplanie, surtout sur un chenal d'une
+  // tuile. On n'abaisse que le lit **rendu** des berges naturelles, jamais
+  // au-dessous de la surface : la berge reste sèche et les routes, arbres,
+  // bâtiments et quais gardent leur altitude d'origine.
+  const carveableKind = (kind: TileKind): boolean =>
+    kind === 'clear' || kind === 'grass' || kind === 'rough' || kind === 'coast';
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (isWater[index] === 1) continue;
+      if (!carveableKind(tileKindFromIndex(map.kind[index] ?? 0))) continue;
+      let reference = Infinity;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          const neighbour = ny * width + nx;
+          if (lowered[neighbour] !== 1) continue;
+          reference = Math.min(reference, surface[neighbour] ?? 0);
+        }
+      }
+      if (!Number.isFinite(reference)) continue;
+      const target = reference + WATER_SHORE_CLEARANCE;
+      if ((bedRender[index] ?? 0) > target) bedRender[index] = target;
     }
   }
 
@@ -491,50 +549,6 @@ export function waterPhysicalDepth(clearance: number): number {
 export const WATER_WALL_EPSILON = 0.02;
 
 /**
- * Course horizontale minimale d'un rideau de cascade, en tuiles.
- *
- * Une chute n'est jamais un plan vertical : le rideau s'écarte de la berge en
- * tombant, ce qui casse la silhouette cubique et dessine un pied d'écume.
- */
-export const WATER_CASCADE_MIN_RUN = 0.18;
-
-/** Course horizontale maximale : évite qu'une grande chute envahisse la nappe. */
-export const WATER_CASCADE_MAX_RUN = 0.72;
-
-/** Proportion de la hauteur de chute convertie en avancée horizontale. */
-export const WATER_CASCADE_RUN_RATIO = 0.42;
-
-/**
- * Partie haute du rideau laissée verticale.
- *
- * Au-dessus de cette fraction, le rideau reste dans le plan de la marche : son
- * arête supérieure coïncide exactement avec la nappe amont, sans lèvre
- * horizontale ni triangle qui dépasse. L'évasement ne commence qu'en dessous.
- */
-export const WATER_CASCADE_VERTICAL_START = 0.46;
-
-/** Nombre de bandes verticales du rideau (maillage léger mais courbe). */
-export const WATER_CASCADE_SEGMENTS = 5;
-
-/**
- * Nombre de bandes horizontales du rideau.
- *
- * Les bords latéraux restent exactement sur les coins de la marche : deux
- * arêtes voisines se raccordent sans trou ni triangle isolé, y compris aux
- * angles. Le centre s'évase pour casser l'effet de plaque plane.
- */
-export const WATER_CASCADE_LATERAL_SEGMENTS = 4;
-
-/** Recul du haut du rideau dans la tuile haute, pour masquer l'arête. */
-export const WATER_CASCADE_TOP_INSET = 0.05;
-
-/** Profondeur du tablier d'écume au pied de la chute, en tuiles. */
-export const WATER_CASCADE_FOAM_LENGTH = 0.32;
-
-/** Hauteur du tablier d'écume au-dessus de la nappe basse. */
-export const WATER_CASCADE_FOAM_LIFT = 0.018;
-
-/**
  * Creusement minimal du lit rendu sous la nappe aval d'une marche, en unités
  * monde. Il garantit qu'aucun sommet du terrain ne dépasse la surface basse.
  */
@@ -543,26 +557,26 @@ export const WATER_STEP_BED_MARGIN = 0.28;
 /**
  * Nature d'une marche d'eau :
  *
- * - `cascade` : deux nappes libres de niveaux différents (rivière qui
- *   dévale) → rideau incliné animé et écume ;
  * - `lock` : une écluse sépare deux biefs → bajoyer de pierre vertical ;
- * - `bank` : l'eau domine une berge sèche → soutènement minéral.
+ * - `bank` : l'eau domine une berge sèche ou le décor hors-limites →
+ *   soutènement minéral.
+ *
+ * Les nappes libres d'une même composante sont désormais aplanie sur un seul
+ * niveau (#242) : plus aucune cascade ni rideau d'eau n'est produit.
  */
-export type WaterWallKind = 'bank' | 'lock' | 'cascade';
+export type WaterWallKind = 'bank' | 'lock';
 
 /**
- * Paroi verticale, cascade ou soutènement à la limite d'une tuile d'eau (#205).
+ * Paroi verticale ou soutènement à la limite d'une tuile d'eau (#205).
  *
- * - entre deux nappes libres de niveaux différents, une cascade remplace la
- *   paroi : le rideau s'incline vers la nappe basse et reçoit de l'écume ;
- * - autour d'une écluse, un bajoyer de pierre reste vertical : l'ouvrage se
- *   distingue immédiatement d'une chute naturelle ;
+ * - autour d'une écluse, un bajoyer de pierre reste vertical : c'est la seule
+ *   dénivellation légitime entre deux biefs ;
  * - entre l'eau et une berge plus basse, une paroi de berge remonte du sol
  *   jusqu'à la surface : la rive ne flotte plus au-dessus du vide.
  *
  * La face est générée par la tuile d'eau **haute** uniquement : deux tuiles
  * voisines ne produisent donc jamais la même face. Les bords de carte et le
- * vide sont laissés au décor hors-limites.
+ * vide reçoivent un soutènement minéral, jamais un mur d'eau.
  */
 export interface WaterWallSegment {
   x0: number;
@@ -577,104 +591,6 @@ export interface WaterWallSegment {
   water: boolean;
   /** Nature de la marche, pour choisir matériau et géométrie. */
   kind: WaterWallKind;
-  /** Avancée horizontale du rideau (0 pour une paroi verticale), en tuiles. */
-  run: number;
-}
-
-/** Course horizontale du rideau pour une hauteur de chute donnée. */
-export function waterCascadeRun(drop: number): number {
-  const height = Number.isFinite(drop) ? Math.max(0, drop) : 0;
-  if (height <= 0) return 0;
-  const run = height * WATER_CASCADE_RUN_RATIO;
-  return Math.max(WATER_CASCADE_MIN_RUN, Math.min(WATER_CASCADE_MAX_RUN, run));
-}
-
-/**
- * Décalage horizontal d'un point du rideau, de `t = 0` (haut) à `t = 1` (pied).
- *
- * Le haut reste plaqué sur l'arête de la marche, avec juste un léger recul
- * pour masquer la jointure avec la nappe amont. Le rideau devient vertical
- * jusqu'à `WATER_CASCADE_VERTICAL_START`, puis s'évase vers la nappe basse
- * comme une lame d'eau qui accélère en tombant.
- */
-export function waterCascadeOffset(t: number, run: number): number {
-  const clamped = Number.isFinite(t) ? Math.max(0, Math.min(1, t)) : 0;
-  const travel = Number.isFinite(run) ? Math.max(0, run) : 0;
-  const flare = smoothstep(WATER_CASCADE_VERTICAL_START, 1, clamped) ** 1.2;
-  const inset = WATER_CASCADE_TOP_INSET * (1 - flare);
-  return travel * flare - inset;
-}
-
-/**
- * Décalage latéral du rideau, nul sur les deux coins de l'arête.
- *
- * Deux arêtes voisines partagent ainsi exactement leurs extrémités : le
- * rideau reste continu sur toute la largeur de la marche et aucun triangle
- * isolé n'apparaît dans les angles. Le centre s'évase, la rive reste plaquée.
- */
-export function waterCascadeLateralOffset(t: number, u: number, run: number): number {
-  const lateral = Number.isFinite(u) ? Math.max(0, Math.min(1, u)) : 0;
-  const weight = Math.sin(Math.PI * lateral);
-  return waterCascadeOffset(t, run) * weight;
-}
-
-/**
- * Étendue d'un rideau le long d'une arête de marche.
- *
- * Deux arêtes colinéaires de même niveau forment **un seul** rideau : on
- * remonte et on descend la ligne d'eau tant que la tuile voisine produit la
- * même cascade. `uStart`/`uEnd` donnent la portion de ce rideau portée par la
- * tuile courante, ce qui évite les vallons et les triangles à chaque jointure
- * de tuile. Une différence de niveau aval clôt l'étendue : le raccord se fait
- * alors sur une arête distincte.
- */
-export function waterCascadeSpan(
-  map: MapSnapshot,
-  fields: WaterHeightFields,
-  x: number,
-  y: number,
-  dx: number,
-  dy: number,
-): { uStart: number; uEnd: number; length: number; run: number; bottom: number } {
-  const own = waterWallForEdge(map, fields, x, y, dx, dy);
-  if (!own || own.kind !== 'cascade') {
-    return { uStart: 0, uEnd: 1, length: 1, run: 0, bottom: 0 };
-  }
-  const tangentX = dy;
-  const tangentY = -dx;
-  const same = (tx: number, ty: number): boolean => {
-    const segment = waterWallForEdge(map, fields, tx, ty, dx, dy);
-    return (
-      segment !== null &&
-      segment.kind === 'cascade' &&
-      Math.abs(segment.bottom - own.bottom) < 1e-6 &&
-      Math.abs(segment.top - own.top) < 1e-6
-    );
-  };
-  let before = 0;
-  while (before < 64) {
-    const tx = x - tangentX * (before + 1);
-    const ty = y - tangentY * (before + 1);
-    if (tx < 0 || ty < 0 || tx >= map.width || ty >= map.height) break;
-    if (!same(tx, ty)) break;
-    before += 1;
-  }
-  let after = 0;
-  while (after < 64) {
-    const tx = x + tangentX * (after + 1);
-    const ty = y + tangentY * (after + 1);
-    if (tx < 0 || ty < 0 || tx >= map.width || ty >= map.height) break;
-    if (!same(tx, ty)) break;
-    after += 1;
-  }
-  const length = before + 1 + after;
-  return {
-    uStart: before / length,
-    uEnd: (before + 1) / length,
-    length,
-    run: own.run,
-    bottom: own.bottom,
-  };
 }
 
 export function waterWallForEdge(
@@ -704,21 +620,25 @@ export function waterWallForEdge(
   let kind: WaterWallKind;
   if (outside || neighbourKind === 'void') {
     // Raccord avec le décor hors-limites : le fond océanique est au niveau de
-    // la mer. Une nappe plus haute (canal aboutissant au bord) reçoit une
-    // cascade jusqu'à ce niveau, sinon on laisserait un vide vertical.
+    // la mer. Une nappe plus haute (canal aboutissant au bord) ferme sa rive
+    // par un soutènement minéral, sinon on laisserait un vide vertical. Plus
+    // de rideau d'eau : la carte se termine sur une coupe de terrain propre.
     const sea = waterSurfaceHeight(0);
     if (surface <= sea + WATER_WALL_EPSILON) return null;
     bottom = sea;
     water = true;
-    kind = sourceKind === 'lock' ? 'lock' : 'cascade';
+    kind = sourceKind === 'lock' ? 'lock' : 'bank';
   } else if (fields.weight[neighbour] === 1) {
-    // Deux nappes : la plus basse sert de pied à la paroi. Une tuile d'écluse
-    // garde un bajoyer vertical ; deux nappes libres reçoivent une cascade.
+    // Deux nappes : la plus basse sert de pied à la paroi. Seule une écluse
+    // peut encore créer une marche ; entre deux tuiles d'une même composante,
+    // le nivellement du rendu (#242) garantit des surfaces identiques. Le
+    // garde-fou minéral couvre un éventuel écart résiduel sans jamais dessiner
+    // un mur d'eau.
     const other = fields.surface[neighbour] ?? 0;
     if (other >= surface - WATER_WALL_EPSILON) return null;
     bottom = other;
     water = true;
-    kind = sourceKind === 'lock' || neighbourKind === 'lock' ? 'lock' : 'cascade';
+    kind = sourceKind === 'lock' || neighbourKind === 'lock' ? 'lock' : 'bank';
   } else {
     // Berge : si son dessus atteint déjà la nappe, le recouvrement de rive
     // suffit. Sinon l'eau flotte au-dessus d'un terrain plus bas : on ferme
@@ -760,8 +680,7 @@ export function waterWallForEdge(
     x1 = x + 1;
     z1 = edgeZ;
   }
-  const run = kind === 'cascade' ? waterCascadeRun(top - bottom) : 0;
-  return { x0, z0, x1, z1, bottom, top, water, kind, run };
+  return { x0, z0, x1, z1, bottom, top, water, kind };
 }
 
 /**
