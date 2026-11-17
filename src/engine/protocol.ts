@@ -340,6 +340,15 @@ export interface StationSnapshot {
   width: number;
   height: number;
   waiting: { cargo: string; amount: number }[];
+  /**
+   * Gare routière « en passage » (#218) : l'arrêt occupe la chaussée et doit
+   * être rendu par un abri de trottoir, jamais par une halle de bâtiment.
+   * Absent des sauvegardes/snapshots antérieurs : le rendu retombe alors sur
+   * l'analyse de la route sous la tuile.
+   */
+  driveThrough?: boolean;
+  /** Axe de la route traversant une gare routière en passage. */
+  roadAxis?: 'x' | 'y';
 }
 
 export type DepotKind = 'road' | 'rail';

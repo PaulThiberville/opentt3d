@@ -78,7 +78,7 @@ import {
   planTree,
   planTunnel,
 } from '../game/buildRules';
-import { stationFootprint } from '../game/buildRules';
+import { directionAxis, stationFootprint } from '../game/buildRules';
 import {
   depotConnections,
   parseBuildDirection,
@@ -306,6 +306,10 @@ interface MockStation {
   width: number;
   height: number;
   waiting: { cargo: string; amount: number }[];
+  /** Arrêt de bus en passage (#218) : abri de trottoir, pas une halle. */
+  driveThrough?: boolean;
+  /** Axe de la route sous un arrêt en passage. */
+  roadAxis?: 'x' | 'y';
 }
 
 /**
@@ -3104,6 +3108,12 @@ function applyStation(
     width: footprint.width,
     height: footprint.height,
     waiting: [],
+    ...(settings.kind === 'road'
+      ? {
+          driveThrough: settings.driveThrough,
+          ...(settings.driveThrough ? { roadAxis: directionAxis(settings.direction) } : {}),
+        }
+      : {}),
   });
   const message =
     settings.kind === 'rail'
@@ -6297,6 +6307,12 @@ export class MockEngine implements EngineDriver {
       width: station.width,
       height: station.height,
       waiting: station.waiting.map((entry) => ({ ...entry })),
+      ...(station.driveThrough !== undefined
+        ? {
+            driveThrough: station.driveThrough,
+            ...(station.roadAxis ? { roadAxis: station.roadAxis } : {}),
+          }
+        : {}),
     }));
 
     const depots: DepotSnapshot[] = world.depots.map((depot) => ({
