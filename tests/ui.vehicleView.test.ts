@@ -148,6 +148,28 @@ describe('panneau dépôt', () => {
     expect(view?.models.every((model) => model.id.startsWith('rail_'))).toBe(true);
   });
 
+  it('désactive avec explication les modèles incompatibles avec le rail du dépôt', () => {
+    const map = makeMap();
+    markDepot(map, 2, 2, 'rail');
+    const view = describeDepotPanel(
+      snapshot([], 100_000, [depot({ id: 6, kind: 'rail', railType: 'rail' })]),
+      0,
+      6,
+    );
+    const byId = new Map(view?.models.map((model) => [model.id, model]));
+    // Un dépôt en rail classique accepte les matériels rail/électrifié.
+    expect(byId.get('rail_autorail')?.available).toBe(true);
+    expect(byId.get('rail_autorail')?.blockedReason).toBeNull();
+    expect(byId.get('rail_freight')?.available).toBe(true);
+    // Les matériels spécialisés restent visibles, mais désactivés (#219).
+    expect(byId.get('rail_electric')?.available).toBe(false);
+    expect(byId.get('rail_electric')?.blockedReason).toContain('Rail électrifié');
+    expect(byId.get('rail_monorail')?.available).toBe(false);
+    expect(byId.get('rail_monorail')?.blockedReason).toContain('Monorail');
+    expect(byId.get('rail_maglev')?.available).toBe(false);
+    expect(byId.get('rail_maglev')?.blockedReason).toContain('Maglev');
+  });
+
   it('expose la variante visuelle et la livrée de chaque vignette', () => {
     const map = makeMap();
     markDepot(map, 2, 2, 'road');
