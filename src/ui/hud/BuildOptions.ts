@@ -21,6 +21,7 @@ import {
   type BuildSettings,
   type BuildTool,
   type BridgeMaterial,
+  type RoadDirection,
 } from '../../game/buildRules';
 import { el } from '../dom';
 import { formatInt } from '../format';
@@ -43,6 +44,20 @@ const DIRECTION_KEYS: Record<BuildDirection, TranslationKey> = {
   se: 'build.direction.se',
   sw: 'build.direction.sw',
   nw: 'build.direction.nw',
+};
+
+const ROAD_DIRECTION_GLYPHS: Record<Exclude<RoadDirection, 'both'>, string> = {
+  east: '→',
+  south: '↓',
+  west: '←',
+  north: '↑',
+};
+
+const ROAD_DIRECTION_KEYS: Record<Exclude<RoadDirection, 'both'>, TranslationKey> = {
+  east: 'build.road.east',
+  south: 'build.road.south',
+  west: 'build.road.west',
+  north: 'build.road.north',
 };
 
 const SIGNAL_KIND_LABEL_KEYS: Record<SignalKind, TranslationKey> = {
@@ -102,6 +117,7 @@ export class BuildOptions {
     const tool = this.tool;
     this.element.replaceChildren();
     if (
+      tool !== 'road' &&
       tool !== 'station' &&
       tool !== 'depot' &&
       tool !== 'signal' &&
@@ -120,30 +136,33 @@ export class BuildOptions {
     this.element.hidden = false;
 
     const title =
-      tool === 'station'
-        ? t('build.title.station')
-        : tool === 'depot'
-          ? t('build.title.depot')
-          : tool === 'signal'
-            ? t('build.title.signal')
-            : tool === 'unsignal'
-              ? t('build.title.unsignal')
-              : tool === 'rail'
-                ? t('build.title.railType')
-                : tool === 'convert'
+      tool === 'road'
+        ? t('build.title.road')
+        : tool === 'station'
+          ? t('build.title.station')
+          : tool === 'depot'
+            ? t('build.title.depot')
+            : tool === 'signal'
+              ? t('build.title.signal')
+              : tool === 'unsignal'
+                ? t('build.title.unsignal')
+                : tool === 'rail'
                   ? t('build.title.railType')
-                  : tool === 'terraform'
-                    ? t('build.title.terraform')
-                    : tool === 'tree'
-                      ? t('build.title.tree')
-                      : tool === 'lock'
-                        ? t('build.title.lock')
-                        : tool === 'bridge'
-                          ? t('build.title.bridge')
-                          : t('build.title.tunnel');
+                  : tool === 'convert'
+                    ? t('build.title.railType')
+                    : tool === 'terraform'
+                      ? t('build.title.terraform')
+                      : tool === 'tree'
+                        ? t('build.title.tree')
+                        : tool === 'lock'
+                          ? t('build.title.lock')
+                          : tool === 'bridge'
+                            ? t('build.title.bridge')
+                            : t('build.title.tunnel');
     this.element.append(el('span', { className: 'hud-build-options-title', text: title }));
 
-    if (tool === 'station') this.renderStation();
+    if (tool === 'road') this.renderRoad();
+    else if (tool === 'station') this.renderStation();
     else if (tool === 'depot') this.renderDepot();
     else if (tool === 'signal') this.renderSignal();
     else if (tool === 'unsignal') this.renderUnsignal();
@@ -154,6 +173,63 @@ export class BuildOptions {
     else if (tool === 'lock') this.renderLock();
     else if (tool === 'bridge') this.renderBridge();
     else this.renderTunnel();
+  }
+
+  private renderRoad(): void {
+    const road = this.settings.road;
+    const oneWay = road.direction !== 'both' ? road.direction : null;
+    this.element.append(
+      this.segmented(
+        [
+          { id: 'both', label: t('build.road.both') },
+          { id: 'one-way', label: t('build.road.oneWay') },
+        ],
+        oneWay ? 'one-way' : 'both',
+        (mode) => {
+          this.commit({
+            ...this.settings,
+            road: { direction: mode === 'one-way' ? 'east' : 'both' },
+          });
+        },
+        'road-direction',
+        'build.roadDirection',
+      ),
+    );
+    if (oneWay) {
+      this.element.append(
+        this.roadDirectionButton(oneWay),
+        el('span', {
+          className: 'hud-build-options-note',
+          text: t('build.roadNote'),
+        }),
+      );
+    } else {
+      this.element.append(
+        el('span', {
+          className: 'hud-build-options-note',
+          text: t('build.roadBothNote'),
+        }),
+      );
+    }
+  }
+
+  private roadDirectionButton(direction: Exclude<RoadDirection, 'both'>): HTMLElement {
+    const group = el('span', { className: 'hud-build-direction' });
+    const rotate = el('button', {
+      className: 'hud-build-option-button',
+      text: t('build.rotate'),
+      attrs: { type: 'button' },
+      dataset: { action: 'rotate' },
+    });
+    rotate.addEventListener('click', () => this.callbacks.onRotate());
+    group.append(
+      rotate,
+      el('span', {
+        className: 'hud-build-direction-value',
+        text: `${ROAD_DIRECTION_GLYPHS[direction]} ${t(ROAD_DIRECTION_KEYS[direction])}`,
+      }),
+    );
+    return group;
   }
 
   private renderTerraform(): void {

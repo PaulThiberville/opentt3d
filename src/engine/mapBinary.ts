@@ -1,19 +1,19 @@
 /**
- * Décodeur du snapshot carte binaire v1 produit par `ottd_snapshot_map()`
- * (engine/bridge/ottd_bridge.cpp).
+ * Décodeur du snapshot carte binaire produit par `ottd_snapshot_map()`
+ * (engine/bridge/ottd_bridge.cpp), versions 1 à 3.
  *
  * Disposition little-endian :
  *
  *   0   en-tête de 64 octets (magic OTM1, version, dimensions, tick, séquence…)
- *   64  répertoire : 7 entrées de 12 octets (id, elem_size, flags, offset, length)
- *   148 données : 7 couches contiguës de `width * height` octets
+ *   64  répertoire : 8 entrées de 12 octets (id, elem_size, flags, offset, length)
+ *   160 données : 8 couches contiguës de `width * height` octets
  *
  * Couches, dans l'ordre : kind, heightMap, owner, slope, flags, trackBits,
- * signalData (#156). La version 2 ajoute `signalData` ; le décodeur accepte
- * encore la version 1 (6 couches) pour les artefacts WASM antérieurs et
- * fabrique alors une couche de signaux vide. Les tableaux renvoyés sont des
- * **copies** : aucune vue ne dépend du buffer d'entrée, donc aucune vue ne
- * survit à un `step()` du moteur.
+ * signalData (#156), roadData (#231). La version 2 omet `roadData` ; la
+ * version 1 omet aussi `signalData`. Le décodeur accepte encore les versions
+ * antérieures et fabrique des couches vides pour les champs manquants. Les
+ * tableaux renvoyés sont des **copies** : aucune vue ne dépend du buffer
+ * d'entrée, donc aucune vue ne survit à un `step()` du moteur.
  *
  * Toute anomalie lève une `MapSnapshotError` avec un message lisible : le
  * protocole est strict, une carte mal formée ne doit jamais être rendue.
@@ -23,14 +23,16 @@ import type { MapSnapshot } from './protocol';
 
 /** "OTM1" en little-endian. */
 export const MAP_SNAPSHOT_MAGIC = 0x314d544f;
-export const MAP_SNAPSHOT_VERSION = 2;
+export const MAP_SNAPSHOT_VERSION = 3;
 /** Version minimale encore lisible (artefacts WASM antérieurs à #156). */
 export const MAP_SNAPSHOT_MIN_VERSION = 1;
 export const MAP_HEADER_SIZE = 64;
 export const MAP_DIRECTORY_ENTRY_SIZE = 12;
-export const MAP_LAYER_COUNT = 7;
-/** Nombre de couches de la version 1, sans `signalData`. */
+export const MAP_LAYER_COUNT = 8;
+/** Nombre de couches de la version 1, sans `signalData` ni `roadData`. */
 export const MAP_LAYER_COUNT_V1 = 6;
+/** Nombre de couches de la version 2, sans `roadData` (#231). */
+export const MAP_LAYER_COUNT_V2 = 7;
 export const MAP_DATA_OFFSET = MAP_HEADER_SIZE + MAP_LAYER_COUNT * MAP_DIRECTORY_ENTRY_SIZE;
 
 /** Identifiants de couche du répertoire. */
@@ -42,6 +44,7 @@ export const MAP_LAYER_ID = {
   flags: 5,
   trackBits: 6,
   signalData: 7,
+  roadData: 8,
 } as const;
 
 export type MapLayerName = keyof typeof MAP_LAYER_ID;
@@ -55,6 +58,7 @@ export const MAP_LAYER_ORDER: readonly MapLayerName[] = [
   'flags',
   'trackBits',
   'signalData',
+  'roadData',
 ];
 
 export type MapSnapshotErrorCode =
@@ -189,7 +193,8 @@ export function decodeMapSnapshot(
       `Carte et entités désynchronisées : tick carte ${tick}, tick attendu ${expected.tick}.`,
     );
   }
-  const expectedLayers = version === 1 ? MAP_LAYER_COUNT_V1 : MAP_LAYER_COUNT;
+  const expectedLayers =
+    version === 1 ? MAP_LAYER_COUNT_V1 : version === 2 ? MAP_LAYER_COUNT_V2 : MAP_LAYER_COUNT;
   if (layerCount !== expectedLayers) {
     fail(
       'directory',
@@ -258,7 +263,11 @@ export function decodeMapSnapshot(
   }
 
   const requiredLayers =
-    version === 1 ? MAP_LAYER_ORDER.slice(0, MAP_LAYER_COUNT_V1) : MAP_LAYER_ORDER;
+    version === 1
+      ? MAP_LAYER_ORDER.slice(0, MAP_LAYER_COUNT_V1)
+      : version === 2
+        ? MAP_LAYER_ORDER.slice(0, MAP_LAYER_COUNT_V2)
+        : MAP_LAYER_ORDER;
   for (const name of requiredLayers) {
     if (!offsets.has(name)) fail('layer', `Couche manquante dans le répertoire : ${name}.`);
   }
@@ -302,6 +311,7 @@ export function decodeMapSnapshot(
       flags: layer('flags'),
       trackBits: layer('trackBits'),
       signalData: offsets.has('signalData') ? layer('signalData') : new Uint8Array(tileCount),
+      roadData: offsets.has('roadData') ? layer('roadData') : new Uint8Array(tileCount),
     },
   };
 }

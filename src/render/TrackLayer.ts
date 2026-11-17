@@ -180,6 +180,7 @@ interface MapArrays {
   kind: Uint8Array;
   heightMap: Uint8Array;
   flags: Uint8Array;
+  roadData: Uint8Array;
 }
 
 function createWriter(): GeometryWriter {
@@ -813,15 +814,80 @@ export function roadMarkingPaths(plan: TrackTilePlan): Pt2[][] {
   return axisDashPaths('y', plan.x + 0.5, plan.y, plan.y + 1);
 }
 
+/** Demi-écart entre l'axe de la chaussée et le centre d'une voie (#231). */
+export const ROAD_LANE_OFFSET = 0.22;
+
+/** Longueur du corps d'une flèche de sens unique, en tuiles. */
+const ONEWAY_ARROW_LENGTH = 0.34;
+const ONEWAY_ARROW_HEAD = 0.12;
+
+/**
+ * Flèches blanches d'une route à sens unique (#231).
+ *
+ * Deux voies sont matérialisées de part et d'autre de l'axe, chacune avec une
+ * flèche pointant dans le sens de circulation. Les tracés sont dans le plan
+ * de la tuile (x, z) ; `emitRoadMarkings` les projette sur le profil de
+ * chaussée. Un virage ou un carrefour renvoie une liste vide : ces tuiles
+ * restent bidirectionnelles, comme dans OpenTTD.
+ */
+export function roadOneWayArrowPaths(plan: TrackTilePlan): Pt2[][] {
+  const oneWay = plan.roadOneWay;
+  if (!oneWay) return [];
+  if (plan.shape !== 'straight' && plan.shape !== 'dead-end' && plan.shape !== 'isolated')
+    return [];
+
+  const axis = plan.axis ?? (oneWay === 'east' || oneWay === 'west' ? 'x' : 'y');
+  const positive = oneWay === 'east' || oneWay === 'south';
+  const sign = positive ? 1 : -1;
+  const cx = plan.x + 0.5;
+  const cz = plan.y + 0.5;
+  const paths: Pt2[][] = [];
+
+  for (const lane of [-ROAD_LANE_OFFSET, ROAD_LANE_OFFSET]) {
+    const start = 0.5 - sign * (ONEWAY_ARROW_LENGTH / 2);
+    const tip = 0.5 + sign * (ONEWAY_ARROW_LENGTH / 2);
+    const tail = tip - sign * ONEWAY_ARROW_HEAD;
+    if (axis === 'x') {
+      paths.push([
+        { x: plan.x + start, z: cz + lane },
+        { x: plan.x + tip, z: cz + lane },
+      ]);
+      paths.push([
+        { x: plan.x + tip, z: cz + lane },
+        { x: plan.x + tail, z: cz + lane - ONEWAY_ARROW_HEAD },
+      ]);
+      paths.push([
+        { x: plan.x + tip, z: cz + lane },
+        { x: plan.x + tail, z: cz + lane + ONEWAY_ARROW_HEAD },
+      ]);
+    } else {
+      paths.push([
+        { x: cx + lane, z: plan.y + start },
+        { x: cx + lane, z: plan.y + tip },
+      ]);
+      paths.push([
+        { x: cx + lane, z: plan.y + tip },
+        { x: cx + lane - ONEWAY_ARROW_HEAD, z: plan.y + tail },
+      ]);
+      paths.push([
+        { x: cx + lane, z: plan.y + tip },
+        { x: cx + lane + ONEWAY_ARROW_HEAD, z: plan.y + tail },
+      ]);
+    }
+  }
+  return paths;
+}
+
 /** Marquage continu qui suit une polyligne (axe d'un virage ou tiret). */
 function addMarkingRibbon(
   writer: GeometryWriter,
   surface: RoadSurface,
   path: readonly Pt2[],
+  width = MARK_WIDTH,
 ): void {
   if (path.length < 2) return;
   const normals = pathNormals(path);
-  const half = MARK_WIDTH / 2;
+  const half = width / 2;
   const colour = tint(MARK_COLOUR, 0.5, 1.04);
   for (let i = 0; i + 1 < path.length; i += 1) {
     const pointA = path[i];
@@ -860,6 +926,8 @@ function addMarkingRibbon(
 function emitRoadMarkings(writer: GeometryWriter, map: MapSnapshot, plan: TrackTilePlan): void {
   const surface = buildRoadSurface(map, plan);
   for (const path of roadMarkingPaths(plan)) addMarkingRibbon(writer, surface, path);
+  // Sens unique (#231) : flèches dans chaque voie, en plus de l'axe central.
+  for (const path of roadOneWayArrowPaths(plan)) addMarkingRibbon(writer, surface, path, 0.052);
 }
 
 function emitRoadTile(
@@ -1448,6 +1516,7 @@ export class TrackLayer {
         if (map.kind[index] !== previous.kind[index]) return true;
         if (map.heightMap[index] !== previous.heightMap[index]) return true;
         if (map.flags[index] !== previous.flags[index]) return true;
+        if ((map.roadData?.[index] ?? 0) !== previous.roadData[index]) return true;
       }
     }
     return false;
@@ -1630,6 +1699,7 @@ function copyArrays(map: MapSnapshot): MapArrays {
     kind: map.kind.slice(),
     heightMap: map.heightMap.slice(),
     flags: map.flags.slice(),
+    roadData: map.roadData?.slice() ?? new Uint8Array(map.width * map.height),
   };
 }
 

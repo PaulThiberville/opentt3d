@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { BuildController } from '../src/ui/buildController';
 import { describeBuildPlan } from '../src/ui/buildHint';
-import { createBuildSettings, type BuildPlan, type BuildSettings } from '../src/game/buildRules';
+import {
+  commandFromPlan,
+  createBuildSettings,
+  type BuildPlan,
+  type BuildSettings,
+} from '../src/game/buildRules';
 import { TILE_KIND_INDEX, type MapSnapshot } from '../src/engine/protocol';
 
 function makeMap(width = 16, height = 16): MapSnapshot {
@@ -32,6 +37,25 @@ function setTile(
   map.kind[index] = kind;
   map.trackBits[index] = bits;
   map.owner[index] = owner;
+}
+
+/**
+ * Colline régulière au sens OpenTTD pour un tunnel +x : portail (2,y) en talus
+ * SW, crête à 7 sur x=4..7, sortie (8,y) en talus NE. `heightMap` porte le coin
+ * nord de chaque tuile, d'où le décalage d'un niveau sur la sortie.
+ */
+function tunnelMound(map: MapSnapshot, y = 4): void {
+  const set = (x: number, dy: number, height: number): void => {
+    map.heightMap[(y + dy) * map.width + x] = height;
+  };
+  set(3, 0, 5);
+  set(3, 1, 5);
+  for (let x = 4; x <= 7; x += 1) {
+    set(x, 0, 7);
+    set(x, 1, 7);
+  }
+  set(8, 0, 5);
+  set(8, 1, 5);
 }
 
 interface Harness {
@@ -127,6 +151,51 @@ describe('BuildController : gares', () => {
     expect(plan?.tiles[0]?.connections).toBe(1 | 4);
   });
 
+  it('pose un arrêt en passage sur une route verticale en l’alignant seul', () => {
+    const map = makeMap();
+    setTile(map, 4, 4, TILE_KIND_INDEX.road, 1 | 4, 0);
+    const { controller, previews, commits, settings } = harness(map);
+    settings.station = { ...settings.station, kind: 'road', driveThrough: true, direction: 'ne' };
+    controller.setSettings(settings);
+    controller.setTool('station');
+    controller.handleHover({ x: 4, y: 4 });
+    controller.handleBegin({ x: 4, y: 4 });
+
+    const plan = lastPlan(previews);
+    expect(plan?.valid).toBe(true);
+    expect(plan?.axis).toBe('y');
+    expect(plan?.station?.direction).toBe('nw');
+    expect(plan?.tiles[0]?.connections).toBe(1 | 4);
+    controller.handleEnd({ x: 4, y: 4 });
+    expect(commits).toHaveLength(1);
+    expect(commandFromPlan(commits[0]!, 0).options).toMatchObject({
+      kind: 'road',
+      direction: 'nw',
+      axis: 'y',
+      drive_through: true,
+    });
+  });
+
+  it('revalide l’aperçu quand « en passage » est coché sur une route', () => {
+    const map = makeMap();
+    setTile(map, 4, 4, TILE_KIND_INDEX.road, 2 | 8, 0);
+    const { controller, previews, settings } = harness(map);
+    settings.station = { ...settings.station, kind: 'road', driveThrough: false, direction: 'ne' };
+    controller.setSettings(settings);
+    controller.setTool('station');
+    controller.handleHover({ x: 4, y: 4 });
+
+    expect(lastPlan(previews)?.valid).toBe(false);
+    expect(lastPlan(previews)?.reason).toContain('en passage');
+
+    settings.station = { ...settings.station, kind: 'road', driveThrough: true, direction: 'ne' };
+    controller.setSettings(settings);
+    const plan = lastPlan(previews);
+    expect(plan?.valid).toBe(true);
+    expect(plan?.station?.driveThrough).toBe(true);
+    expect(plan?.tiles[0]?.connections).toBe(2 | 8);
+  });
+
   it('annule le survol au clic droit sans désarmer l’outil', () => {
     const { controller, commits } = harness();
     controller.setTool('station');
@@ -197,22 +266,23 @@ describe('BuildController : ponts et tunnels', () => {
 
   it('trouve la sortie du tunnel quand le drag s’arrête sur le relief', () => {
     const map = makeMap();
-    for (let x = 4; x <= 6; x += 1) map.heightMap[x + 4 * map.width] = 7;
+    tunnelMound(map);
     const { controller, previews, commits, settings } = harness(map);
     settings.tunnel = { kind: 'rail' };
     controller.setSettings(settings);
     controller.setTool('tunnel');
     controller.handleBegin({ x: 2, y: 4 });
-    // Le curseur est sur la colline (hauteur 7) et non sur un portail.
+    // Le curseur est sur la colline et non sur un portail : la sortie est
+    // retrouvée à la même surface, pas au coin nord surélevé.
     controller.handleMove({ x: 5, y: 5 });
     const plan = lastPlan(previews);
     expect(plan?.from).toEqual({ x: 2, y: 4 });
-    expect(plan?.to).toEqual({ x: 7, y: 4 });
+    expect(plan?.to).toEqual({ x: 8, y: 4 });
     expect(plan?.valid).toBe(true);
     expect(plan?.tunnel?.depth).toBe(3);
     controller.handleEnd({ x: 5, y: 5 });
     expect(commits).toHaveLength(1);
-    expect(commits[0]?.to).toEqual({ x: 7, y: 4 });
+    expect(commits[0]?.to).toEqual({ x: 8, y: 4 });
   });
 
   it('refuse un clic sans drag avec un message explicite', () => {
@@ -226,10 +296,7 @@ describe('BuildController : ponts et tunnels', () => {
 
   it('prévisualise et construit un tunnel entre deux portails', () => {
     const map = makeMap();
-    for (let x = 4; x <= 6; x += 1) {
-      const index = x + 4 * map.width;
-      map.heightMap[index] = 7;
-    }
+    tunnelMound(map);
     const { controller, previews, commits, settings } = harness(map);
     settings.tunnel = { kind: 'rail' };
     controller.setSettings(settings);

@@ -17,10 +17,12 @@ import {
   COMPANY_NONE,
   TILE_FLAG,
   TILE_KIND_INDEX,
+  roadOneWayAxis,
   type BridgeMaterial,
   type EngineCommand,
   type MapSnapshot,
   type RailType,
+  type RoadOneWay,
   type SignalDirection,
   type SignalKind,
   type SignalTrack,
@@ -78,6 +80,34 @@ export interface RailSettings {
   type: RailType;
 }
 
+/**
+ * Sens de circulation d'une route (#231) : `both` pour une route classique à
+ * double sens, ou une direction cardinale pour une route à sens unique.
+ */
+export type RoadDirection = 'both' | RoadOneWay;
+
+/** Cycle du bouton « Pivoter » quand une route à sens unique est armée. */
+export const ROAD_DIRECTIONS: readonly RoadDirection[] = ['both', 'east', 'south', 'west', 'north'];
+
+/** Directions proposées par le sélecteur de sens unique (hors double sens). */
+export const ROAD_ONEWAY_DIRECTION_ORDER: readonly RoadOneWay[] = [
+  'east',
+  'south',
+  'west',
+  'north',
+];
+
+export function nextRoadDirection(direction: RoadDirection): RoadDirection {
+  if (direction === 'both') return 'east';
+  const index = ROAD_ONEWAY_DIRECTION_ORDER.indexOf(direction);
+  return ROAD_ONEWAY_DIRECTION_ORDER[(index + 1) % ROAD_ONEWAY_DIRECTION_ORDER.length] ?? 'east';
+}
+
+/** Réglages de l'outil route (#231). */
+export interface RoadSettings {
+  direction: RoadDirection;
+}
+
 export interface StationSettings {
   kind: BuildTransport;
   /** Nombre de quais (1..8). Ignoré pour une gare routière. */
@@ -131,6 +161,8 @@ export interface TunnelSettings {
 }
 
 export interface BuildSettings {
+  /** Sens de circulation des routes neuves (#231). */
+  road: RoadSettings;
   station: StationSettings;
   depot: DepotSettings;
   signal: SignalSettings;
@@ -281,6 +313,75 @@ export const TUNNEL_MAINTENANCE_PER_TILE: Record<BuildTransport, number> = {
 export const TUNNEL_MIN_TILES = 3;
 export const TUNNEL_MAX_TILES = 40;
 
+/**
+ * Bits de pente OpenTTD (coins surélevés). `heightMap` stocke la hauteur du
+ * coin nord de chaque tuile ; les trois autres coins viennent des tuiles
+ * voisines, exactement comme `GetTileSlopeZ` dans OpenTTD.
+ */
+const SLOPE_W = 0x01;
+const SLOPE_S = 0x02;
+const SLOPE_E = 0x04;
+const SLOPE_N = 0x08;
+
+/** Pente et hauteur de surface d'une tuile, au sens OpenTTD. */
+export interface TileSlopeInfo {
+  /** Hauteur du coin le plus bas (GetTileZ), en demi-niveaux. */
+  z: number;
+  /** Bits de pente OpenTTD (0 = plat). */
+  slope: number;
+  /** Pente de plus d'un niveau : jamais un portail régulier. */
+  steep: boolean;
+}
+
+function cornerHeight(map: MapSnapshot, x: number, y: number): number {
+  // OpenTTD clampe les coins hors carte sur le bord (TileHeightOutsideMap).
+  const cx = Math.max(0, Math.min(map.width - 1, x));
+  const cy = Math.max(0, Math.min(map.height - 1, y));
+  return map.heightMap[tileIndex(cx, cy, map.width)] ?? 0;
+}
+
+/**
+ * Pente d'une tuile telle que la voit OpenTTD. Le mock ne fournit pas de bits
+ * de pente exploitables : on les dérive donc de `heightMap`, identique au pont
+ * C++ (`TileHeight` = coin nord), pour que UI, mock et WASM valident pareil.
+ */
+export function tileSlopeInfo(map: MapSnapshot, x: number, y: number): TileSlopeInfo {
+  if (!inBounds(map, x, y)) return { z: 0, slope: 0, steep: false };
+  const north = cornerHeight(map, x, y);
+  const west = cornerHeight(map, x + 1, y);
+  const east = cornerHeight(map, x, y + 1);
+  const south = cornerHeight(map, x + 1, y + 1);
+  const z = Math.min(north, west, east, south);
+  const highest = Math.max(north, west, east, south);
+  let slope = 0;
+  if (north > z) slope |= SLOPE_N;
+  if (west > z) slope |= SLOPE_W;
+  if (east > z) slope |= SLOPE_E;
+  if (south > z) slope |= SLOPE_S;
+  return { z, slope, steep: highest - z > 1 };
+}
+
+/** Hauteur du point le plus haut d'une tuile, pour la profondeur d'un tunnel. */
+function tileHighestCorner(map: MapSnapshot, x: number, y: number): number {
+  return Math.max(
+    cornerHeight(map, x, y),
+    cornerHeight(map, x + 1, y),
+    cornerHeight(map, x, y + 1),
+    cornerHeight(map, x + 1, y + 1),
+  );
+}
+
+/**
+ * Pente inclinée à faire gravir à un portail d'entrée selon l'axe du tunnel.
+ * Dans OpenTTD, +x correspond à la diagonale SW et +y à la diagonale SE.
+ */
+function inclinedSlopeForStep(stepX: number, stepY: number): number {
+  if (stepX > 0) return SLOPE_S | SLOPE_W;
+  if (stepX < 0) return SLOPE_N | SLOPE_E;
+  if (stepY > 0) return SLOPE_S | SLOPE_E;
+  return SLOPE_N | SLOPE_W;
+}
+
 export const STATION_MAX_PLATFORMS = 8;
 export const STATION_MAX_LENGTH = 16;
 
@@ -374,12 +475,28 @@ export function directionAxis(direction: BuildDirection): BuildAxis {
   return direction === 'ne' || direction === 'sw' ? 'x' : 'y';
 }
 
+/** Décalage de tuile de l’entrée d’une infrastructure, dans l’ordre ne, se, sw, nw. */
+export function directionOffset(direction: BuildDirection): { dx: number; dy: number } {
+  switch (direction) {
+    case 'ne':
+      return { dx: 1, dy: 0 };
+    case 'se':
+      return { dx: 0, dy: 1 };
+    case 'sw':
+      return { dx: -1, dy: 0 };
+    case 'nw':
+    default:
+      return { dx: 0, dy: -1 };
+  }
+}
+
 export function nextDirection(direction: BuildDirection): BuildDirection {
   return DIRECTION_ORDER[(directionToIndex(direction) + 1) % DIRECTION_ORDER.length] ?? 'ne';
 }
 
 export function createBuildSettings(): BuildSettings {
   return {
+    road: { direction: 'both' },
     station: {
       kind: 'rail',
       platforms: 1,
@@ -401,6 +518,7 @@ export function createBuildSettings(): BuildSettings {
 /** Copie superficielle sûre : les sous-objets ne sont jamais partagés. */
 export function cloneBuildSettings(settings: BuildSettings): BuildSettings {
   return {
+    road: { ...settings.road },
     station: { ...settings.station },
     depot: { ...settings.depot },
     signal: { ...settings.signal },
@@ -430,6 +548,9 @@ export const BUILD_COST_PER_TILE: Record<PathBuildTool, number> = {
   clear: 40,
   canal: CANAL_COST_PER_TILE,
 };
+
+/** Surcoût par tuile d'une route à sens unique (#231) : marquage et panneaux. */
+export const ROAD_ONEWAY_SURCHARGE = 30;
 
 /** Surcoût par demi-niveau de dénivelé franchi (terrassement). */
 export const BUILD_SLOPE_COST = 80;
@@ -498,6 +619,8 @@ export interface TunnelPlanInfo {
   length: number;
   /** Épaisseur de terrain traversée, en demi-niveaux. */
   depth: number;
+  /** Hauteur de surface des portails (GetTileZ), en demi-niveaux. */
+  portalHeight: number;
   maintenance: number;
 }
 
@@ -526,6 +649,8 @@ export interface BuildPlan {
   aqueduct?: { axis: BuildAxis; level: number };
   /** Passage à niveau résolu (#159). */
   crossing?: { network: BuildTransport; axis: BuildAxis };
+  /** Sens de circulation résolu d'une route (#231). */
+  road?: { direction: RoadDirection; oneWay: RoadOneWay | null; convert: boolean };
   /** Niveau d'eau visé par un canal ou un aqueduc (demi-niveaux). */
   waterLevel?: number;
   /** Type de rail posé ou visé par une conversion (#157). */
@@ -547,6 +672,8 @@ export interface BuildPlanOptions {
   maxTiles?: number;
   /** Type de rail pour l'outil `rail` (#157), `rail` par défaut. */
   railType?: RailType;
+  /** Sens de circulation pour l'outil `road` (#231), double sens par défaut. */
+  roadDirection?: RoadDirection;
 }
 
 /** Coordonnée de tuile entière, bornée à la carte par l'appelant. */
@@ -694,10 +821,46 @@ function occupancyReason(kind: TileKind, tool: BuildTool, flags = 0): string | n
   }
 }
 
-function tileCost(tool: PathBuildTool, heightDelta: number, railType: RailType = 'rail'): number {
+/** Voisin routier utilisable pour déduire l'axe d'une route existante. */
+function isRoadAxisNeighbour(kind: TileKind): boolean {
+  return (
+    kind === 'road' ||
+    kind === 'crossing' ||
+    kind === 'bridge' ||
+    kind === 'tunnel' ||
+    kind === 'station'
+  );
+}
+
+/**
+ * Axe d'une route déjà construite, déduit de ses voisins (#231).
+ *
+ * Un tronçon droit a des voisins sur un seul axe. Un virage, un T ou un
+ * carrefour renvoie `null` : OpenTTD interdit d'y appliquer un sens unique.
+ */
+function existingRoadAxis(map: MapSnapshot, x: number, y: number): BuildAxis | null {
+  const kindAt = (nx: number, ny: number): boolean => {
+    if (nx < 0 || ny < 0 || nx >= map.width || ny >= map.height) return false;
+    const index = tileIndex(nx, ny, map.width);
+    return isRoadAxisNeighbour(TILE_KINDS[map.kind[index] ?? 0] ?? 'void');
+  };
+  const horizontal = kindAt(x - 1, y) || kindAt(x + 1, y);
+  const vertical = kindAt(x, y - 1) || kindAt(x, y + 1);
+  if (horizontal && !vertical) return 'x';
+  if (vertical && !horizontal) return 'y';
+  return null;
+}
+
+function tileCost(
+  tool: PathBuildTool,
+  heightDelta: number,
+  railType: RailType = 'rail',
+  oneWay = false,
+): number {
   const slope = tool === 'clear' ? 0 : Math.abs(heightDelta) * BUILD_SLOPE_COST;
   if (tool === 'rail') return railBuildCost(railType) + slope;
-  return BUILD_COST_PER_TILE[tool] + slope;
+  const base = BUILD_COST_PER_TILE[tool] + (oneWay && tool === 'road' ? ROAD_ONEWAY_SURCHARGE : 0);
+  return base + slope;
 }
 
 /**
@@ -710,9 +873,12 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
   const tool = options.tool;
   const from = buildTile(options.from);
   const to = buildTile(options.to ?? options.from);
-  const axis = options.axis ?? axisForDrag(from, to);
+  let axis = options.axis ?? axisForDrag(from, to);
   const maxTiles = Math.max(1, options.maxTiles ?? MAX_BUILD_TILES);
   const railType: RailType = tool === 'rail' ? (options.railType ?? 'rail') : 'rail';
+  const roadDirection: RoadDirection = tool === 'road' ? (options.roadDirection ?? 'both') : 'both';
+  const oneWay: RoadOneWay | null = roadDirection === 'both' ? null : roadDirection;
+  let road = tool === 'road' ? { direction: roadDirection, oneWay, convert: false } : undefined;
   const empty: BuildPlan = {
     tool,
     from,
@@ -723,10 +889,35 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     valid: false,
     reason: null,
     ...(tool === 'rail' ? { railType } : {}),
+    ...(road ? { road } : {}),
   };
 
   if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
     return { ...empty, reason: 'Tracé hors de la carte.' };
+  }
+
+  // Une route à sens unique suit un seul axe et un seul sens : OpenTTD
+  // interdit les carrefours et virages à sens unique (DRD). On refuse donc un
+  // tracé en L ou un axe incompatible avant d'afficher le moindre fantôme.
+  if (oneWay) {
+    const requiredAxis = roadOneWayAxis(oneWay);
+    const single = from.x === to.x && from.y === to.y;
+    if (!single && from.x !== to.x && from.y !== to.y) {
+      return {
+        ...empty,
+        reason: 'Sens unique : tracez un segment droit, un axe à la fois.',
+      };
+    }
+    if (!single && axisForDrag(from, to) !== requiredAxis) {
+      return {
+        ...empty,
+        reason:
+          requiredAxis === 'x'
+            ? 'Sens unique est-ouest : tracez une route horizontale ou changez de sens (R).'
+            : 'Sens unique nord-sud : tracez une route verticale ou changez de sens (R).',
+      };
+    }
+    axis = requiredAxis;
   }
 
   const points = traceBuildPath(from, to, axis);
@@ -735,6 +926,57 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
       ...empty,
       reason: `Tronçon trop long (${points.length} tuiles, ${maxTiles} maximum).`,
     };
+  }
+
+  // Sens unique posé sur un tronçon déjà construit : on ne reconstruit rien,
+  // on change le marquage (coût réduit). Symétriquement, repasser un tronçon
+  // à sens unique en double sens est gratuit.
+  let convert = false;
+  if (tool === 'road') {
+    const kinds = points.map((point) => {
+      const index = tileIndex(point.x, point.y, map.width);
+      return TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    });
+    const anyRoad = kinds.some((kind) => kind === 'road');
+    const allRoad = kinds.every((kind) => kind === 'road');
+    if (anyRoad && oneWay) {
+      if (!allRoad) {
+        return {
+          ...empty,
+          reason: 'Sens unique : convertissez un tronçon routier d’un seul tenant.',
+        };
+      }
+      const requiredAxis = roadOneWayAxis(oneWay);
+      for (const point of points) {
+        const axisOfTile = existingRoadAxis(map, point.x, point.y);
+        if (axisOfTile === null) {
+          return {
+            ...empty,
+            reason: 'Sens unique : impossible sur un virage ou un carrefour.',
+          };
+        }
+        if (axisOfTile !== requiredAxis) {
+          return {
+            ...empty,
+            reason: 'Sens unique : le sens choisi ne correspond pas à l’axe de la route.',
+          };
+        }
+      }
+      convert = true;
+      road = { direction: roadDirection, oneWay, convert: true };
+    } else if (allRoad && !oneWay) {
+      // Double sens demandé sur une route déjà construite : n'accepter que si
+      // elle est effectivement à sens unique, pour ne pas transformer un clic
+      // sur une route existante en « reconstruction » silencieuse.
+      const hasOneWay = points.some((point) => {
+        const index = tileIndex(point.x, point.y, map.width);
+        return (map.roadData?.[index] ?? 0) !== 0;
+      });
+      if (hasOneWay) {
+        convert = true;
+        road = { direction: 'both', oneWay: null, convert: true };
+      }
+    }
   }
 
   const tiles: BuildPlanTile[] = [];
@@ -755,15 +997,36 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     if (tool !== 'clear') {
       if (previous) connections |= directionBit(point, previous);
       if (next) connections |= directionBit(point, next);
-      // Une tuile isolée reste une route droite est-ouest, lisible en 3D.
-      if (connections === 0) connections = CONNECT_EAST | CONNECT_WEST;
+      // Une tuile isolée reste une route droite, lisible en 3D : son axe suit
+      // le sens unique quand il y en a un, est-ouest sinon.
+      if (connections === 0) {
+        connections =
+          oneWay && roadOneWayAxis(oneWay) === 'y'
+            ? CONNECT_NORTH | CONNECT_SOUTH
+            : CONNECT_EAST | CONNECT_WEST;
+      }
     }
 
     const heightDelta = previousHeight === null ? 0 : height - previousHeight;
-    const costOfTile = tileCost(tool, heightDelta, railType);
+    const costOfTile = convert
+      ? oneWay
+        ? ROAD_ONEWAY_SURCHARGE
+        : 0
+      : tileCost(tool, heightDelta, railType, oneWay !== null);
     cost += costOfTile;
 
     let tileReason = occupancyReason(kind, tool, map.flags[index] ?? 0);
+    if (convert && kind === 'road') tileReason = null;
+    if (
+      !tileReason &&
+      convert &&
+      options.company !== undefined &&
+      options.company !== COMPANY_NONE &&
+      owner !== COMPANY_NONE &&
+      owner !== options.company
+    ) {
+      tileReason = 'Route appartenant à une autre entreprise.';
+    }
     if (
       !tileReason &&
       tool === 'clear' &&
@@ -806,6 +1069,7 @@ export function planBuild(options: BuildPlanOptions): BuildPlan {
     valid: reason === null,
     reason,
     ...(tool === 'rail' ? { railType } : {}),
+    ...(road ? { road } : {}),
   };
 }
 
@@ -935,6 +1199,18 @@ export function commandFromPlan(
       },
     };
   }
+  if (plan.tool === 'road') {
+    const oneWay = plan.road?.oneWay ?? null;
+    return {
+      ...base,
+      options: {
+        axis: plan.axis,
+        order: plan.axis === 'y' ? 'vertical' : 'horizontal',
+        ...(oneWay ? { one_way: oneWay } : plan.road?.convert ? { one_way: 'both' } : {}),
+        ...(plan.road?.convert ? { convert: true } : {}),
+      },
+    };
+  }
   return { ...base, options: { axis: plan.axis } };
 }
 
@@ -1020,6 +1296,59 @@ export function depotConnections(direction: BuildDirection): number {
     : CONNECT_NORTH | CONNECT_SOUTH;
 }
 
+/** Direction la plus proche de `preferred` qui suit l'axe demandé. */
+export function directionOnAxis(axis: BuildAxis, preferred: BuildDirection): BuildDirection {
+  if (directionAxis(preferred) === axis) return preferred;
+  return axis === 'x' ? 'ne' : 'nw';
+}
+
+/** Vrai si la tuile porte une route (voisinage d'une gare en passage). */
+function isRoadTile(map: MapSnapshot, x: number, y: number): boolean {
+  if (!inBounds(map, x, y)) return false;
+  return (TILE_KINDS[map.kind[tileIndex(x, y, map.width)] ?? 0] ?? 'void') === 'road';
+}
+
+interface RoadOrientation {
+  /** `null` quand la chaussée n'est ni clairement X ni clairement Y. */
+  axis: BuildAxis | null;
+  /** Carrefour, courbe ou bifurcation : pas de gare en passage droite. */
+  junction: boolean;
+  /** Faux pour une impasse (une seule extrémité routière). */
+  through: boolean;
+}
+
+/**
+ * Orientation de la chaussée sous un arrêt en passage.
+ *
+ * `trackBits` suit la convention des connexions du frontend pour les routes
+ * posées par le mock, mais le snapshot WASM y laisse le type de route (nibble
+ * bas à zéro). On retombe alors sur les routes voisines, comme le rendu (#218),
+ * afin de ne jamais refuser une route droite ni accepter un carrefour.
+ */
+function roadOrientationAt(map: MapSnapshot, x: number, y: number, index: number): RoadOrientation {
+  const nibble = (map.trackBits[index] ?? 0) & 0x0f;
+  const alongX = (nibble & (CONNECT_EAST | CONNECT_WEST)) !== 0;
+  const alongY = (nibble & (CONNECT_NORTH | CONNECT_SOUTH)) !== 0;
+  if (alongX || alongY) {
+    if (alongX && alongY) return { axis: null, junction: true, through: false };
+    const through = alongX
+      ? (nibble & (CONNECT_EAST | CONNECT_WEST)) === (CONNECT_EAST | CONNECT_WEST)
+      : (nibble & (CONNECT_NORTH | CONNECT_SOUTH)) === (CONNECT_NORTH | CONNECT_SOUTH);
+    return { axis: alongX ? 'x' : 'y', junction: false, through };
+  }
+
+  const east = isRoadTile(map, x + 1, y);
+  const west = isRoadTile(map, x - 1, y);
+  const south = isRoadTile(map, x, y + 1);
+  const north = isRoadTile(map, x, y - 1);
+  const horizontal = east || west;
+  const vertical = north || south;
+  if (horizontal && vertical) return { axis: null, junction: true, through: false };
+  if (horizontal) return { axis: 'x', junction: false, through: east && west };
+  if (vertical) return { axis: 'y', junction: false, through: north && south };
+  return { axis: null, junction: false, through: false };
+}
+
 function overbuildReason(
   map: MapSnapshot,
   kind: TileKind,
@@ -1040,14 +1369,9 @@ function overbuildReason(
   }
   if (kind === 'road') {
     if (settings.kind !== 'road') return 'Une route occupe cette tuile.';
+    // L'alignement sur la chaussée est résolu par `planStation` : une tuile
+    // route reste constructible dès que « en passage » est coché.
     if (!settings.driveThrough) return 'Une route occupe cette tuile (cochez « en passage »).';
-    const bits = map.trackBits[index] ?? 0;
-    const axis = directionAxis(settings.direction);
-    const alongX = (bits & (CONNECT_EAST | CONNECT_WEST)) !== 0;
-    const alongY = (bits & (CONNECT_NORTH | CONNECT_SOUTH)) !== 0;
-    if ((axis === 'x' && !alongX && alongY) || (axis === 'y' && !alongY && alongX)) {
-      return 'Route mal orientée pour une gare en passage : pivotez avec R.';
-    }
   }
   return null;
 }
@@ -1086,12 +1410,12 @@ function emptyInfrastructurePlan(
 export function planStation(options: StationPlanOptions): BuildPlan {
   const map = options.map;
   const from = buildTile(options.from);
-  const settings: StationSettings = {
+  let settings: StationSettings = {
     ...options.settings,
     platforms: Math.max(1, Math.min(STATION_MAX_PLATFORMS, Math.round(options.settings.platforms))),
     length: Math.max(1, Math.min(STATION_MAX_LENGTH, Math.round(options.settings.length))),
   };
-  const axis = directionAxis(settings.direction);
+  let axis = directionAxis(settings.direction);
   const footprint = stationFootprint(settings);
   const plan = emptyInfrastructurePlan('station', from, from, axis);
   plan.station = settings;
@@ -1104,9 +1428,27 @@ export function planStation(options: StationPlanOptions): BuildPlan {
     return { ...plan, reason: 'Gare hors de la carte.' };
   }
 
+  // Un arrêt en passage suit la chaussée : on aligne la direction sur la route
+  // au lieu d'exiger que le joueur devine le bon R. Les bits de route peuvent
+  // être muets selon le moteur (WASM), d'où la détection par voisinage.
+  const anchorKind = TILE_KINDS[map.kind[tileIndex(left, top, map.width)] ?? 0] ?? 'void';
+  let orientationReason: string | null = null;
+  if (settings.kind === 'road' && settings.driveThrough && anchorKind === 'road') {
+    const orientation = roadOrientationAt(map, left, top, tileIndex(left, top, map.width));
+    if (orientation.junction || (orientation.axis !== null && !orientation.through)) {
+      orientationReason =
+        'Une gare en passage exige une route droite et traversante (pas un carrefour, une courbe ni une impasse).';
+    } else if (orientation.axis) {
+      settings = { ...settings, direction: directionOnAxis(orientation.axis, settings.direction) };
+      axis = orientation.axis;
+      plan.station = settings;
+      plan.axis = axis;
+    }
+  }
+
   const anchorHeight = map.heightMap[tileIndex(left, top, map.width)] ?? 0;
   const costPerTile = STATION_COST_PER_TILE[settings.kind];
-  let reason: string | null = null;
+  let reason: string | null = orientationReason;
   let cost = 0;
 
   for (let y = top; y <= bottom; y += 1) {
@@ -1155,24 +1497,31 @@ export function planStation(options: StationPlanOptions): BuildPlan {
   return { ...plan, cost, valid: reason === null, reason };
 }
 
-function neighbourDirection(
+/**
+ * Directions des tuiles voisines du type demandé, dans l’ordre déterministe
+ * est, ouest, sud, nord. Une entrée de dépôt doit pointer vers l’une d’elles.
+ */
+function neighbourDirections(
   map: MapSnapshot,
   x: number,
   y: number,
   kind: TileKind,
-): BuildDirection | null {
+): BuildDirection[] {
   const neighbours: { dx: number; dy: number; direction: BuildDirection }[] = [
     { dx: 1, dy: 0, direction: 'ne' },
     { dx: -1, dy: 0, direction: 'sw' },
     { dx: 0, dy: 1, direction: 'se' },
     { dx: 0, dy: -1, direction: 'nw' },
   ];
+  const directions: BuildDirection[] = [];
   for (const neighbour of neighbours) {
     if (!inBounds(map, x + neighbour.dx, y + neighbour.dy)) continue;
     const index = tileIndex(x + neighbour.dx, y + neighbour.dy, map.width);
-    if ((TILE_KINDS[map.kind[index] ?? 0] ?? 'void') === kind) return neighbour.direction;
+    if ((TILE_KINDS[map.kind[index] ?? 0] ?? 'void') === kind) {
+      directions.push(neighbour.direction);
+    }
   }
-  return null;
+  return directions;
 }
 
 /** Plan d'un dépôt route/rail ; l'orientation suit la voie voisine si possible. */
@@ -1180,8 +1529,14 @@ export function planDepot(options: DepotPlanOptions): BuildPlan {
   const map = options.map;
   const from = buildTile(options.from);
   const kind: TileKind = options.settings.kind === 'rail' ? 'rail' : 'road';
-  const detected = neighbourDirection(map, from.x, from.y, kind);
-  const direction = options.settings.direction ?? detected ?? 'se';
+  const adjacent = neighbourDirections(map, from.x, from.y, kind);
+  const requested = options.settings.direction;
+  // L'entrée doit donner sur la voie adjacente : une rotation explicite ne
+  // l'emporte que si elle pointe effectivement vers une voie du bon type.
+  const direction =
+    requested !== null && adjacent.includes(requested)
+      ? requested
+      : (adjacent[0] ?? requested ?? 'se');
   const plan = emptyInfrastructurePlan('depot', from, from, directionAxis(direction));
   plan.depot = { kind: options.settings.kind, direction };
 
@@ -1750,7 +2105,8 @@ export interface LockPlanOptions extends InfrastructureOptions {
   settings: LockSettings;
 }
 
-function directionToNeighbour(dx: number, dy: number): BuildDirection {
+/** Direction nommée correspondant à un décalage de tuile (ne=+x, se=+y…). */
+export function directionFromOffset(dx: number, dy: number): BuildDirection {
   if (dx > 0) return 'ne';
   if (dx < 0) return 'sw';
   if (dy > 0) return 'se';
@@ -1800,7 +2156,7 @@ export function planLock(options: LockPlanOptions): BuildPlan {
   if (!best) {
     return { ...plan, reason: 'Une écluse exige un bief voisin (canal ou eau).' };
   }
-  const direction = options.settings.direction ?? directionToNeighbour(best.dx, best.dy);
+  const direction = options.settings.direction ?? directionFromOffset(best.dx, best.dy);
   const upper = Math.max(height, best.height);
   const lower = Math.min(height, best.height);
   const axis = directionAxis(direction);
@@ -2496,9 +2852,15 @@ export interface TunnelSpanOptions {
  * brèche de même niveau. Sans cela, il fallait viser au pixel près une tuile
  * de hauteur identique, et la moindre pente faisait échouer la pose.
  *
- * Le premier portail qui laisse du relief entre les deux gagne, exactement
- * comme `CMD_BUILD_TUNNEL` : viser une tuile plus loin ne doit pas produire un
- * plan que le moteur refuserait.
+ * OpenTTD compare la hauteur *de surface* (`GetTileZ`, coin le plus bas), pas
+ * la hauteur brute du coin nord. Sur une pente régulière, le portail de sortie
+ * a donc un coin nord un niveau plus haut que celui d'entrée : comparer
+ * `heightMap` sélectionnait la tuile plate une tuile trop loin et le pont C++
+ * refusait ensuite le tunnel (#229).
+ *
+ * La sortie est la *première* tuile de même surface, exactement comme
+ * `CMD_BUILD_TUNNEL` : viser une tuile plus loin ne doit pas produire un plan
+ * que le moteur refuserait.
  */
 export function resolveTunnelSpan(
   map: MapSnapshot,
@@ -2515,33 +2877,37 @@ export function resolveTunnelSpan(
   const step = axis === 'x' ? Math.sign(goal.x - entrance.x) : Math.sign(goal.y - entrance.y);
   if (step === 0) return null;
 
-  const portalHeight = map.heightMap[tileIndex(entrance.x, entrance.y, map.width)] ?? 0;
-  for (let distance = TUNNEL_MIN_TILES - 1; distance < TUNNEL_MAX_TILES; distance += 1) {
+  const portalHeight = tileSlopeInfo(map, entrance.x, entrance.y).z;
+  let maxMiddleHeight = portalHeight;
+  for (let distance = 1; distance < TUNNEL_MAX_TILES; distance += 1) {
     const x = entrance.x + (axis === 'x' ? step * distance : 0);
     const y = entrance.y + (axis === 'y' ? step * distance : 0);
     if (!inBounds(map, x, y)) return null;
-    const index = tileIndex(x, y, map.width);
-    if ((map.heightMap[index] ?? 0) !== portalHeight) continue;
-    if (structureEndReason(map, x, y, options.settings.kind, 'portail', options.company)) {
-      continue;
+    const info = tileSlopeInfo(map, x, y);
+
+    // Première brèche au même niveau : c'est la sortie qu'OpenTTD choisira.
+    if (info.z === portalHeight) {
+      const blocked = structureEndReason(
+        map,
+        x,
+        y,
+        options.settings.kind,
+        'portail',
+        options.company,
+      );
+      if (blocked) return null;
+      if (distance + 1 < TUNNEL_MIN_TILES) return null;
+      // Sans relief plus haut que les portails, il n'y a rien à percer.
+      if (maxMiddleHeight <= portalHeight) return null;
+      return { from: entrance, to: { x, y } };
     }
 
-    let maxMiddleHeight = portalHeight;
-    let blocked = false;
-    for (let offset = 1; offset < distance; offset += 1) {
-      const middleX = entrance.x + (axis === 'x' ? step * offset : 0);
-      const middleY = entrance.y + (axis === 'y' ? step * offset : 0);
-      const middle = tileIndex(middleX, middleY, map.width);
-      const middleKind = TILE_KINDS[map.kind[middle] ?? 0] ?? 'void';
-      if (middleKind === 'bridge' || middleKind === 'tunnel' || middleKind === 'aqueduct') {
-        blocked = true;
-        break;
-      }
-      maxMiddleHeight = Math.max(maxMiddleHeight, map.heightMap[middle] ?? 0);
+    const index = tileIndex(x, y, map.width);
+    const middleKind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
+    if (middleKind === 'bridge' || middleKind === 'tunnel' || middleKind === 'aqueduct') {
+      return null;
     }
-    // Sans relief plus haut que les portails, il n'y a rien à percer.
-    if (blocked || maxMiddleHeight <= portalHeight) continue;
-    return { from: entrance, to: { x, y } };
+    maxMiddleHeight = Math.max(maxMiddleHeight, tileHighestCorner(map, x, y));
   }
   return null;
 }
@@ -2555,11 +2921,17 @@ export function planTunnel(options: TunnelPlanOptions): BuildPlan {
   const axis = traced?.axis ?? 'x';
   const plan = emptyInfrastructurePlan('tunnel', from, to, axis);
   const length = Math.abs(to.x - from.x) + Math.abs(to.y - from.y) + 1;
-  const portalHeight = map.heightMap[tileIndex(from.x, from.y, map.width)] ?? 0;
+  // Hauteur de surface (GetTileZ) : sur une pente régulière, le coin nord du
+  // portail de sortie est un niveau plus haut. Comparer `heightMap` brut
+  // refusait des tunnels valides (#229).
+  const fromInfo = tileSlopeInfo(map, from.x, from.y);
+  const toInfo = tileSlopeInfo(map, to.x, to.y);
+  const portalHeight = fromInfo.z;
   plan.tunnel = {
     kind: options.settings.kind,
     length,
     depth: 0,
+    portalHeight,
     maintenance: Math.round(length * TUNNEL_MAINTENANCE_PER_TILE[options.settings.kind]),
   };
 
@@ -2588,15 +2960,29 @@ export function planTunnel(options: TunnelPlanOptions): BuildPlan {
     return { ...plan, reason: 'Tunnel hors de la carte.' };
   }
 
-  const toHeight = map.heightMap[tileIndex(to.x, to.y, map.width)] ?? 0;
   let reason: string | null = null;
-  if (portalHeight !== toHeight) {
-    reason = `Les deux portails d’un tunnel doivent être à la même hauteur (${portalHeight} ≠ ${toHeight}).`;
+  if (portalHeight !== toInfo.z) {
+    reason = `Les deux portails d’un tunnel doivent être à la même hauteur (${portalHeight} ≠ ${toInfo.z}).`;
   }
   reason =
     reason ??
     structureEndReason(map, from.x, from.y, options.settings.kind, 'portail', options.company) ??
     structureEndReason(map, to.x, to.y, options.settings.kind, 'portail', options.company);
+
+  // OpenTTD n'accepte de commencer un tunnel que sur une pente régulière
+  // (une tuile inclinée dans l'axe). L'autre portail peut être plat : OpenTTD
+  // le terrasse automatiquement. On accepte donc le tracé dès qu'un des deux
+  // portails est un talus valide, comme le fait le pont C++ (#229).
+  if (!reason) {
+    const stepX = Math.sign(to.x - from.x);
+    const stepY = Math.sign(to.y - from.y);
+    const fromCanStart = !fromInfo.steep && fromInfo.slope === inclinedSlopeForStep(stepX, stepY);
+    const toCanStart = !toInfo.steep && toInfo.slope === inclinedSlopeForStep(-stepX, -stepY);
+    if (!fromCanStart && !toCanStart) {
+      reason =
+        'Un tunnel doit partir d’une pente régulière : le portail d’entrée doit être un talus incliné dans l’axe (outil terrassement).';
+    }
+  }
 
   let maxMiddleHeight = portalHeight;
   const costPerTile = TUNNEL_COST_PER_TILE[options.settings.kind];
@@ -2606,10 +2992,16 @@ export function planTunnel(options: TunnelPlanOptions): BuildPlan {
     if (!point) continue;
     const index = tileIndex(point.x, point.y, map.width);
     const kind = TILE_KINDS[map.kind[index] ?? 0] ?? 'void';
-    const height = map.heightMap[index] ?? 0;
     const middle = i > 0 && i < traced.points.length - 1;
     if (middle) {
-      maxMiddleHeight = Math.max(maxMiddleHeight, height);
+      const middleInfo = tileSlopeInfo(map, point.x, point.y);
+      // Un creux à la hauteur des portails arrête le tunnel avant la sortie
+      // demandée : OpenTTD ressortirait là, pas sur la tuile visée.
+      if (middleInfo.z === portalHeight) {
+        reason =
+          reason ?? 'Le tunnel ressort trop tôt : un creux au niveau des portails coupe le tracé.';
+      }
+      maxMiddleHeight = Math.max(maxMiddleHeight, tileHighestCorner(map, point.x, point.y));
       if (kind === 'bridge' || kind === 'tunnel') {
         reason = reason ?? 'Un ouvrage occupe déjà ce tracé.';
       }

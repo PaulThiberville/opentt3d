@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { Mesh } from 'three';
-import { TILE_KIND_INDEX, type MapSnapshot, type StationSnapshot } from '../src/engine/protocol';
+import {
+  ROAD_ONEWAY_INDEX,
+  TILE_KIND_INDEX,
+  type MapSnapshot,
+  type StationSnapshot,
+} from '../src/engine/protocol';
 import { cornerHeightWorld, sampleHeightWorld } from '../src/game/mapGrid';
 import {
   TrackLayer,
@@ -8,6 +13,8 @@ import {
   trackGroundHeight,
   roadTileLayout,
   roadMarkingPaths,
+  roadOneWayArrowPaths,
+  ROAD_LANE_OFFSET,
   ROAD_LIFT,
   SIDEWALK_LIFT,
   MARK_LIFT,
@@ -975,5 +982,69 @@ describe('chaussée sans dévers (#202)', () => {
     } finally {
       layer.dispose();
     }
+  });
+});
+
+describe('routes à sens unique (#231)', () => {
+  it('lit roadData et conserve le sens sur une route droite', () => {
+    const map = makeMap(8, 8);
+    for (let x = 1; x <= 5; x += 1) road(map, x, 3);
+    map.roadData = new Uint8Array(map.width * map.height);
+    for (let x = 1; x <= 5; x += 1) {
+      map.roadData[3 * map.width + x] = ROAD_ONEWAY_INDEX.east;
+    }
+    const plan = planAt(map, 3, 3);
+    expect(plan?.shape).toBe('straight');
+    expect(plan?.roadOneWay).toBe('east');
+  });
+
+  it('ignore un sens unique incohérent avec un virage', () => {
+    const map = makeMap(8, 8);
+    road(map, 3, 3);
+    road(map, 4, 3);
+    road(map, 3, 4);
+    map.roadData = new Uint8Array(map.width * map.height);
+    map.roadData[3 * map.width + 3] = ROAD_ONEWAY_INDEX.east;
+    const plan = planAt(map, 3, 3);
+    expect(plan?.shape).toBe('curve');
+    expect(plan?.roadOneWay).toBeNull();
+  });
+
+  it('trace des flèches dans les deux voies, orientées par le sens', () => {
+    const map = makeMap(8, 8);
+    for (let x = 1; x <= 5; x += 1) road(map, x, 3);
+    map.roadData = new Uint8Array(map.width * map.height);
+    for (let x = 1; x <= 5; x += 1) {
+      map.roadData[3 * map.width + x] = ROAD_ONEWAY_INDEX.east;
+    }
+    const plan = planAt(map, 3, 3);
+    if (!plan) throw new Error('plan de route absent');
+    const paths = roadOneWayArrowPaths(plan);
+    expect(paths).toHaveLength(6);
+    // Deux voies, chacune avec hampe + deux traits de pointe.
+    const shafts = [paths[0], paths[3]];
+    for (const shaft of shafts) {
+      if (!shaft) throw new Error('hampe absente');
+      expect(shaft[0]?.x).toBeLessThan(shaft[1]?.x ?? 0);
+    }
+    expect(shafts[0]?.[0]?.z).toBeCloseTo(plan.y + 0.5 - ROAD_LANE_OFFSET);
+    expect(shafts[1]?.[0]?.z).toBeCloseTo(plan.y + 0.5 + ROAD_LANE_OFFSET);
+
+    // Le sens ouest inverse les hampes.
+    const westPlan = { ...plan, roadOneWay: 'west' as const };
+    const west = roadOneWayArrowPaths(westPlan);
+    expect(west[0]?.[0]?.x).toBeGreaterThan(west[0]?.[1]?.x ?? 0);
+  });
+
+  it('ne trace aucune flèche sur un carrefour', () => {
+    const map = makeMap(8, 8);
+    road(map, 3, 3);
+    road(map, 2, 3);
+    road(map, 4, 3);
+    road(map, 3, 2);
+    road(map, 3, 4);
+    const plan = planAt(map, 3, 3);
+    if (!plan) throw new Error('plan de route absent');
+    expect(roadOneWayArrowPaths({ ...plan, roadOneWay: 'east' })).toEqual([]);
   });
 });

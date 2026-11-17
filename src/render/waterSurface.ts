@@ -7,8 +7,10 @@
  * la teinte et l'écume suivent donc la distance à la côte sans ajouter de
  * géométrie. La nappe s'étend d'une couronne sous la berge (#204) et une paroi
  * ferme les marches légitimes entre deux niveaux (#205). Une chute libre entre
- * deux nappes devient un rideau incliné et animé, tandis qu'une écluse garde
- * un bajoyer de pierre (#214). Les helpers sont purs et testables sous Node.
+ * deux nappes devient un rideau continu sur toute la largeur de la marche,
+ * vertical en haut puis évasé vers l'aval, avec une écume transparente au
+ * pied ; une écluse garde un bajoyer de pierre (#214/#226). Les helpers sont
+ * purs et testables sous Node.
  *
  * Modèle de hauteur (correctif #176) : dans le protocole, la hauteur d'une
  * tuile d'eau est le niveau de sa surface dans OpenTTD. La surface 3D est donc
@@ -107,8 +109,19 @@ export interface ShoreFields {
  * profondeur réelle d'un sommet sans peindre les tuiles sèches voisines.
  */
 export interface WaterHeightFields {
-  /** Hauteur monde du lit rendu, pour chaque tuile. */
+  /** Hauteur monde du lit physique, pour chaque tuile. */
   bed: Float32Array;
+  /**
+   * Lit utilisé par le maillage du terrain.
+   *
+   * Sous une marche de niveau, le lit physique d'une tuile haute reste à son
+   * niveau : l'interpolation bilinéaire des coins ferait remonter une grande
+   * rampe de terre au-dessus de la nappe basse, lue comme un plateau ou un
+   * triangle étiré. Les tuiles d'eau qui dominent une nappe plus basse sont
+   * donc creusées ici jusqu'à passer sous cette nappe : la rampe disparaît
+   * sous l'eau et le rideau de chute peut fermer proprement la marche.
+   */
+  bedRender: Float32Array;
   /** Hauteur monde de la surface de l'eau (0 sur la terre). */
   surface: Float32Array;
   /** 1 sur une tuile d'eau, 0 ailleurs. */
@@ -266,6 +279,7 @@ export function sampleCornerField(
 export function buildWaterHeightFields(map: MapSnapshot): WaterHeightFields {
   const size = map.width * map.height;
   const bed = new Float32Array(size);
+  const bedRender = new Float32Array(size);
   const surface = new Float32Array(size);
   const weight = new Float32Array(size);
   const shoreSurface = new Float32Array(size);
@@ -283,13 +297,44 @@ export function buildWaterHeightFields(map: MapSnapshot): WaterHeightFields {
     } else {
       bed[index] = tileTopHeight(level);
     }
+    bedRender[index] = bed[index] ?? 0;
+  }
+
+  // Lit rendu des marches : une tuile d'eau qui domine une nappe voisine est
+  // creusée sous cette nappe. Sans cela, la moyenne de coins du maillage
+  // dessine une rampe de terre au-dessus de l'eau basse, lue comme un plateau
+  // ou une plaque triangulaire au pied de la chute (#226).
+  const { width, height } = map;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (isWater[index] !== 1) continue;
+      const ownSurface = surface[index] ?? 0;
+      let lowest = Infinity;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          const neighbour = ny * width + nx;
+          if (neighbour === index || isWater[neighbour] !== 1) continue;
+          const neighbourSurface = surface[neighbour] ?? 0;
+          if (neighbourSurface < ownSurface - WATER_WALL_EPSILON) {
+            lowest = Math.min(lowest, neighbourSurface);
+          }
+        }
+      }
+      if (Number.isFinite(lowest)) {
+        bedRender[index] = Math.min(bedRender[index] ?? 0, lowest - WATER_STEP_BED_MARGIN);
+      }
+    }
   }
 
   // Couronne de berge : chaque tuile sèche au contact (8-voisinage) d'une
   // tuile d'eau reçoit la surface de l'eau voisine la plus basse. Sa nappe
   // s'étend ainsi sous la pente, y compris aux coins diagonaux, sans jamais
   // dépasser le dessus de la tuile sèche (`surface < level * HEIGHT_SCALE`).
-  const { width, height } = map;
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const index = y * width + x;
@@ -321,7 +366,7 @@ export function buildWaterHeightFields(map: MapSnapshot): WaterHeightFields {
     }
   }
 
-  return { bed, surface, weight, shoreSurface, coverage };
+  return { bed, bedRender, surface, weight, shoreSurface, coverage };
 }
 
 /**
@@ -459,17 +504,41 @@ export const WATER_CASCADE_MAX_RUN = 0.72;
 /** Proportion de la hauteur de chute convertie en avancée horizontale. */
 export const WATER_CASCADE_RUN_RATIO = 0.42;
 
+/**
+ * Partie haute du rideau laissée verticale.
+ *
+ * Au-dessus de cette fraction, le rideau reste dans le plan de la marche : son
+ * arête supérieure coïncide exactement avec la nappe amont, sans lèvre
+ * horizontale ni triangle qui dépasse. L'évasement ne commence qu'en dessous.
+ */
+export const WATER_CASCADE_VERTICAL_START = 0.46;
+
 /** Nombre de bandes verticales du rideau (maillage léger mais courbe). */
 export const WATER_CASCADE_SEGMENTS = 5;
+
+/**
+ * Nombre de bandes horizontales du rideau.
+ *
+ * Les bords latéraux restent exactement sur les coins de la marche : deux
+ * arêtes voisines se raccordent sans trou ni triangle isolé, y compris aux
+ * angles. Le centre s'évase pour casser l'effet de plaque plane.
+ */
+export const WATER_CASCADE_LATERAL_SEGMENTS = 4;
 
 /** Recul du haut du rideau dans la tuile haute, pour masquer l'arête. */
 export const WATER_CASCADE_TOP_INSET = 0.05;
 
 /** Profondeur du tablier d'écume au pied de la chute, en tuiles. */
-export const WATER_CASCADE_FOAM_LENGTH = 0.26;
+export const WATER_CASCADE_FOAM_LENGTH = 0.32;
 
 /** Hauteur du tablier d'écume au-dessus de la nappe basse. */
-export const WATER_CASCADE_FOAM_LIFT = 0.06;
+export const WATER_CASCADE_FOAM_LIFT = 0.018;
+
+/**
+ * Creusement minimal du lit rendu sous la nappe aval d'une marche, en unités
+ * monde. Il garantit qu'aucun sommet du terrain ne dépasse la surface basse.
+ */
+export const WATER_STEP_BED_MARGIN = 0.28;
 
 /**
  * Nature d'une marche d'eau :
@@ -523,14 +592,89 @@ export function waterCascadeRun(drop: number): number {
 /**
  * Décalage horizontal d'un point du rideau, de `t = 0` (haut) à `t = 1` (pied).
  *
- * Négatif en haut : le rideau mord légèrement sur la nappe haute pour masquer
- * l'arête du quad. La courbe s'ouvre ensuite vers la nappe basse, comme une
- * lame d'eau qui accélère en tombant.
+ * Le haut reste plaqué sur l'arête de la marche, avec juste un léger recul
+ * pour masquer la jointure avec la nappe amont. Le rideau devient vertical
+ * jusqu'à `WATER_CASCADE_VERTICAL_START`, puis s'évase vers la nappe basse
+ * comme une lame d'eau qui accélère en tombant.
  */
 export function waterCascadeOffset(t: number, run: number): number {
   const clamped = Number.isFinite(t) ? Math.max(0, Math.min(1, t)) : 0;
   const travel = Number.isFinite(run) ? Math.max(0, run) : 0;
-  return -WATER_CASCADE_TOP_INSET + (travel + WATER_CASCADE_TOP_INSET) * clamped ** 1.35;
+  const flare = smoothstep(WATER_CASCADE_VERTICAL_START, 1, clamped) ** 1.2;
+  const inset = WATER_CASCADE_TOP_INSET * (1 - flare);
+  return travel * flare - inset;
+}
+
+/**
+ * Décalage latéral du rideau, nul sur les deux coins de l'arête.
+ *
+ * Deux arêtes voisines partagent ainsi exactement leurs extrémités : le
+ * rideau reste continu sur toute la largeur de la marche et aucun triangle
+ * isolé n'apparaît dans les angles. Le centre s'évase, la rive reste plaquée.
+ */
+export function waterCascadeLateralOffset(t: number, u: number, run: number): number {
+  const lateral = Number.isFinite(u) ? Math.max(0, Math.min(1, u)) : 0;
+  const weight = Math.sin(Math.PI * lateral);
+  return waterCascadeOffset(t, run) * weight;
+}
+
+/**
+ * Étendue d'un rideau le long d'une arête de marche.
+ *
+ * Deux arêtes colinéaires de même niveau forment **un seul** rideau : on
+ * remonte et on descend la ligne d'eau tant que la tuile voisine produit la
+ * même cascade. `uStart`/`uEnd` donnent la portion de ce rideau portée par la
+ * tuile courante, ce qui évite les vallons et les triangles à chaque jointure
+ * de tuile. Une différence de niveau aval clôt l'étendue : le raccord se fait
+ * alors sur une arête distincte.
+ */
+export function waterCascadeSpan(
+  map: MapSnapshot,
+  fields: WaterHeightFields,
+  x: number,
+  y: number,
+  dx: number,
+  dy: number,
+): { uStart: number; uEnd: number; length: number; run: number; bottom: number } {
+  const own = waterWallForEdge(map, fields, x, y, dx, dy);
+  if (!own || own.kind !== 'cascade') {
+    return { uStart: 0, uEnd: 1, length: 1, run: 0, bottom: 0 };
+  }
+  const tangentX = dy;
+  const tangentY = -dx;
+  const same = (tx: number, ty: number): boolean => {
+    const segment = waterWallForEdge(map, fields, tx, ty, dx, dy);
+    return (
+      segment !== null &&
+      segment.kind === 'cascade' &&
+      Math.abs(segment.bottom - own.bottom) < 1e-6 &&
+      Math.abs(segment.top - own.top) < 1e-6
+    );
+  };
+  let before = 0;
+  while (before < 64) {
+    const tx = x - tangentX * (before + 1);
+    const ty = y - tangentY * (before + 1);
+    if (tx < 0 || ty < 0 || tx >= map.width || ty >= map.height) break;
+    if (!same(tx, ty)) break;
+    before += 1;
+  }
+  let after = 0;
+  while (after < 64) {
+    const tx = x + tangentX * (after + 1);
+    const ty = y + tangentY * (after + 1);
+    if (tx < 0 || ty < 0 || tx >= map.width || ty >= map.height) break;
+    if (!same(tx, ty)) break;
+    after += 1;
+  }
+  const length = before + 1 + after;
+  return {
+    uStart: before / length,
+    uEnd: (before + 1) / length,
+    length,
+    run: own.run,
+    bottom: own.bottom,
+  };
 }
 
 export function waterWallForEdge(
@@ -585,10 +729,10 @@ export function waterWallForEdge(
     const leftZ = dy !== 0 ? Math.max(y, ny) : y;
     const rightX = dx !== 0 ? leftX : x + 1;
     const rightZ = dy !== 0 ? leftZ : y + 1;
-    const groundA = sampleCornerField(fields.bed, width, height, leftX, leftZ);
-    const groundB = sampleCornerField(fields.bed, width, height, rightX, rightZ);
+    const groundA = sampleCornerField(fields.bedRender, width, height, leftX, leftZ);
+    const groundB = sampleCornerField(fields.bedRender, width, height, rightX, rightZ);
     const groundMid = sampleCornerField(
-      fields.bed,
+      fields.bedRender,
       width,
       height,
       (leftX + rightX) / 2,

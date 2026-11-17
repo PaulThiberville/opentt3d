@@ -14,9 +14,13 @@
 import {
   COMPANY_NONE,
   PROTOCOL_VERSION,
+  ROAD_ONEWAY_DIRECTIONS,
+  ROAD_ONEWAY_INDEX,
   TILE_FLAG,
   TILE_KIND_INDEX,
   TRACK_BIT_CROSSING_RAIL,
+  roadOneWayFromIndex,
+  roadOneWayVector,
   type CompanySnapshot,
   type DepotSnapshot,
   type DisasterKind,
@@ -32,6 +36,7 @@ import {
   type OrderComparator,
   type OrderCondition,
   type RailType,
+  type RoadOneWay,
   type SignalDirection,
   type StationSnapshot,
   type StructureSnapshot,
@@ -61,6 +66,9 @@ import {
   BRIDGE_APPROACH_TILES,
   BRIDGE_MATERIALS,
   BRIDGE_MATERIAL_LABELS,
+  directionFromIndex,
+  directionFromOffset,
+  directionOffset,
   directionToIndex,
   planAqueduct,
   planBridge,
@@ -87,6 +95,7 @@ import {
   type BuildTransport,
   type DepotSettings,
   type LockSettings,
+  type RoadDirection,
   type SignalSettings,
   type SignalTrack,
   type StationSettings,
@@ -191,6 +200,8 @@ interface MockVehicle {
   routeOrders: number[];
   speed: number;
   direction: number;
+  /** Tangage de rendu (#232), recalculé à chaque tick. */
+  pitch: number;
   status: number;
   waitTicks: number;
   x: number;
@@ -406,6 +417,10 @@ interface MockWorld {
   trackBits: Uint8Array;
   /** Type de rail par tuile (#157). */
   railTypes: Uint8Array;
+  /** Sens de circulation par tuile (#231), 0 = double sens. */
+  roadData: Uint8Array;
+  /** Nombre de tuiles à sens unique (accélère le hash sans sens unique). */
+  roadCount: number;
   /** Bits de signal par tuile (#156), voir `signalRules.ts`. */
   signalData: Uint8Array;
   /** Nombre de tuiles portant un signal (accélère les snapshots sans signal). */
@@ -460,6 +475,8 @@ interface SerializedWorld {
   /** Absents des sauvegardes mock antérieures à #156/#157. */
   railTypes?: string;
   signalData?: string;
+  /** Sens de circulation (#231), absent des sauvegardes antérieures. */
+  roadData?: string;
   signalCount?: number;
   companies: (Omit<MockCompany, 'maxLoan' | 'monthsOfBankruptcy' | 'interestPaid'> & {
     maxLoan?: number;
@@ -588,10 +605,13 @@ function directionFromVector(dx: number, dy: number): number {
   return Math.round((angle / (Math.PI * 2)) * 256) & 255;
 }
 
-function stepDirection(current: number, target: number, maxStep: number): number {
-  const delta = ((target - current + 384) % 256) - 128;
-  if (Math.abs(delta) <= maxStep) return target & 255;
-  return (current + Math.sign(delta) * maxStep + 256) & 255;
+/**
+ * Direction de sortie d'un dépôt (#232) : `direction` est un DiagDirection
+ * mock (0 = NE, 1 = SE, 2 = SW, 3 = NW), converti dans la convention 0..255
+ * des véhicules. Un véhicule au dépôt fait face à la sortie, pas au nord.
+ */
+function depotDirection(direction: number): number {
+  return (((Math.round(direction) & 3) * 64 + 32) % 256) & 255;
 }
 
 /** Trace un chemin en L (horizontal puis vertical) le long des tuiles. */
@@ -648,6 +668,7 @@ interface RouteWorld {
   width: number;
   height: number;
   kind: Uint8Array;
+  roadData: Uint8Array;
   stations: readonly MockStation[];
   depots: readonly MockDepot[];
   structures: readonly MockStructure[];
@@ -773,6 +794,45 @@ function surfaceCost(
   }
 }
 
+/**
+ * Une route à sens unique n'autorise que le déplacement porté par `roadData`.
+ * Les ouvrages, gares et dépôts n'ont pas de sens (#231) : seule la tuile
+ * réellement routière contraint le passage.
+ */
+export function roadOneWayAllows(
+  roadData: Uint8Array,
+  index: number,
+  dx: number,
+  dy: number,
+): boolean {
+  const value = roadData[index] ?? 0;
+  if (value === 0) return true;
+  const direction = roadOneWayFromIndex(value);
+  if (!direction) return true;
+  const vector = roadOneWayVector(direction);
+  return vector.x === dx && vector.y === dy;
+}
+
+/** Vérifie l'entrée et la sortie d'une tuile route à sens unique. */
+function canTravelRoad(
+  world: RouteWorld,
+  fromIndex: number,
+  toIndex: number,
+  dx: number,
+  dy: number,
+): boolean {
+  if (
+    (world.kind[fromIndex] ?? 0) === K.road &&
+    !roadOneWayAllows(world.roadData, fromIndex, dx, dy)
+  ) {
+    return false;
+  }
+  if ((world.kind[toIndex] ?? 0) === K.road && !roadOneWayAllows(world.roadData, toIndex, dx, dy)) {
+    return false;
+  }
+  return true;
+}
+
 /** File de priorité binaire minimale, sans allocation par nœud. */
 class MinHeap {
   private readonly nodes: number[] = [];
@@ -873,6 +933,10 @@ function findSurfacePath(world: RouteWorld, kind: VehicleKind, start: P2, goal: 
       if (closed[next]) continue;
       const nx = next % world.width;
       const ny = Math.floor(next / world.width);
+      // Un sens unique interdit l'entrée et la sortie à contresens (#231).
+      if (!canTravelRoad(world, current, next, nx - x, ny - Math.floor(current / world.width))) {
+        continue;
+      }
       const stepCost = surfaceCost(world, kind, nx, ny, next === goalIndex);
       if (!Number.isFinite(stepCost)) continue;
       const tentative = (costs[current] ?? Infinity) + stepCost;
@@ -900,24 +964,89 @@ function findSurfacePath(world: RouteWorld, kind: VehicleKind, start: P2, goal: 
 }
 
 /**
+ * Sortie d’un dépôt : la tuile du dépôt et la tuile de voie située devant sa
+ * porte. Le tracé commence et finit par cette porte pour que le véhicule ne
+ * traverse jamais un mur ni ne boucle dans la tuile du dépôt.
+ */
+interface RouteOrigin {
+  depot: P2;
+  door: P2;
+}
+
+/** Tuile adjacente à l’entrée du dépôt, si elle est praticable. */
+function depotDoorTile(world: RouteWorld, depot: MockDepot, kind: VehicleKind): P2 | null {
+  const offset = directionOffset(directionFromIndex(depot.direction));
+  const x = depot.x + Math.floor(depot.width / 2) + offset.dx;
+  const y = depot.y + Math.floor(depot.height / 2) + offset.dy;
+  if (x < 0 || y < 0 || x >= world.width || y >= world.height) return null;
+  return Number.isFinite(surfaceCost(world, kind, x, y, false)) ? { x, y } : null;
+}
+
+/**
+ * Origine d’un véhicule garé dans un dépôt. Le chemin de sortie part de la
+ * porte ; sans voie devant celle-ci, la tournée est refusée explicitement.
+ */
+function routeOriginForVehicle(
+  world: MockWorld,
+  vehicle: MockVehicle,
+): { origin: RouteOrigin | null; error: string | null } {
+  if (vehicle.status !== 3) return { origin: null, error: null };
+  const depot = depotAtTile(world, Math.floor(vehicle.x), Math.floor(vehicle.y));
+  if (!depot || depot.company !== vehicle.company) return { origin: null, error: null };
+  const door = depotDoorTile(world, depot, vehicle.kind);
+  if (!door) {
+    return {
+      origin: null,
+      error:
+        `Dépôt #${depot.id} : aucune voie praticable devant l’entrée ` +
+        `(${depot.x}, ${depot.y}).`,
+    };
+  }
+  return { origin: { depot: { x: depot.x, y: depot.y }, door }, error: null };
+}
+
+/**
  * Tracé d'une tournée respectant l'infrastructure du véhicule.
  *
  * Part de la position courante, rejoint chaque cible dans l'ordre puis revient
  * au départ (boucle aller-retour). Les avions vont en ligne directe ; les
- * autres types empruntent `findSurfacePath`.
+ * autres types empruntent `findSurfacePath`. Pour un véhicule garé en dépôt,
+ * `origin` impose une sortie et un retour par la porte du dépôt.
  */
 function buildRoutePath(
   world: RouteWorld,
   start: P2,
   targets: readonly P2[],
   kind: VehicleKind,
+  origin: RouteOrigin | null = null,
 ): { path: P2[] | null; error: string | null } {
   const anchor = { x: Math.floor(start.x), y: Math.floor(start.y) };
-  const tiles: P2[] = [anchor];
-  let cursor = anchor;
-  for (const target of targets) {
-    const goal = { x: Math.floor(target.x), y: Math.floor(target.y) };
-    if (goal.x === cursor.x && goal.y === cursor.y) continue;
+  const tiles: P2[] = [];
+  let cursor: P2;
+  let endsAtOriginDepot = false;
+  if (origin) {
+    tiles.push({ ...origin.depot }, { ...origin.door });
+    cursor = { ...origin.door };
+  } else {
+    tiles.push(anchor);
+    cursor = anchor;
+  }
+  for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+    const target = targets[targetIndex];
+    if (!target) continue;
+    let goal = { x: Math.floor(target.x), y: Math.floor(target.y) };
+    const isOriginDepot = origin !== null && goal.x === origin.depot.x && goal.y === origin.depot.y;
+    const isLastTarget = targetIndex === targets.length - 1;
+    if (isOriginDepot && origin) goal = { ...origin.door };
+    if (goal.x === cursor.x && goal.y === cursor.y) {
+      // Un ordre de dépôt déjà satisfait ne crée pas un aller-retour sur la
+      // tuile du dépôt.
+      if (isOriginDepot && isLastTarget && origin) {
+        tiles.push({ ...origin.depot });
+        endsAtOriginDepot = true;
+      }
+      continue;
+    }
     const segment =
       kind === 'aircraft' ? traceTiles(cursor, goal) : findSurfacePath(world, kind, cursor, goal);
     if (!segment) {
@@ -933,8 +1062,21 @@ function buildRoutePath(
       if (point) tiles.push(point);
     }
     cursor = goal;
+    if (isOriginDepot && isLastTarget && origin) {
+      // Retour à la tuile du dépôt juste après la porte : le véhicule rentre
+      // par l'entrée au lieu de repartir en sens inverse.
+      tiles.push({ ...origin.depot });
+      endsAtOriginDepot = true;
+    }
   }
-  return { path: loopPath(tiles), error: null };
+  // Une tournée qui se termine au dépôt est déjà fermée : inutile de retracer
+  // tout l'aller en sens inverse.
+  return {
+    path: endsAtOriginDepot
+      ? tiles.map((tile) => ({ x: tile.x + 0.5, y: tile.y + 0.5 }))
+      : loopPath(tiles),
+    error: null,
+  };
 }
 
 /** Erreur explicite si un ordre cible une infrastructure incompatible. */
@@ -996,6 +1138,15 @@ function segmentsForStopsOnPath(path: P2[], stops: StopPoint[]): (MockStop | nul
     const point = path[i];
     if (!point) continue;
     for (const stop of stops) {
+      if (stop.kind === 'depot') {
+        // Un arrêt en dépôt ne vaut que sur la tuile exacte : les tuiles
+        // voisines (sortie de la porte) ne doivent pas déclencher une arrivée,
+        // sinon le véhicule « revient » au dépôt dès qu’il en sort (#233).
+        if (Math.floor(point.x) === stop.x && Math.floor(point.y) === stop.y) {
+          result[i] = { kind: stop.kind, id: stop.id, order: stop.order };
+        }
+        continue;
+      }
       const dx = point.x - (stop.x + 0.5);
       const dy = point.y - (stop.y + 0.5);
       if (dx * dx + dy * dy <= 1.1) {
@@ -1230,11 +1381,35 @@ function rebuildRoute(world: MockWorld, vehicle: MockVehicle): boolean {
     if (vehicle.status !== 3) vehicle.status = 0;
     return false;
   }
+  const { origin, error: originError } = routeOriginForVehicle(world, vehicle);
+  if (originError) {
+    addNews(world, 'error', `Tournée du véhicule #${vehicle.id} refusée : ${originError}`);
+    if (vehicle.status !== 3) vehicle.status = 0;
+    return false;
+  }
+  if (
+    origin &&
+    resolved.targets.length > 0 &&
+    resolved.targets.every(
+      (target) =>
+        Math.floor(target.x) === origin.depot.x && Math.floor(target.y) === origin.depot.y,
+    )
+  ) {
+    addNews(
+      world,
+      'info',
+      `Véhicule #${vehicle.id} : tournée limitée à son dépôt, il reste sur place.`,
+    );
+    vehicle.status = 3;
+    vehicle.waitTicks = 0;
+    return false;
+  }
   const route = buildRoutePath(
     world,
     { x: vehicle.x, y: vehicle.y },
     resolved.targets,
     vehicle.kind,
+    origin,
   );
   if (!route.path) {
     addNews(
@@ -1287,6 +1462,7 @@ class WorldBuilder {
   readonly flags: Uint8Array;
   readonly trackBits: Uint8Array;
   readonly railTypes: Uint8Array;
+  readonly roadData: Uint8Array;
   readonly signalData: Uint8Array;
 
   readonly companies: MockCompany[];
@@ -1316,6 +1492,7 @@ class WorldBuilder {
     this.flags = new Uint8Array(size);
     this.trackBits = new Uint8Array(size);
     this.railTypes = new Uint8Array(size);
+    this.roadData = new Uint8Array(size);
     this.signalData = new Uint8Array(size);
     this.companies = [];
 
@@ -1882,6 +2059,7 @@ class WorldBuilder {
         }
         this.kind[index] = kindIndex;
         this.owner[index] = owner;
+        this.roadData[index] = 0;
         const previous = path[i - 1];
         const next = path[i + 1];
         let bits = 0;
@@ -2254,6 +2432,13 @@ class WorldBuilder {
     if (!best) return;
     const path = traceTiles({ x: depot.x, y: depot.y }, best);
     this.paintRoute(path, network, depot.company);
+    // L'entrée du dépôt est la première tuile du raccordement : elle détermine
+    // la porte rendue et le côté par lequel les véhicules sortent (#233).
+    const first = path[1] ?? best;
+    const direction = directionFromOffset(first.x - depot.x, first.y - depot.y);
+    depot.direction = directionToIndex(direction);
+    const index = this.index(depot.x, depot.y);
+    this.trackBits[index] = depotConnections(direction);
   }
 
   private addVehiclesOnLoop(
@@ -2295,6 +2480,7 @@ class WorldBuilder {
         routeOrders: orders.map((_, index) => index),
         speed,
         direction: 0,
+        pitch: 0,
         status: 1,
         waitTicks: 0,
         x: 0,
@@ -2666,7 +2852,9 @@ class WorldBuilder {
       flags: this.flags,
       trackBits: this.trackBits,
       railTypes: this.railTypes,
+      roadData: this.roadData,
       signalData: this.signalData,
+      roadCount: 0,
       signalCount: 0,
       companies: this.companies,
       towns: this.towns,
@@ -2743,6 +2931,37 @@ function legacyDepots(world: MockWorld): MockDepot[] {
   return depots;
 }
 
+/**
+ * Réoriente les dépôts dont la porte ne donne sur aucune voie praticable
+ * (sauvegardes antérieures à #233). La priorité reste est, ouest, sud, nord,
+ * comme à la pose.
+ */
+function normaliseDepotDirections(world: MockWorld): void {
+  const offsets = [
+    { dx: 1, dy: 0 },
+    { dx: -1, dy: 0 },
+    { dx: 0, dy: 1 },
+    { dx: 0, dy: -1 },
+  ];
+  for (const depot of world.depots) {
+    const kind: VehicleKind = depot.kind === 'rail' ? 'train' : 'road';
+    if (depotDoorTile(world, depot, kind)) continue;
+    for (const offset of offsets) {
+      const x = depot.x + offset.dx;
+      const y = depot.y + offset.dy;
+      if (x < 0 || y < 0 || x >= world.width || y >= world.height) continue;
+      if (!Number.isFinite(surfaceCost(world, kind, x, y, false))) continue;
+      depot.direction = directionToIndex(directionFromOffset(offset.dx, offset.dy));
+      break;
+    }
+    const index = tileIndex(depot.x, depot.y, world.width);
+    const tile = world.kind[index];
+    if (tile === K.road || tile === K.rail) {
+      world.trackBits[index] = depotConnections(directionFromIndex(depot.direction));
+    }
+  }
+}
+
 function placeOnPath(vehicle: MockVehicle, distanceAlong: number): void {
   const lengths = vehicle.pathLengths;
   const total = lengths.reduce((acc, value) => acc + value, 0);
@@ -2770,7 +2989,7 @@ function positionAlong(vehicle: MockVehicle): { x: number; y: number; dx: number
   const count = vehicle.path.length;
   const from = vehicle.path[vehicle.segment % count];
   const to = vehicle.path[(vehicle.segment + 1) % count];
-  if (!from || !to) return { x: 0, y: 0, dx: 1, dy: 0 };
+  if (!from || !to) return { x: 0, y: 0, dx: 0, dy: 0 };
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   return { x: from.x + dx * vehicle.segmentT, y: from.y + dy * vehicle.segmentT, dx, dy };
@@ -2808,6 +3027,7 @@ function mapSnapshotView(world: MockWorld): MapSnapshot {
     flags: world.flags,
     trackBits: world.trackBits,
     railTypes: world.railTypes,
+    roadData: world.roadData,
     signalData: world.signalData,
   };
 }
@@ -2818,18 +3038,29 @@ function updateVehiclesTransforms(world: MockWorld): void {
     const position = positionAlong(vehicle);
     vehicle.x = position.x;
     vehicle.y = position.y;
-    vehicle.direction = stepDirection(
-      vehicle.direction,
-      directionFromVector(position.dx, position.dy),
-      12,
-    );
+    const moving = position.dx !== 0 || position.dy !== 0;
+    // Direction exacte du segment : l'ancien lissage par tick (12/256) faisait
+    // rouler les véhicules en travers des virages à 90° (#232). L'interpolation
+    // de rendu lisse la rotation entre deux snapshots.
+    if (moving) {
+      vehicle.direction = directionFromVector(position.dx, position.dy);
+    }
     const ground = sampleHeightWorld(map, vehicle.x, vehicle.y);
     if (vehicle.kind === 'aircraft') {
       vehicle.z = ground + 6.5 + Math.sin(world.tick * 0.02 + vehicle.id) * 0.4;
+      vehicle.pitch = 0;
     } else if (vehicle.kind === 'ship') {
       vehicle.z = 0.12;
+      vehicle.pitch = 0;
     } else {
       vehicle.z = ground + 0.08;
+      const horizontal = Math.hypot(position.dx, position.dy);
+      if (horizontal > 1e-6) {
+        const ahead = sampleHeightWorld(map, position.x + position.dx, position.y + position.dy);
+        vehicle.pitch = Math.atan2(ahead - ground, horizontal);
+      } else {
+        vehicle.pitch = 0;
+      }
     }
   }
 }
@@ -3036,6 +3267,32 @@ function railTypeFromCommand(
   );
 }
 
+/** Sens unique demandé par une commande route (#231). */
+function roadOneWayFromCommand(command: Extract<EngineCommand, { type: 'build' }>): {
+  oneWay: RoadOneWay | null;
+  error: string | null;
+} {
+  const options = command.options;
+  const raw =
+    optionText(options, 'one_way') ??
+    optionText(options, 'oneway') ??
+    optionText(options, 'road_direction') ??
+    optionText(options, 'sense');
+  if (!raw || raw === 'both' || raw === 'two-way' || raw === 'twoway' || raw === 'bidirectional') {
+    return { oneWay: null, error: null };
+  }
+  const named = ROAD_ONEWAY_DIRECTIONS.find((direction) => direction === raw);
+  if (named) return { oneWay: named, error: null };
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric)) {
+    return { oneWay: roadOneWayFromIndex(Math.trunc(numeric)), error: null };
+  }
+  return {
+    oneWay: null,
+    error: '« options.one_way » inconnu (north, east, south, west, both).',
+  };
+}
+
 function nearestTownName(world: MockWorld, x: number, y: number): string {
   let best: MockTown | null = null;
   let bestDistance = Infinity;
@@ -3087,11 +3344,14 @@ function applyStation(
     world.flags[tile.index] = 0;
     writeSignalData(world, tile.index, 0);
   }
-  const footprint = stationFootprint(plan.station ?? settings);
+  // `planStation` a pu aligner un arrêt en passage sur la chaussée : c'est
+  // cette orientation résolue qui doit figurer dans le snapshot, pas celle,
+  // éventuellement perpendiculaire, envoyée par le client.
   const resolved = plan.station ?? settings;
+  const footprint = stationFootprint(resolved);
   const id = world.stations.length;
   const town = nearestTownName(world, plan.from.x, plan.from.y);
-  const baseName = settings.kind === 'rail' ? `Gare de ${town}` : `Arrêt de ${town}`;
+  const baseName = resolved.kind === 'rail' ? `Gare de ${town}` : `Arrêt de ${town}`;
   let name = baseName;
   let suffix = 2;
   while (world.stations.some((station) => station.name === name)) {
@@ -3102,23 +3362,23 @@ function applyStation(
     id,
     company: command.company,
     name,
-    kind: settings.kind === 'rail' ? 'train' : 'road',
+    kind: resolved.kind === 'rail' ? 'train' : 'road',
     x: plan.from.x + footprint.width / 2,
     y: plan.from.y + footprint.height / 2,
     width: footprint.width,
     height: footprint.height,
     waiting: [],
-    ...(settings.kind === 'road'
+    ...(resolved.kind === 'road'
       ? {
-          driveThrough: settings.driveThrough,
-          ...(settings.driveThrough ? { roadAxis: directionAxis(settings.direction) } : {}),
+          driveThrough: resolved.driveThrough,
+          ...(resolved.driveThrough ? { roadAxis: directionAxis(resolved.direction) } : {}),
         }
       : {}),
   });
   const message =
-    settings.kind === 'rail'
+    resolved.kind === 'rail'
       ? `Gare ferroviaire construite (${resolved.platforms} voie(s) × ${resolved.length} tuile(s)).`
-      : settings.driveThrough
+      : resolved.driveThrough
         ? 'Gare routière en passage construite.'
         : 'Gare routière construite.';
   completeBuild(world, company, plan.cost, message);
@@ -3488,6 +3748,7 @@ function applyCrossing(
   world.trackBits[tile.index] = (tile.connections & 0x0f) | (rail ? TRACK_BIT_CROSSING_RAIL : 0);
   world.owner[tile.index] = command.company;
   world.flags[tile.index] = 0;
+  writeRoadData(world, tile.index, 0);
   completeBuild(
     world,
     company,
@@ -3647,7 +3908,7 @@ function applyTunnel(
       world.flags[tile.index] = (world.flags[tile.index] ?? 0) | TILE_FLAG.TUNNEL;
     }
   }
-  const portalHeight = world.heightMap[tileIndex(plan.from.x, plan.from.y, world.width)] ?? 0;
+  const portalHeight = plan.tunnel.portalHeight;
   world.structures.push({
     id: nextStructureId(world),
     type: 'tunnel',
@@ -3748,6 +4009,15 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
 
   const tool = command.tool;
   const axis = command.options?.axis === 'y' ? 'y' : 'x';
+  let roadDirection: RoadDirection = 'both';
+  if (tool === 'road') {
+    const parsed = roadOneWayFromCommand(command);
+    if (parsed.error) {
+      addNews(world, 'error', `Construction impossible : ${parsed.error}`);
+      return;
+    }
+    roadDirection = parsed.oneWay ?? 'both';
+  }
   const plan = planBuild({
     map: mapSnapshotView(world),
     tool,
@@ -3757,6 +4027,7 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     company: command.company,
     budget: company.money,
     ...(tool === 'rail' ? { railType: railTypeFromCommand(command) } : {}),
+    ...(tool === 'road' ? { roadDirection } : {}),
   });
 
   if (!plan.valid) {
@@ -3797,6 +4068,7 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
         world.flags[tile.index] = wasBridge ? TILE_FLAG.WATER : 0;
       }
       world.railTypes[tile.index] = 0;
+      writeRoadData(world, tile.index, 0);
       writeSignalData(world, tile.index, 0);
       const x = tile.index % world.width;
       const y = Math.floor(tile.index / world.width);
@@ -3816,6 +4088,24 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
     return;
   }
 
+  // Conversion d'un tronçon existant au sens unique : aucun terrassement,
+  // seule la couche `roadData` change (#231).
+  if (tool === 'road' && plan.road?.convert) {
+    const oneWay = plan.road.oneWay ?? null;
+    for (const tile of plan.tiles) {
+      writeRoadData(world, tile.index, oneWay ? ROAD_ONEWAY_INDEX[oneWay] : 0);
+    }
+    company.money -= Math.round(plan.cost * priceFactor(world));
+    world.mapDirty = true;
+    world.mapVersion += 1;
+    addNews(
+      world,
+      'info',
+      `${oneWay ? 'Sens unique' : 'Double sens'} : ${plan.tiles.length} tuile${plan.tiles.length > 1 ? 's' : ''} pour ${Math.round(plan.cost)} £.`,
+    );
+    return;
+  }
+
   for (const tile of plan.tiles) {
     world.kind[tile.index] = BUILT_KIND[tool];
     world.owner[tile.index] = command.company;
@@ -3827,8 +4117,11 @@ function applyBuild(world: MockWorld, command: Extract<EngineCommand, { type: 'b
       if (type === 'electrified') {
         world.flags[tile.index] = TILE_FLAG.ELECTRIFIED;
       }
+      writeRoadData(world, tile.index, 0);
     } else {
       world.railTypes[tile.index] = 0;
+      const oneWay = plan.road?.oneWay ?? null;
+      writeRoadData(world, tile.index, oneWay ? ROAD_ONEWAY_INDEX[oneWay] : 0);
     }
     writeSignalData(world, tile.index, 0);
   }
@@ -3973,7 +4266,8 @@ function buyVehicle(
     currentOrder: 0,
     routeOrders: [],
     speed: model.speed,
-    direction: 0,
+    direction: depotDirection(depot.direction),
+    pitch: 0,
     status: 3,
     waitTicks: 0,
     x: centre.x,
@@ -5838,6 +6132,8 @@ function sendVehicleToDepot(world: MockWorld, vehicle: MockVehicle): boolean {
   vehicle.segmentStops = [null];
   vehicle.status = 3;
   vehicle.waitTicks = 0;
+  vehicle.direction = depotDirection(depot.direction);
+  vehicle.pitch = 0;
   vehicle.x = centre.x;
   vehicle.y = centre.y;
   addNews(world, 'info', `Véhicule #${vehicle.id} envoyé au dépôt ${depot.id}.`);
@@ -5976,6 +6272,14 @@ function writeSignalData(world: MockWorld, index: number, value: number): void {
   world.signalData[index] = value;
 }
 
+/** Écrit le sens d'une route et tient le compteur de hash à jour (#231). */
+function writeRoadData(world: MockWorld, index: number, value: number): void {
+  const previous = world.roadData[index] ?? 0;
+  if (previous === 0 && value !== 0) world.roadCount += 1;
+  else if (previous !== 0 && value === 0) world.roadCount -= 1;
+  world.roadData[index] = value;
+}
+
 /**
  * Recalcule l'état rouge/vert des signaux à partir de l'occupation réelle des
  * cantons. Le calcul est déterministe : il ne dépend que des positions des
@@ -6055,6 +6359,7 @@ function serializeWorld(world: MockWorld): SerializedWorld {
     flags: encodeBase64(world.flags),
     trackBits: encodeBase64(world.trackBits),
     railTypes: encodeBase64(world.railTypes),
+    roadData: encodeBase64(world.roadData),
     signalData: encodeBase64(world.signalData),
     signalCount: world.signalCount,
     companies: world.companies,
@@ -6077,6 +6382,7 @@ function serializeWorld(world: MockWorld): SerializedWorld {
       routeOrders: vehicle.routeOrders,
       speed: vehicle.speed,
       direction: vehicle.direction,
+      pitch: vehicle.pitch,
       status: vehicle.status,
       waitTicks: vehicle.waitTicks,
       x: vehicle.x,
@@ -6191,6 +6497,7 @@ export class MockEngine implements EngineDriver {
           flags: world.flags.slice(),
           trackBits: world.trackBits.slice(),
           railTypes: world.railTypes.slice(),
+          roadData: world.roadData.slice(),
           signalData: world.signalData.slice(),
         }
       : null;
@@ -6361,6 +6668,7 @@ export class MockEngine implements EngineDriver {
       y: vehicle.y,
       z: vehicle.z,
       direction: vehicle.direction,
+      pitch: vehicle.pitch,
       speed: Math.round(vehicle.speed),
       status: vehicle.status,
       cargo: {
@@ -6640,6 +6948,12 @@ export class MockEngine implements EngineDriver {
     ]) {
       for (let i = 0; i < layer.length; i += 1) hash.mixInt(layer[i] ?? 0);
     }
+    // Le sens des routes ne coûte rien tant qu'aucune tuile n'est à sens
+    // unique : le compteur suffit à distinguer les deux états.
+    hash.mixInt(world.roadCount);
+    if (world.roadCount > 0) {
+      for (let i = 0; i < world.roadData.length; i += 1) hash.mixInt(world.roadData[i] ?? 0);
+    }
     return hash.digest();
   }
 
@@ -6696,6 +7010,8 @@ export class MockEngine implements EngineDriver {
       railTypes: saved.railTypes
         ? decodeArray(saved.railTypes, expected)
         : new Uint8Array(expected),
+      roadData: saved.roadData ? decodeArray(saved.roadData, expected) : new Uint8Array(expected),
+      roadCount: 0,
       signalData: saved.signalData
         ? decodeArray(saved.signalData, expected)
         : new Uint8Array(expected),
@@ -6759,6 +7075,9 @@ export class MockEngine implements EngineDriver {
     let signalCount = 0;
     for (const value of world.signalData) if (value !== 0) signalCount += 1;
     world.signalCount = signalCount;
+    let roadCount = 0;
+    for (const value of world.roadData) if (value !== 0) roadCount += 1;
+    world.roadCount = roadCount;
     const validGroups = new Set(world.groups.map((group) => group.id));
     world.vehicles = saved.vehicles.map((vehicle) => {
       const orders =
@@ -6816,6 +7135,10 @@ export class MockEngine implements EngineDriver {
       };
     });
     if (!saved.depots) world.depots = legacyDepots(world);
+    normaliseDepotDirections(world);
+    // Recalcule position, direction et tangage (#232) : le mock ne sauvegarde
+    // que le chemin, l'orientation est dérivée du segment courant.
+    updateVehiclesTransforms(world);
     this.world = world;
     this.ready = true;
     this.loading = false;

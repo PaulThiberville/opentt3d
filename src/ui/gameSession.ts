@@ -33,6 +33,7 @@ import {
   commandFromPlan,
   createBuildSettings,
   nextDirection,
+  nextRoadDirection,
   planBuild,
   type BridgeMaterial,
   type BuildPlan,
@@ -250,7 +251,7 @@ const HUD_REFRESH_SECONDS = 0.2;
 const MINIMAP_REFRESH_SECONDS = 0.1;
 
 const BUILD_TOOL_INTROS: Record<BuildTool, string> = {
-  road: 'Routes : cliquez ou glissez pour tracer un tronçon',
+  road: 'Routes : glissez pour tracer, R change le sens (double sens ou sens unique)',
   rail: 'Rails : cliquez ou glissez pour tracer un tronçon',
   clear: 'Démolition : cliquez ou glissez sur une voie',
   station: 'Gares : réglez la taille et l’orientation, puis cliquez pour poser',
@@ -265,7 +266,7 @@ const BUILD_TOOL_INTROS: Record<BuildTool, string> = {
   aqueduct: 'Aqueducs : glissez d’une rive à l’autre au-dessus du val',
   crossing: 'Passage à niveau : cliquez sur une voie droite',
   bridge: 'Ponts : glissez d’une culée à l’autre, M change le matériau',
-  tunnel: 'Tunnels : glissez depuis le portail d’entrée à travers le relief',
+  tunnel: 'Tunnels : glissez depuis un talus d’entrée à travers le relief',
 };
 
 /** Touches 1/2/3 du mode photo, alignées sur `PHOTO_PRESET_IDS`. */
@@ -2290,11 +2291,16 @@ export class GameSession {
   private rotateBuild(): boolean {
     if (
       !this.buildTool ||
-      (this.buildTool !== 'station' && this.buildTool !== 'depot' && this.buildTool !== 'lock')
+      (this.buildTool !== 'station' &&
+        this.buildTool !== 'depot' &&
+        this.buildTool !== 'lock' &&
+        this.buildTool !== 'road')
     ) {
       return false;
     }
-    if (this.buildTool === 'station') {
+    if (this.buildTool === 'road') {
+      this.buildSettings.road.direction = nextRoadDirection(this.buildSettings.road.direction);
+    } else if (this.buildTool === 'station') {
       this.buildSettings.station.direction = nextDirection(this.buildSettings.station.direction);
     } else if (this.buildTool === 'depot') {
       this.buildSettings.depot.direction = nextDirection(

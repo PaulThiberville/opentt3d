@@ -272,21 +272,23 @@ describe('MockEngine : tunnels', () => {
       expect(built.owner[index]).toBe(0);
     }
     expect(after.structures).toHaveLength(structuresBefore + 1);
-    expect(
-      after.structures?.find(
-        (structure) =>
-          structure.kind === 'tunnel' &&
-          structure.from.x === site.from.x &&
-          structure.from.y === site.from.y &&
-          structure.to.x === site.to.x &&
-          structure.to.y === site.to.y,
-      ),
-    ).toMatchObject({
+    const builtStructure = after.structures?.find(
+      (structure) =>
+        structure.kind === 'tunnel' &&
+        structure.from.x === site.from.x &&
+        structure.from.y === site.from.y &&
+        structure.to.x === site.to.x &&
+        structure.to.y === site.to.y,
+    );
+    expect(builtStructure).toMatchObject({
       kind: 'tunnel',
       company: 0,
       transport: 'rail',
       length: plan.tiles.length,
     });
+    // La hauteur de portail publiée est la surface OpenTTD (GetTileZ), pas le
+    // coin nord brut : c'est ce que consomme le rendu (#229).
+    expect(builtStructure).toMatchObject({ portalHeight: plan.tunnel?.portalHeight });
     expect((after.companies[0]?.money ?? 0) - moneyBefore).toBe(-plan.cost);
     expect(after.news.some((item) => item.text.includes('Tunnel ferroviaire construit'))).toBe(
       true,

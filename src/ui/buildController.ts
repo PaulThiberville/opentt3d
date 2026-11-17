@@ -14,6 +14,7 @@ import {
   cloneBuildSettings,
   createBuildSettings,
   nextDirection,
+  nextRoadDirection,
   planAqueduct,
   planBridge,
   planBuild,
@@ -107,7 +108,9 @@ export class BuildController {
 
   /** Pivote l'infrastructure active (touche R ou bouton du HUD). */
   rotate(): boolean {
-    if (this.tool === 'station') {
+    if (this.tool === 'road') {
+      this.settings.road.direction = nextRoadDirection(this.settings.road.direction);
+    } else if (this.tool === 'station') {
       this.settings.station.direction = nextDirection(this.settings.station.direction);
     } else if (this.tool === 'depot') {
       this.settings.depot.direction = nextDirection(this.settings.depot.direction ?? 'se');
@@ -318,6 +321,7 @@ export class BuildController {
         ...shared,
         tool: tool ?? 'road',
         ...(tool === 'rail' ? { railType: this.settings.rail.type } : {}),
+        ...(tool === 'road' ? { roadDirection: this.settings.road.direction } : {}),
         ...(to ? { to } : {}),
         axis,
       });

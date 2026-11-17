@@ -118,6 +118,7 @@
 #include <tuple>
 #include <type_traits>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "safeguards.h"
@@ -836,7 +837,7 @@ uint64_t ComputeStateHash()
 }
 
 /* ------------------------------------------------------------------------- */
-/*  Carte : format binaire v1                                                */
+/*  Carte : format binaire v3                                                */
 /* ------------------------------------------------------------------------- */
 
 /*
@@ -844,21 +845,21 @@ uint64_t ComputeStateHash()
  * indexées `y * width + x`) :
  *
  *   offset 0   en-tête de 64 octets (voir ci-dessous)
- *   offset 64  répertoire : 6 entrées de 12 octets
- *   offset 136 données : 6 sections contiguës de `tile_count` octets
+ *   offset 64  répertoire : 8 entrées de 12 octets
+ *   offset 160 données : 8 sections contiguës de `tile_count` octets
  *
  * En-tête (u32 sauf mention) :
  *   0  magic         0x314D544F ("OTM1")
- *   4  version       u16 = 1
+ *   4  version       u16 = 3
  *   6  header_size   u16 = 64
  *   8  width
  *   12 height
  *   16 tile_count    width * height
- *   20 layer_count   = 6
+ *   20 layer_count   = 8
  *   24 sequence      compteur de snapshot carte
  *   28 tick          TimerGameTick::counter
  *   32 flags         bit 0 = snapshot complet
- *   36 data_offset   = 136
+ *   36 data_offset   = 160
  *   40 directory_offset = 64
  *   44 bytes_per_layer  = tile_count
  *   48 reserved (0)
@@ -868,18 +869,19 @@ uint64_t ComputeStateHash()
  *
  * Entrée de répertoire (12 octets) :
  *   0  layer_id      u8  (1 kind, 2 heightMap, 3 owner, 4 slope, 5 flags,
- *                        6 trackBits)
+ *                        6 trackBits, 7 signalData, 8 roadData)
  *   1  elem_size     u8  = 1
  *   2  flags         u16 = 0
  *   4  offset        u32 (absolu depuis le début du buffer)
  *   8  length        u32 (= tile_count)
  */
 static constexpr uint32_t OTTD_MAP_MAGIC = 0x314D544F; ///< "OTM1" en little-endian.
-/* v2 : ajout de la couche `signalData` (#156), lisible par le frontend. */
-static constexpr uint16_t OTTD_MAP_VERSION = 2;
+/* v2 : ajout de la couche `signalData` (#156), lisible par le frontend.
+ * v3 : ajout de la couche `roadData` (#231), sens unique par tuile. */
+static constexpr uint16_t OTTD_MAP_VERSION = 3;
 static constexpr uint16_t OTTD_MAP_HEADER_SIZE = 64;
 static constexpr uint16_t OTTD_MAP_DIRECTORY_ENTRY_SIZE = 12;
-static constexpr uint8_t OTTD_MAP_LAYER_COUNT = 7;
+static constexpr uint8_t OTTD_MAP_LAYER_COUNT = 8;
 static constexpr uint32_t OTTD_MAP_DATA_OFFSET = OTTD_MAP_HEADER_SIZE + OTTD_MAP_LAYER_COUNT * OTTD_MAP_DIRECTORY_ENTRY_SIZE;
 
 enum MapLayer : uint8_t {
@@ -890,6 +892,7 @@ enum MapLayer : uint8_t {
 	MAP_LAYER_FLAGS = 5,
 	MAP_LAYER_TRACK = 6,
 	MAP_LAYER_SIGNAL = 7,
+	MAP_LAYER_ROAD_DATA = 8,
 };
 
 /* Index stables de `TILE_KIND_INDEX` dans src/engine/protocol.ts. */
@@ -2582,7 +2585,7 @@ static const CommandErrorText COMMAND_ERROR_TEXTS[] = {
 	{STR_ERROR_TUNNEL_TOO_LONG,                   "TUNNEL_TOO_LONG",       "Tunnel trop long pour ce réglage de partie."},
 	{STR_ERROR_TUNNEL_THROUGH_MAP_BORDER,         "TUNNEL_THROUGH_MAP_BORDER", "Un tunnel ne peut pas traverser le bord de la carte."},
 	{STR_ERROR_ANOTHER_TUNNEL_IN_THE_WAY,         "ANOTHER_TUNNEL_IN_THE_WAY", "Un autre tunnel croise ce tracé."},
-	{STR_ERROR_SITE_UNSUITABLE_FOR_TUNNEL,        "SITE_UNSUITABLE_FOR_TUNNEL", "Emplacement inadapté : un portail doit être sur une pente régulière."},
+	{STR_ERROR_SITE_UNSUITABLE_FOR_TUNNEL,        "SITE_UNSUITABLE_FOR_TUNNEL", "Un tunnel doit partir d’une pente régulière (talus incliné dans l’axe) : rehaussez le portail ou choisissez une tuile en pente."},
 	{STR_ERROR_START_AND_END_MUST_BE_IN,          "INVALID_PARAMETER",     "Les deux extrémités doivent être alignées sur X ou Y."},
 };
 
@@ -3039,6 +3042,52 @@ DiagDirection FindEntranceDirection(TileIndex tile, bool rail)
 /*  Outils de construction                                                   */
 /* ------------------------------------------------------------------------- */
 
+/** Sens unique demandé sur une commande route (#231). */
+enum class RoadOneWay : uint8_t {
+	None,
+	Both,
+	North,
+	East,
+	South,
+	West,
+};
+
+/** Convertit le sens autorisé en directions interdites OpenTTD. */
+DisallowedRoadDirections OneWayDrd(RoadOneWay one_way)
+{
+	/* Sur un axe X, DRD_NORTHBOUND laisse le trackdir X_NE (est) ; sur un axe
+	 * Y il laisse Y_SE (sud). Les directions « positives » (est/sud) sont donc
+	 * NORTHBOUND-interdites, et les négatives SOUTHBOUND-interdites. */
+	return (one_way == RoadOneWay::East || one_way == RoadOneWay::South)
+		? DRD_NORTHBOUND
+		: DRD_SOUTHBOUND;
+}
+
+bool ParseRoadOneWay(const JsonValue *options, RoadOneWay &out, CommandReply &reply)
+{
+	out = RoadOneWay::None;
+	const std::string text = LowerAscii(OptionString(options, "one_way",
+		OptionString(options, "oneway", OptionString(options, "road_direction", ""))));
+	if (text.empty() || text == "none") {
+		return true;
+	}
+	if (text == "both" || text == "two-way" || text == "twoway" || text == "bidirectional") {
+		out = RoadOneWay::Both;
+	} else if (text == "north" || text == "nord") {
+		out = RoadOneWay::North;
+	} else if (text == "east" || text == "est") {
+		out = RoadOneWay::East;
+	} else if (text == "south" || text == "sud") {
+		out = RoadOneWay::South;
+	} else if (text == "west" || text == "ouest") {
+		out = RoadOneWay::West;
+	} else {
+		return FailWith(reply, "INVALID_PARAMETER",
+			"« options.one_way » doit valoir north, east, south, west ou both.");
+	}
+	return true;
+}
+
 bool BuildRoad(CompanyID company, const JsonValue &root, CommandReply &reply)
 {
 	int from_x, from_y, to_x, to_y;
@@ -3062,6 +3111,85 @@ bool BuildRoad(CompanyID company, const JsonValue &root, CommandReply &reply)
 
 	std::vector<TileIndex> path;
 	MakeLPath(from_x, from_y, to_x, to_y, vertical_first, path);
+
+	/* Route à sens unique (#231) : OpenTTD interdit les jonctions à sens
+	 * unique. On construit donc chaque tuile droite avec `CMD_BUILD_ROAD` et
+	 * le DRD absolu voulu, plutôt que `CMD_BUILD_LONG_ROAD` qui ne sait pas
+	 * exprimer un sens identique sur les deux axes d'un tracé en L. */
+	RoadOneWay one_way = RoadOneWay::None;
+	if (!ParseRoadOneWay(options, one_way, reply)) return false;
+	/* `both` n'est utile que pour retirer un sens unique existant ; sur une
+	 * commande de construction normale, on conserve le chemin historique. */
+	if (one_way == RoadOneWay::Both && !OptionBool(options, "convert", false)) {
+		one_way = RoadOneWay::None;
+	}
+	if (one_way != RoadOneWay::None) {
+		if (from_x != to_x && from_y != to_y) {
+			return FailWith(reply, "INVALID_PARAMETER",
+				"Sens unique : tracez un segment droit, un axe à la fois.");
+		}
+		bool horizontal;
+		if (one_way == RoadOneWay::Both) {
+			if (from_x == to_x && from_y == to_y) {
+				const std::string axis_name = LowerAscii(OptionString(options, "axis", "x"));
+				horizontal = axis_name != "y" && axis_name != "vertical";
+			} else {
+				horizontal = from_y == to_y;
+			}
+		} else {
+			horizontal = one_way == RoadOneWay::East || one_way == RoadOneWay::West;
+		}
+		const bool straight = horizontal ? from_y == to_y : from_x == to_x;
+		if (!straight && !(from_x == to_x && from_y == to_y)) {
+			return FailWith(reply, "INVALID_PARAMETER",
+				"Sens unique : le sens demandé ne correspond pas à l’axe du tracé.");
+		}
+		const RoadBits bits = horizontal ? ROAD_X : ROAD_Y;
+		const DisallowedRoadDirections drd =
+			one_way == RoadOneWay::Both ? DRD_NONE : OneWayDrd(one_way);
+		std::vector<std::pair<TileIndex, DisallowedRoadDirections>> toggles;
+		toggles.reserve(path.size());
+		for (const TileIndex tile : path) {
+			/* `CMD_BUILD_ROAD` bascule les directions interdites (XOR) : on
+			 * calcule le masque qui *fixe* le sens voulu, y compris en
+			 * reconvertissant un sens unique existant. Si la tuile est déjà
+			 * dans le bon sens, aucune commande n'est nécessaire. */
+			const DisallowedRoadDirections current =
+				IsNormalRoadTile(tile) ? GetDisallowedRoadDirections(tile) : DRD_NONE;
+			const DisallowedRoadDirections toggle =
+				static_cast<DisallowedRoadDirections>(current ^ drd);
+			if (toggle != DRD_NONE) toggles.emplace_back(tile, toggle);
+		}
+
+		for (const auto &[tile, toggle] : toggles) {
+			CommandCost test = RunCompanyCommand<CMD_BUILD_ROAD>(
+				company, tile, true, tile, bits, road_type, toggle, TownID::Invalid());
+			if (test.Failed()) {
+				return FailFromCommand(reply, test, "COMMAND_FAILED",
+					"Route à sens unique refusée : aucune tuile construite.");
+			}
+		}
+
+		Money spent = 0;
+		for (size_t i = 0; i < toggles.size(); i++) {
+			CommandCost result = RunCompanyCommand<CMD_BUILD_ROAD>(
+				company, toggles[i].first, false, toggles[i].first, bits, road_type,
+				toggles[i].second, TownID::Invalid());
+			if (result.Failed()) {
+				reply.cost = spent;
+				reply.tiles = static_cast<int>(i);
+				return FailFromCommand(reply, result, "COMMAND_FAILED",
+					"Construction de la route à sens unique interrompue.");
+			}
+			spent += result.GetCost();
+		}
+
+		reply.cost = spent;
+		reply.tiles = static_cast<int>(path.size());
+		return Succeed(reply, one_way == RoadOneWay::Both
+			? fmt::format("Route remise à double sens sur {} tuiles.", path.size())
+			: fmt::format("Route à sens unique construite sur {} tuiles.", path.size()));
+	}
 
 	if (path.size() == 1) {
 		RoadBits bits = ROAD_X;
@@ -3895,6 +4023,7 @@ bool BuildTunnel(CompanyID company, const JsonValue &root, CommandReply &reply)
 	 * ressort exactement sur l'autre tuile demandée. */
 	std::optional<CommandCost> failure;
 	TileIndex start_tile = INVALID_TILE;
+	bool exit_mismatch = false;
 	for (const TileIndex candidate : {from_tile, to_tile}) {
 		const TileIndex expected = candidate == from_tile ? to_tile : from_tile;
 		const CommandCost estimate = RunCompanyCommand<CMD_BUILD_TUNNEL>(
@@ -3903,16 +4032,27 @@ bool BuildTunnel(CompanyID company, const JsonValue &root, CommandReply &reply)
 			if (!failure.has_value()) failure = estimate;
 			continue;
 		}
-		if (_build_tunnel_endtile != expected) continue;
+		if (_build_tunnel_endtile != expected) {
+			/* L'entrée est valide, mais OpenTTD ressort avant la tuile
+			 * demandée (un creux au même niveau coupe le tracé). Le message
+			 * « pente régulière » serait trompeur : l'entrée est justement
+			 * une pente valide. */
+			exit_mismatch = true;
+			continue;
+		}
 		start_tile = candidate;
 		break;
 	}
 	if (start_tile == INVALID_TILE) {
+		if (exit_mismatch) {
+			return FailWith(reply, "TUNNEL_EXIT_MISMATCH",
+					"La sortie du tunnel ne correspond pas : un creux au niveau des portails coupe le tracé. Raccourcissez le tunnel ou déplacez la sortie.");
+		}
 		if (failure.has_value()) {
 			return FailFromCommand(reply, *failure, "COMMAND_FAILED", "Construction de tunnel refusée.");
 		}
 		return FailWith(reply, "SITE_UNSUITABLE_FOR_TUNNEL",
-				"Les deux portails doivent être sur des pentes opposées, à la même hauteur.");
+				"Un tunnel doit partir d’une pente régulière (talus incliné dans l’axe) : rehaussez le portail ou choisissez une tuile en pente.");
 	}
 
 	const CommandCost result = RunCompanyCommand<CMD_BUILD_TUNNEL>(
@@ -6296,6 +6436,29 @@ EMSCRIPTEN_KEEPALIVE int ottd_load(const uint8_t *data, int length)
 }
 
 /**
+ * Sens unique d'une tuile route, encodé pour `MapSnapshot.roadData` (#231).
+ *
+ * OpenTTD stocke les directions interdites (DRD) dans `m5[4..5]` ; le
+ * protocole expose au contraire le sens **autorisé**, en cardinales absolues :
+ *   1 nord, 2 est, 3 sud, 4 ouest, 0 double sens.
+ *
+ * Sur une route X, `DRD_NORTHBOUND` laisse passer le trafic venant de l'ouest
+ * (trackdir X_NE → est) et `DRD_SOUTHBOUND` celui venant de l'est (X_SW →
+ * ouest). Sur une route Y, les mêmes valeurs donnent respectivement sud et
+ * nord.
+ */
+uint8_t RoadDataByte(Tile tile)
+{
+	if (!IsNormalRoadTile(tile)) return 0;
+	const DisallowedRoadDirections drd = GetDisallowedRoadDirections(tile);
+	if (drd != DRD_NORTHBOUND && drd != DRD_SOUTHBOUND) return 0;
+	const RoadBits bits = GetRoadBits(tile, RTT_ROAD);
+	if (bits == ROAD_X) return drd == DRD_NORTHBOUND ? 2 : 4;
+	if (bits == ROAD_Y) return drd == DRD_NORTHBOUND ? 3 : 1;
+	return 0;
+}
+
+/**
  * Écrit les tableaux carte complets dans un buffer binaire versionné.
  *
  * @param out       destination (peut être nullptr pour ne mesurer que la taille)
@@ -6305,8 +6468,8 @@ EMSCRIPTEN_KEEPALIVE int ottd_load(const uint8_t *data, int length)
  *         insuffisante, rien n'est écrit ; réappeler avec la taille requise.
  *
  * Disposition détaillée en tête de fichier : en-tête de 64 octets, répertoire
- * de 6 entrées de 12 octets, puis 6 sections de `width * height` octets
- * (kind, heightMap, owner, slope, flags, trackBits).
+ * de 8 entrées de 12 octets, puis 8 sections de `width * height` octets
+ * (kind, heightMap, owner, slope, flags, trackBits, signalData, roadData).
  */
 EMSCRIPTEN_KEEPALIVE int ottd_snapshot_map(uint8_t *out, int capacity)
 {
@@ -6345,6 +6508,7 @@ EMSCRIPTEN_KEEPALIVE int ottd_snapshot_map(uint8_t *out, int capacity)
 	static constexpr uint8_t layer_ids[OTTD_MAP_LAYER_COUNT] = {
 		MAP_LAYER_KIND, MAP_LAYER_HEIGHT, MAP_LAYER_OWNER,
 		MAP_LAYER_SLOPE, MAP_LAYER_FLAGS, MAP_LAYER_TRACK, MAP_LAYER_SIGNAL,
+		MAP_LAYER_ROAD_DATA,
 	};
 
 	uint8_t *sections[OTTD_MAP_LAYER_COUNT];
@@ -6368,6 +6532,7 @@ EMSCRIPTEN_KEEPALIVE int ottd_snapshot_map(uint8_t *out, int capacity)
 	uint8_t *flags = sections[4];
 	uint8_t *track = sections[5];
 	uint8_t *signal = sections[6];
+	uint8_t *road_data = sections[7];
 
 	const uint8_t snow_line = GetSnowLine();
 
@@ -6381,6 +6546,7 @@ EMSCRIPTEN_KEEPALIVE int ottd_snapshot_map(uint8_t *out, int capacity)
 		flags[index] = TileFlags(tile, snow_line);
 		track[index] = tile.m8();
 		signal[index] = PackSignalData(tile);
+		road_data[index] = RoadDataByte(tile);
 	}
 
 	return static_cast<int>(total);

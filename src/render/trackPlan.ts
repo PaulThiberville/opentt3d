@@ -22,8 +22,10 @@
 
 import {
   TILE_KIND_INDEX,
+  roadOneWayFromIndex,
   type MapSnapshot,
   type RailType,
+  type RoadOneWay,
   type StationSnapshot,
 } from '../engine/protocol';
 import { hashUnit2d } from '../game/prng';
@@ -67,6 +69,8 @@ export interface TrackTilePlan {
   variation: number;
   /** Type de rail de la tuile (#157), `rail` pour les routes. */
   railType: RailType;
+  /** Sens unique d'une route (#231), `null` pour une route à double sens. */
+  roadOneWay: RoadOneWay | null;
 }
 
 export interface TrackMasks {
@@ -323,6 +327,20 @@ export function inferTilePlan(
       ? (axisFor(connections) ?? 'x')
       : null;
 
+  const rawOneWay = network === 'road' ? roadOneWayFromIndex(map.roadData?.[index] ?? 0) : null;
+  // Un sens unique n'a de sens que sur une route droite ou une impasse : un
+  // virage/carrefour reste bidirectionnel (OpenTTD refuse les jonctions
+  // à sens unique). On ignore une valeur incohérente plutôt que d'afficher
+  // des flèches dans le vide.
+  const oneWayAxis = rawOneWay ? (rawOneWay === 'east' || rawOneWay === 'west' ? 'x' : 'y') : null;
+  const roadOneWay =
+    rawOneWay &&
+    axis !== null &&
+    oneWayAxis === axis &&
+    (shape === 'straight' || shape === 'dead-end' || shape === 'isolated')
+      ? rawOneWay
+      : null;
+
   return {
     x,
     y,
@@ -335,6 +353,7 @@ export function inferTilePlan(
     bridge: (map.kind[index] ?? 0) === BRIDGE_INDEX,
     variation: hashUnit2d(map.width, x, y),
     railType: network === 'rail' ? railTypeFromIndex(map.railTypes?.[index] ?? 0) : 'rail',
+    roadOneWay,
   };
 }
 

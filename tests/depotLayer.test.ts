@@ -5,7 +5,7 @@ import {
   type DepotSnapshot,
   type MapSnapshot,
 } from '../src/engine/protocol';
-import { DepotLayer } from '../src/render/DepotLayer';
+import { DepotLayer, depotYawForDirection } from '../src/render/DepotLayer';
 
 function makeMap(width = 8, height = 8): MapSnapshot {
   const size = width * height;
@@ -56,15 +56,38 @@ describe('DepotLayer', () => {
     layer.dispose();
   });
 
-  it('oriente l’auvent selon la direction du snapshot', () => {
+  it('oriente la porte vers l’entrée indiquée par le snapshot', () => {
     const layer = new DepotLayer();
     layer.setDepots(
-      [depot(1, 1, 1, { direction: 0 }), depot(2, 2, 2, { direction: 2 })],
+      [
+        depot(1, 1, 1, { direction: 0 }),
+        depot(2, 2, 2, { direction: 1 }),
+        depot(3, 3, 3, { direction: 2 }),
+        depot(4, 4, 4, { direction: 3 }),
+      ],
       makeMap(),
     );
-    expect(layer.rotations[0]).toBeCloseTo(0);
-    expect(layer.rotations[1]).toBeCloseTo(Math.PI);
+    // La porte locale est en +Z : ne→est, se→sud, sw→ouest, nw→nord.
+    expect(layer.rotations[0]).toBeCloseTo(Math.PI / 2);
+    expect(layer.rotations[1]).toBeCloseTo(0);
+    expect(layer.rotations[2]).toBeCloseTo((Math.PI * 3) / 2);
+    expect(layer.rotations[3]).toBeCloseTo(Math.PI);
     layer.dispose();
+  });
+
+  it('aligne la normale de porte sur la voie adjacente', () => {
+    const cases: [number, number, number][] = [
+      [0, 1, 0],
+      [1, 0, 1],
+      [2, -1, 0],
+      [3, 0, -1],
+    ];
+    for (const [direction, dx, dy] of cases) {
+      const yaw = depotYawForDirection(direction);
+      // +Z local tourne vers (sin(yaw), cos(yaw)) dans le plan monde (x, z).
+      expect(Math.sin(yaw)).toBeCloseTo(dx, 6);
+      expect(Math.cos(yaw)).toBeCloseTo(dy, 6);
+    }
   });
 
   it('reste invisible sans dépôt et se vide quand la liste disparaît', () => {

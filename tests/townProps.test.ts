@@ -9,7 +9,11 @@ import {
   isPropFreeKind,
   isRoadKind,
   isWaterloggedPropTile,
+  nearbyWaterSurface,
+  propFootAboveWater,
 } from '../src/render/TownPropsLayer';
+import { cornerHeightWorld } from '../src/game/mapGrid';
+import { waterSurfaceHeight } from '../src/render/waterSurface';
 import {
   createTownPropGeometry,
   geometryTriangleCount,
@@ -141,6 +145,158 @@ describe('TownPropsLayer : semis déterministe', () => {
     const before = computeTownPropsSignature([town], map, 'medium');
     map.flags[(baseY - 2) * map.width + baseX] = 0;
     expect(computeTownPropsSignature([town], map, 'medium')).not.toBe(before);
+  });
+
+  it('rejette une berge pentue dont un coin descend sous la nappe (#227)', () => {
+    const map = makeMap(48, 48);
+    // Canal au niveau 4 qui longe une berge au même niveau nominal.
+    for (let y = 10; y < 40; y += 1) {
+      map.kind[y * map.width + 24] = TILE_KIND_INDEX.canal;
+      map.heightMap[y * map.width + 24] = 4;
+      map.flags[y * map.width + 24] = TILE_FLAG.WATER;
+    }
+    // Autour de la tuile sèche (23, 20), le terrain plonge : son dessus reste
+    // au niveau 4 mais son coin le plus bas passe sous la surface du canal.
+    for (const [x, y] of [
+      [22, 20],
+      [22, 19],
+      [23, 19],
+    ] as const) {
+      map.kind[y * map.width + x] = TILE_KIND_INDEX.grass;
+      map.heightMap[y * map.width + x] = 0;
+    }
+    const tx = 23;
+    const ty = 20;
+    const lowest = Math.min(
+      cornerHeightWorld(map, tx, ty),
+      cornerHeightWorld(map, tx + 1, ty),
+      cornerHeightWorld(map, tx, ty + 1),
+      cornerHeightWorld(map, tx + 1, ty + 1),
+    );
+    expect(lowest).toBeLessThan(waterSurfaceHeight(4));
+    // Le dessus de la tuile émerge encore : l'ancien test 4-voisin la laissait
+    // passer, et un jardin y flottait à moitié dans le canal.
+    expect((map.heightMap[ty * map.width + tx] ?? 0) * 0.5).toBeGreaterThan(waterSurfaceHeight(4));
+    expect(nearbyWaterSurface(map, tx, ty)).toBeCloseTo(waterSurfaceHeight(4), 6);
+    expect(isWaterloggedPropTile(map, tx, ty)).toBe(true);
+    expect(propFootAboveWater(map, tx + 0.5, ty + 0.5, lowest)).toBe(false);
+
+    const town: TownSnapshot = {
+      id: 11,
+      name: 'Berge',
+      x: tx + 0.5,
+      y: ty + 0.5,
+      population: 1_800,
+      growthRate: 1,
+      buildings: 10,
+      rating: 70,
+    };
+    const placements = generateTownProps(town, map, 48);
+    expect(placements.length).toBeGreaterThan(0);
+    expect(
+      placements.some(
+        (placement) => Math.floor(placement.x) === tx && Math.floor(placement.z) === ty,
+      ),
+    ).toBe(false);
+    // Aucune famille de prop ne doit avoir son pied sous la nappe.
+    const kinds = new Set<string>();
+    for (const placement of placements) {
+      kinds.add(placement.kind);
+      expect(
+        propFootAboveWater(map, placement.x, placement.z, placement.ground),
+        placement.kind,
+      ).toBe(true);
+    }
+    expect(kinds.size).toBeGreaterThanOrEqual(3);
+  });
+
+  it('couvre chaque famille de props et garde son pied au sec (#227)', () => {
+    const map = makeMap(64, 64);
+    const cx = 32;
+    const cy = 32;
+    for (let dy = -6; dy <= 6; dy += 1) {
+      for (let dx = -6; dx <= 6; dx += 1) {
+        if (dx * dx + dy * dy > 30) continue;
+        map.kind[(cy + dy) * map.width + cx + dx] = TILE_KIND_INDEX.house;
+      }
+    }
+    for (let d = -12; d <= 12; d += 1) {
+      map.kind[(cy + d) * map.width + cx] = TILE_KIND_INDEX.road;
+      map.kind[cy * map.width + cx + d] = TILE_KIND_INDEX.road;
+    }
+    // Un bloc 2×2 libre près d'une rue donne la placette, donc la huitième
+    // famille de props.
+    for (const [x, y] of [
+      [33, 29],
+      [34, 29],
+      [33, 30],
+      [34, 30],
+    ] as const) {
+      map.kind[y * map.width + x] = TILE_KIND_INDEX.grass;
+    }
+    // Canal au même niveau que la ville : la berge reste sèche, mais chaque
+    // famille doit encore être semée et rester au-dessus de la nappe.
+    for (let y = 8; y < 56; y += 1) {
+      map.kind[y * map.width + 25] = TILE_KIND_INDEX.canal;
+      map.heightMap[y * map.width + 25] = 4;
+      map.flags[y * map.width + 25] = TILE_FLAG.WATER;
+    }
+    const kinds = new Set<string>();
+    for (let id = 1; id <= 20; id += 1) {
+      const town: TownSnapshot = {
+        id,
+        name: `Ville ${id}`,
+        x: cx + 0.5,
+        y: cy + 0.5,
+        population: 2_000,
+        growthRate: 1,
+        buildings: 30,
+        rating: 70,
+      };
+      for (const placement of generateTownProps(town, map, 72)) {
+        kinds.add(placement.kind);
+        expect(
+          propFootAboveWater(map, placement.x, placement.z, placement.ground),
+          `${id}:${placement.kind}`,
+        ).toBe(true);
+        expect(isWaterloggedPropTile(map, Math.floor(placement.x), Math.floor(placement.z))).toBe(
+          false,
+        );
+      }
+    }
+    for (const kind of TOWN_PROP_KINDS) expect(kinds.has(kind), kind).toBe(true);
+  });
+
+  it('garde tous les props au sec sur une berge régulière (#227)', () => {
+    const map = makeMap(48, 48);
+    // Rivière au niveau 4, berges plates au même niveau : elles restent sèches
+    // car la surface est sous le dessus des tuiles.
+    for (let y = 6; y < 42; y += 1) {
+      map.kind[y * map.width + 24] = TILE_KIND_INDEX.river;
+      map.heightMap[y * map.width + 24] = 4;
+    }
+    for (const townId of [1, 2, 3, 4, 5, 6]) {
+      const town: TownSnapshot = {
+        id: townId,
+        name: `Ville ${townId}`,
+        x: 22.5,
+        y: 24.5,
+        population: 2_500,
+        growthRate: 1,
+        buildings: 16,
+        rating: 75,
+      };
+      const placements = generateTownProps(town, map, 60);
+      for (const placement of placements) {
+        expect(
+          propFootAboveWater(map, placement.x, placement.z, placement.ground),
+          `${townId}:${placement.kind}`,
+        ).toBe(true);
+        expect(isWaterloggedPropTile(map, Math.floor(placement.x), Math.floor(placement.z))).toBe(
+          false,
+        );
+      }
+    }
   });
 
   it('garde chaque prop dans sa tuile et centre les arrêts de bus', () => {
