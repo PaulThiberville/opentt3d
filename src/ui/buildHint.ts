@@ -95,7 +95,8 @@ export function describeBuildPlan(
   if (!tool) return null;
   const label = t(TOOL_LABEL_KEYS[tool]);
   if (!plan || plan.tiles.length === 0) {
-    const rotate = tool === 'station' || tool === 'depot' ? t('build.idle.rotate') : '';
+    const rotate =
+      tool === 'station' || tool === 'depot' || tool === 'road' ? t('build.idle.rotate') : '';
     return {
       tone: 'idle',
       text: t('build.idle', { label, hint: t(TOOL_HINT_KEYS[tool]), rotate }),
@@ -113,19 +114,23 @@ export function describeBuildPlan(
   const detail =
     plan.tool === 'station'
       ? t('build.station.detail', { station: stationLabel(plan) })
-      : plan.tool === 'bridge'
-        ? t('build.bridge.detail', {
-            material: t(`build.material.${plan.bridge?.material ?? 'wood'}` as TranslationKey),
-            kind: t(plan.bridge?.kind === 'road' ? 'build.road' : 'build.rail'),
-            maintenance: formatMoney(plan.bridge?.maintenance ?? 0),
+      : plan.tool === 'road' && plan.road?.oneWay
+        ? t('build.road.detail', {
+            direction: t(`build.road.${plan.road.oneWay}` as TranslationKey),
           })
-        : plan.tool === 'tunnel'
-          ? t('build.tunnel.detail', {
-              kind: t(plan.tunnel?.kind === 'road' ? 'build.road' : 'build.rail'),
-              depth: formatInt(plan.tunnel?.depth ?? 0),
-              maintenance: formatMoney(plan.tunnel?.maintenance ?? 0),
+        : plan.tool === 'bridge'
+          ? t('build.bridge.detail', {
+              material: t(`build.material.${plan.bridge?.material ?? 'wood'}` as TranslationKey),
+              kind: t(plan.bridge?.kind === 'road' ? 'build.road' : 'build.rail'),
+              maintenance: formatMoney(plan.bridge?.maintenance ?? 0),
             })
-          : '';
+          : plan.tool === 'tunnel'
+            ? t('build.tunnel.detail', {
+                kind: t(plan.tunnel?.kind === 'road' ? 'build.road' : 'build.rail'),
+                depth: formatInt(plan.tunnel?.depth ?? 0),
+                maintenance: formatMoney(plan.tunnel?.maintenance ?? 0),
+              })
+            : '';
   return {
     tone: 'valid',
     text: t('build.valid', {
