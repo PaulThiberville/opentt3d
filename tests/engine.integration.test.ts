@@ -19,6 +19,7 @@ import type { EmscriptenModuleFactory, EmscriptenModuleOptions } from '../src/en
 import { WasmEngine } from '../src/engine/WasmEngine';
 import { PROTOCOL_VERSION, TILE_FLAG, TILE_KIND_INDEX } from '../src/engine/protocol';
 import type { MapSnapshot } from '../src/engine/protocol';
+import { depotModels, modelCompatibleWithRail } from '../src/game/vehicleRules';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_DIR = path.join(ROOT, 'public', 'engine');
@@ -71,9 +72,19 @@ function findFlatArea(
   map: MapSnapshot,
   width: number,
   height: number,
+  exclude?: { x: number; y: number; width: number; height: number },
 ): { x: number; y: number } | null {
   for (let y = 1; y + height < map.height; y += 1) {
     for (let x = 1; x + width < map.width; x += 1) {
+      if (
+        exclude &&
+        x < exclude.x + exclude.width &&
+        x + width > exclude.x &&
+        y < exclude.y + exclude.height &&
+        y + height > exclude.y
+      ) {
+        continue;
+      }
       const base = map.heightMap[y * map.width + x];
       let ok = true;
       for (let dy = 0; dy < height && ok; dy += 1) {
@@ -252,6 +263,150 @@ suite('intégration moteur WASM réel', () => {
       });
       const unknown = engine.snapshot();
       expect(unknown.news.some((item) => /Dépôt 60000 inexistant/i.test(item.text))).toBe(true);
+    } finally {
+      engine.dispose();
+    }
+  }, 120_000);
+
+  it('achète tous les modèles du catalogue proposés par les dépôts (#219)', async () => {
+    const engine = new WasmEngine({ factory: await createNodeFactory() });
+    try {
+      await engine.init({ moduleUrl: pathToFileURL(MODULE_PATH).href });
+      await engine.newGame({ seed: 219, width: 128, height: 128 });
+      const first = engine.snapshot();
+      const map = first.map;
+      if (!map) throw new Error('carte absente');
+      const company = first.companies.find((item) => item.isLocal)?.id ?? 0;
+
+      const roadSite = findFlatArea(map, 8, 4);
+      if (!roadSite) throw new Error('aucune zone plate routière trouvée');
+      const roadFrom = { x: roadSite.x + 1, y: roadSite.y };
+      engine.send({
+        type: 'build',
+        tool: 'road',
+        company,
+        from: roadFrom,
+        to: { x: roadFrom.x + 3, y: roadFrom.y },
+        options: { axis: 'x' },
+      });
+      engine.send({
+        type: 'build',
+        tool: 'depot',
+        company,
+        from: { x: roadFrom.x, y: roadFrom.y + 1 },
+        options: { kind: 'road' },
+      });
+
+      const withRoadDepot = engine.snapshot();
+      const roadDepot = withRoadDepot.depots.find(
+        (item) => item.kind === 'road' && item.company === company,
+      );
+      if (!roadDepot) throw new Error('dépôt routier attendu');
+      // Le catalogue de test dépasse la trésorerie initiale : emprunte le
+      // maximum autorisé avant d'acheter tous les modèles.
+      for (let i = 0; i < 25; i += 1) {
+        engine.send({ type: 'finance', action: 'increase_loan', company });
+      }
+      const roadModels = depotModels('road');
+      for (const model of roadModels) {
+        engine.send({
+          type: 'vehicle',
+          action: 'buy',
+          company,
+          depotId: roadDepot.id,
+          model: model.id,
+        });
+      }
+
+      const afterRoad = engine.snapshot();
+      expect(afterRoad.news.some((item) => /Aucun véhicule ne correspond/i.test(item.text))).toBe(
+        false,
+      );
+      expect(afterRoad.news.filter((item) => /Véhicule acheté/i.test(item.text))).toHaveLength(
+        roadModels.length,
+      );
+      expect(afterRoad.vehicles.filter((item) => item.kind === 'road')).toHaveLength(
+        roadModels.length,
+      );
+
+      const railSite = findFlatArea(map, 8, 4, {
+        x: roadSite.x,
+        y: roadSite.y,
+        width: 8,
+        height: 4,
+      });
+      if (!railSite) throw new Error('aucune zone plate ferroviaire trouvée');
+      const railFrom = { x: railSite.x + 1, y: railSite.y };
+      engine.send({
+        type: 'build',
+        tool: 'rail',
+        company,
+        from: railFrom,
+        to: { x: railFrom.x + 3, y: railFrom.y },
+      });
+      engine.send({
+        type: 'build',
+        tool: 'depot',
+        company,
+        from: { x: railFrom.x, y: railFrom.y + 1 },
+        options: { kind: 'rail' },
+      });
+
+      const withRailDepot = engine.snapshot();
+      const railDepot = withRailDepot.depots.find(
+        (item) => item.kind === 'rail' && item.company === company,
+      );
+      if (!railDepot) throw new Error('dépôt ferroviaire attendu');
+      const railModels = depotModels('rail').filter((model) =>
+        modelCompatibleWithRail(model, railDepot.railType),
+      );
+      for (const model of railModels) {
+        engine.send({
+          type: 'vehicle',
+          action: 'buy',
+          company,
+          depotId: railDepot.id,
+          model: model.id,
+        });
+      }
+
+      const after = engine.snapshot();
+      expect(after.news.some((item) => /Aucun véhicule ne correspond/i.test(item.text))).toBe(
+        false,
+      );
+      expect(after.news.filter((item) => /Véhicule acheté/i.test(item.text))).toHaveLength(
+        railModels.length,
+      );
+      expect(after.vehicles.filter((item) => item.kind === 'road')).toHaveLength(roadModels.length);
+      expect(after.vehicles.filter((item) => item.kind === 'train')).toHaveLength(
+        railModels.length,
+      );
+
+      // Après un refit et un clone, un nouvel achat du catalogue doit encore
+      // trouver son moteur dans le même dépôt (#219).
+      const source = after.vehicles.filter((item) => item.kind === 'road').at(-1);
+      if (source) {
+        engine.send({
+          type: 'vehicle',
+          action: 'refit',
+          company,
+          vehicle: source.id,
+          cargo: 'coal',
+        });
+        engine.send({ type: 'vehicle', action: 'clone', company, vehicle: source.id });
+        engine.send({
+          type: 'vehicle',
+          action: 'buy',
+          company,
+          depotId: roadDepot.id,
+          model: 'bus_intercity',
+        });
+        const afterMaintenance = engine.snapshot();
+        expect(afterMaintenance.news.some((item) => /Véhicule acheté/i.test(item.text))).toBe(true);
+        expect(
+          afterMaintenance.news.some((item) => /Aucun véhicule ne correspond/i.test(item.text)),
+        ).toBe(false);
+      }
     } finally {
       engine.dispose();
     }

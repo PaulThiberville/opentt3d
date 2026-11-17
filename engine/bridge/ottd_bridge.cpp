@@ -2833,16 +2833,76 @@ std::string EngineName(EngineID engine)
 }
 
 /**
+ * Rôle d'un modèle du catalogue partagé (`src/game/vehicleRules.ts`).
+ *
+ * Le pont ne connaît pas ces identifiants : ce sont des modèles abstraits de
+ * l'interface (`bus_intercity`, `rail_electric`…). Les traiter comme des noms
+ * d'engins NewGRF échouait systématiquement (#219) ; on les traduit donc en
+ * critères de sélection d'un moteur réel.
+ */
+struct CatalogueModelRole {
+	bool recognised = false;
+	VehicleType type = VEH_INVALID;
+	/** Filtre routier : bus (passagers) ou camions (marchandises). */
+	bool passengers = false;
+	/** `bus_city` privilégie le plus petit gabarit, les autres le plus grand. */
+	bool smallest = false;
+	/** Type de rail exigé (`rail_electric`, monorail, maglev). */
+	RailType required_rail = INVALID_RAILTYPE;
+};
+
+/** Reconnaît un modèle du catalogue partagé, ou renvoie un rôle vide. */
+CatalogueModelRole DetectCatalogueModel(const std::string &model)
+{
+	CatalogueModelRole role;
+	if (model == "bus_city") {
+		role.recognised = true;
+		role.type = VEH_ROAD;
+		role.passengers = true;
+		role.smallest = true;
+	} else if (model == "bus_intercity") {
+		role.recognised = true;
+		role.type = VEH_ROAD;
+		role.passengers = true;
+	} else if (model == "truck_flatbed" || model == "truck_tanker") {
+		role.recognised = true;
+		role.type = VEH_ROAD;
+	} else if (model == "rail_autorail" || model == "rail_freight") {
+		role.recognised = true;
+		role.type = VEH_TRAIN;
+	} else if (model == "rail_electric") {
+		role.recognised = true;
+		role.type = VEH_TRAIN;
+		role.required_rail = RAILTYPE_ELECTRIC;
+	} else if (model == "rail_monorail") {
+		role.recognised = true;
+		role.type = VEH_TRAIN;
+		role.required_rail = RAILTYPE_MONO;
+	} else if (model == "rail_maglev") {
+		role.recognised = true;
+		role.type = VEH_TRAIN;
+		role.required_rail = RAILTYPE_MAGLEV;
+	}
+	return role;
+}
+
+/**
  * Choisit un moteur déterministe pour un dépôt.
  *
  * `model` accepte un identifiant numérique, un nom (sous-chaîne, insensible à
- * la casse) ou un mot-clé : `bus`, `truck`/`camion`, `train`/`locomotive`.
+ * la casse), un mot-clé (`bus`, `truck`/`camion`, `train`/`locomotive`) ou un
+ * identifiant du catalogue partagé (#219). `depot_rail_type` restreint les
+ * locomotives au type de voie réellement posé dans le dépôt.
  * À défaut, le moteur disponible de plus grande capacité est retenu (le plus
  * petit identifiant en cas d'égalité), comme le fait l'IA.
  */
-EngineID SelectEngine(CompanyID company, VehicleType type, const std::string &model)
+EngineID SelectEngine(CompanyID company, VehicleType type, const std::string &model,
+		RailType depot_rail_type = INVALID_RAILTYPE)
 {
 	const std::string needle = LowerAscii(model);
+	const CatalogueModelRole catalogue = DetectCatalogueModel(needle);
+	const bool catalogue_here = catalogue.recognised && catalogue.type == type;
+
 	if (!needle.empty() && needle.size() <= 5 &&
 			std::all_of(needle.begin(), needle.end(), [](char c) { return c >= '0' && c <= '9'; })) {
 		uint32_t value = 0;
@@ -2854,17 +2914,37 @@ EngineID SelectEngine(CompanyID company, VehicleType type, const std::string &mo
 	}
 
 	const bool passengers = needle.empty() || needle == "bus" || needle == "passenger" ||
-			needle == "passagers" || needle == "voyageurs";
+			needle == "passagers" || needle == "voyageurs" ||
+			(catalogue_here && type == VEH_ROAD && catalogue.passengers);
 	const bool freight = needle == "truck" || needle == "camion" || needle == "cargo" ||
-			needle == "fret" || needle == "marchandises";
-	const bool any_train = needle == "train" || needle == "locomotive" || needle == "loco";
-	const bool name_filter = !needle.empty() && !passengers && !freight && !any_train;
+			needle == "fret" || needle == "marchandises" ||
+			(catalogue_here && type == VEH_ROAD && !catalogue.passengers);
+	const bool any_train = needle == "train" || needle == "locomotive" || needle == "loco" ||
+			(catalogue_here && type == VEH_TRAIN);
+	const bool name_filter = !catalogue_here && !needle.empty() && !passengers && !freight &&
+			!any_train;
 
 	EngineID best = EngineID::Invalid();
 	uint64_t best_capacity = 0;
 	for (const Engine *info : Engine::Iterate()) {
 		if (info->type != type) continue;
-		if (type == VEH_TRAIN && info->VehInfo<RailVehicleInfo>().railveh_type == RAILVEH_WAGON) continue;
+
+		RailTypes engine_railtypes{};
+		if (type == VEH_TRAIN) {
+			const RailVehicleInfo &rail = info->VehInfo<RailVehicleInfo>();
+			if (rail.railveh_type == RAILVEH_WAGON) continue;
+			engine_railtypes = rail.railtypes;
+			/* Une locomotive doit rouler sur la voie réellement posée. */
+			if (depot_rail_type != INVALID_RAILTYPE &&
+					!IsCompatibleRail(engine_railtypes, depot_rail_type)) {
+				continue;
+			}
+			/* `rail_electric`/monorail/maglev exigent explicitement leur type. */
+			if (catalogue_here && catalogue.required_rail != INVALID_RAILTYPE &&
+					!engine_railtypes.Test(catalogue.required_rail)) {
+				continue;
+			}
+		}
 
 		const EngineID engine = info->index;
 		if (!IsEngineBuildable(engine, type, company)) continue;
@@ -2883,7 +2963,10 @@ EngineID SelectEngine(CompanyID company, VehicleType type, const std::string &mo
 		}
 
 		const uint64_t capacity = GetTotalCapacityOfArticulatedParts(engine);
-		if (best == EngineID::Invalid() || capacity > best_capacity) {
+		const bool prefer_smallest = catalogue_here && catalogue.smallest;
+		const bool better = best == EngineID::Invalid() ||
+				(prefer_smallest ? capacity < best_capacity : capacity > best_capacity);
+		if (better) {
 			best = engine;
 			best_capacity = capacity;
 		}
@@ -4214,6 +4297,8 @@ Vehicle *FindVehicle(const JsonValue &root, CompanyID company, CommandReply &rep
 VehicleType ModelVehicleType(const std::string &model)
 {
 	const std::string needle = LowerAscii(model);
+	const CatalogueModelRole catalogue = DetectCatalogueModel(needle);
+	if (catalogue.recognised) return catalogue.type;
 	if (needle == "bus" || needle == "truck" || needle == "camion" || needle == "tram" ||
 			needle == "fret" || needle == "marchandises") {
 		return VEH_ROAD;
@@ -4287,6 +4372,7 @@ bool VehicleBuy(CompanyID company, const JsonValue &root, CommandReply &reply)
 	const VehicleType type = GetDepotVehicleType(tile);
 	std::string model;
 	JsonGetString(root.Find("model"), model);
+	const CatalogueModelRole catalogue = DetectCatalogueModel(LowerAscii(model));
 	const VehicleType requested = ModelVehicleType(model);
 	if (requested != VEH_INVALID && requested != type) {
 		const char *depot_label = type == VEH_TRAIN ? "ferroviaire"
@@ -4295,7 +4381,15 @@ bool VehicleBuy(CompanyID company, const JsonValue &root, CommandReply &reply)
 				fmt::format("« {} » ne peut pas être acheté dans un dépôt {}.", model, depot_label));
 	}
 
-	const EngineID engine = SelectEngine(company, type, model);
+	const RailType depot_rail_type = type == VEH_TRAIN ? GetRailType(tile) : INVALID_RAILTYPE;
+	if (catalogue.recognised && catalogue.required_rail != INVALID_RAILTYPE &&
+			depot_rail_type != catalogue.required_rail) {
+		return FailWith(reply, "WRONG_RAIL_TYPE",
+				fmt::format("« {} » exige une voie {}.", model,
+						RailTypeName(catalogue.required_rail)));
+	}
+
+	const EngineID engine = SelectEngine(company, type, model, depot_rail_type);
 	if (engine == EngineID::Invalid()) {
 		return FailWith(reply, "NO_ENGINE",
 				model.empty()
