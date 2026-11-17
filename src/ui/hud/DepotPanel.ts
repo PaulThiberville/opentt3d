@@ -152,6 +152,15 @@ export class DepotPanel {
         }),
         el('div', { className: 'hud-depot-model-note', text: model.description }),
       );
+      if (model.blockedReason) {
+        info.append(
+          el('div', {
+            className: 'hud-depot-model-note hud-depot-model-warning',
+            text: model.blockedReason,
+          }),
+        );
+      }
+      const blocked = model.blockedReason !== null || !model.affordable;
       const side = el('div', { className: 'hud-depot-model-side' });
       side.append(
         el('div', { className: 'hud-depot-model-price', text: formatMoney(model.cost) }),
@@ -163,12 +172,12 @@ export class DepotPanel {
       const buy = button(t('depot.buy'), {
         variant: 'primary',
         className: 'hud-depot-buy',
-        disabled: !model.affordable,
+        disabled: blocked,
         attrs: {
           type: 'button',
-          title: model.affordable
-            ? t('depot.buyTitle', { name: model.name })
-            : t('depot.buyBlocked', { name: model.name }),
+          title: blocked
+            ? (model.blockedReason ?? t('depot.buyBlocked', { name: model.name }))
+            : t('depot.buyTitle', { name: model.name }),
           'aria-label': t('depot.buyAria', {
             name: model.name,
             value: formatInt(model.cost),

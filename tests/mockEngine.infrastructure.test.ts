@@ -149,6 +149,8 @@ describe('MockEngine : gares', () => {
     expect(built.kind[tileIndex(spot.x, spot.y, built.width)]).toBe(TILE_KIND_INDEX.station);
     const station = after.stations.find((item) => item.kind === 'road' && item.width === 1);
     expect(station?.height).toBe(1);
+    expect(station?.driveThrough).toBe(true);
+    expect(station?.roadAxis).toBe('x');
     expect(after.news.some((item) => item.text.includes('en passage'))).toBe(true);
   });
 

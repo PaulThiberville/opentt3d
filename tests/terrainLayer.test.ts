@@ -645,6 +645,12 @@ describe('TerrainLayer : parois de rive (#205)', () => {
     );
   }
 
+  function waterfallMeshes(layer: TerrainLayer): Mesh[] {
+    return layer.group.children.filter(
+      (child): child is Mesh => child instanceof THREE.Mesh && child.name.startsWith('waterfall-'),
+    );
+  }
+
   function makeLockStep(): MapSnapshot {
     const width = 24;
     const height = 24;
@@ -676,6 +682,8 @@ describe('TerrainLayer : parois de rive (#205)', () => {
     layer.setMap(makeLockStep());
     const walls = wallMeshes(layer);
     expect(walls.length).toBeGreaterThan(0);
+    // Une écluse reste minérale : aucun rideau de cascade à cet endroit.
+    expect(waterfallMeshes(layer)).toHaveLength(0);
     let min = Infinity;
     let max = -Infinity;
     for (const wall of walls) {
@@ -691,6 +699,122 @@ describe('TerrainLayer : parois de rive (#205)', () => {
     // La paroi relie le bief bas au bief haut : plus de vide sombre.
     expect(min).toBeLessThanOrEqual(waterSurfaceHeight(0) + 1e-6);
     expect(max).toBeGreaterThanOrEqual(waterSurfaceHeight(4) + WATER_WAVE_AMPLITUDE - 1e-6);
+    layer.dispose();
+  });
+
+  function makeCascadeStep(): MapSnapshot {
+    const width = 24;
+    const height = 24;
+    const size = width * height;
+    const kind = new Uint8Array(size).fill(TILE_KIND_INDEX.grass);
+    const heightMap = new Uint8Array(size).fill(2);
+    for (let y = 8; y < 16; y += 1) {
+      kind[y * width + 9] = TILE_KIND_INDEX.river;
+      heightMap[y * width + 9] = 4;
+      kind[y * width + 10] = TILE_KIND_INDEX.river;
+      heightMap[y * width + 10] = 0;
+    }
+    return {
+      width,
+      height,
+      kind,
+      heightMap,
+      owner: new Uint8Array(size).fill(255),
+      slope: new Uint8Array(size),
+      flags: new Uint8Array(size),
+      trackBits: new Uint8Array(size),
+    };
+  }
+
+  it('remplace une chute libre par un rideau incliné et son écume (#214)', () => {
+    const layer = new TerrainLayer();
+    layer.setMap(makeCascadeStep());
+    const cascades = waterfallMeshes(layer);
+    expect(cascades).toHaveLength(1);
+    const cascade = cascades[0]!;
+    const positions = cascade.geometry.getAttribute('position');
+    const foam = cascade.geometry.getAttribute('aFoam');
+    expect(foam).toBeDefined();
+    expect(foam.count).toBe(positions.count);
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minFoam = Infinity;
+    let maxFoam = -Infinity;
+    for (let index = 0; index < positions.count; index += 1) {
+      minY = Math.min(minY, positions.getY(index));
+      maxY = Math.max(maxY, positions.getY(index));
+      minX = Math.min(minX, positions.getX(index));
+      maxX = Math.max(maxX, positions.getX(index));
+      minFoam = Math.min(minFoam, foam.getX(index));
+      maxFoam = Math.max(maxFoam, foam.getX(index));
+    }
+    // Le rideau couvre toute la marche haute → basse.
+    expect(minY).toBeLessThanOrEqual(waterSurfaceHeight(0) + 1e-6);
+    expect(maxY).toBeGreaterThanOrEqual(waterSurfaceHeight(4) + WATER_WAVE_AMPLITUDE - 1e-6);
+    // Il avance dans la nappe basse : ce n'est pas un plan vertical.
+    expect(maxX - 10).toBeGreaterThan(0.1);
+    // Le pied est marqué comme écume pour le shader animé.
+    expect(maxFoam).toBeGreaterThan(0.95);
+    expect(minFoam).toBe(0);
+    const material = cascade.material as THREE.MeshPhongMaterial;
+    expect(material.transparent).toBe(false);
+    expect(material.depthWrite).toBe(true);
+    expect(cascade.renderOrder).toBeLessThan(2);
+    // Le rideau remplace bien la paroi verticale de la marche : aucune face
+    // du maillage de murs ne couvre les deux niveaux sur cette arête.
+    for (const wall of wallMeshes(layer)) {
+      const wallPositions = wall.geometry.getAttribute('position');
+      for (let index = 0; index + 5 < wallPositions.count; index += 6) {
+        const xs = [0, 1, 2, 3, 4, 5].map((offset) => wallPositions.getX(index + offset));
+        const ys = [0, 1, 2, 3, 4, 5].map((offset) => wallPositions.getY(index + offset));
+        if (!xs.every((x) => Math.abs(x - 10) < 1e-6)) continue;
+        expect(Math.max(...ys) - Math.min(...ys)).toBeLessThan(0.2);
+      }
+    }
+    layer.dispose();
+  });
+
+  it('anime le rideau avec l’horloge d’eau et libère sa géométrie', () => {
+    const layer = new TerrainLayer();
+    layer.setMap(makeCascadeStep());
+    const cascade = waterfallMeshes(layer)[0];
+    if (!cascade) throw new Error('cascade manquante');
+    const material = cascade.material as THREE.MeshPhongMaterial;
+    const shader = {
+      uniforms: {} as Record<string, { value: number }>,
+      vertexShader: '#include <common>\n#include <begin_vertex>',
+      fragmentShader:
+        '#include <common>\n#include <color_fragment>\n#include <emissivemap_fragment>',
+    };
+    material.onBeforeCompile(shader as never, null as never);
+    expect(shader.vertexShader).toContain('attribute float aFoam');
+    expect(shader.fragmentShader).toContain('uTime');
+    expect(shader.fragmentShader).toContain('skinNoise');
+    expect(shader.fragmentShader).not.toContain('NaN');
+    layer.update(1.5);
+    expect(shader.uniforms.uTime?.value).toBeCloseTo(1.5, 6);
+    layer.dispose();
+    expect(
+      layer.group.children.filter((child) => child.name.startsWith('waterfall-')),
+    ).toHaveLength(0);
+  });
+
+  it('garde la cascade en basse, moyenne et haute qualité', () => {
+    const layer = new TerrainLayer();
+    layer.setMap(makeCascadeStep());
+    for (const level of ['low', 'medium', 'high'] as const) {
+      layer.setQuality(level);
+      const cascades = waterfallMeshes(layer);
+      expect(cascades, level).toHaveLength(1);
+      const cascade = cascades[0]!;
+      expect(cascade.geometry.getAttribute('position').count).toBeGreaterThan(0);
+      expect(cascade.geometry.getAttribute('aFoam').count).toBe(
+        cascade.geometry.getAttribute('position').count,
+      );
+      expect((cascade.material as THREE.Material).transparent).toBe(false);
+    }
     layer.dispose();
   });
 

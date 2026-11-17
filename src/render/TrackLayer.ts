@@ -1637,7 +1637,7 @@ function stationSignature(stations: readonly StationSnapshot[]): string {
   const parts: string[] = [];
   for (const station of stations) {
     parts.push(
-      `${station.id}:${station.kind}:${station.x}:${station.y}:${station.width}:${station.height}`,
+      `${station.id}:${station.kind}:${station.x}:${station.y}:${station.width}:${station.height}:${station.roadAxis ?? ''}:${station.driveThrough ? 1 : 0}`,
     );
   }
   return parts.join('|');

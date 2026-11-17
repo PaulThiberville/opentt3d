@@ -13,7 +13,7 @@
 
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import type { IndustrySnapshot, MapSnapshot } from '../src/engine/protocol';
+import type { IndustrySnapshot, MapSnapshot, StationSnapshot } from '../src/engine/protocol';
 import { TILE_FLAG, TILE_KIND_INDEX } from '../src/engine/protocol';
 import { MockEngine } from '../src/engine/MockEngine';
 import type { RenderVehicle } from '../src/game/vehicleInterpolation';
@@ -43,6 +43,8 @@ const BUDGETS = {
   cityTrianglesPerBuilding: 150,
   /** Lots fusionnés par archétype × variante (deux villes tolérées). */
   cityDrawCalls: 24,
+  /** Arrêt de bus en passage : abri + panneau, bien plus léger qu'une halle. */
+  busStopTriangles: 400,
   /** Arbre : tronc (20) + houppier (12) + marge. */
   vegetationTrianglesPerTree: 40,
   /** Modèles de véhicules détaillés (plafond de modélisation : 3 000). */
@@ -293,6 +295,43 @@ describe('budgets CityLayer', () => {
       expect(stats.instances).toBeGreaterThanOrEqual(144);
       expect(stats.instances).toBeLessThanOrEqual(144 * 2);
       expect(stats.triangles).toBeLessThanOrEqual(144 * BUDGETS.cityTrianglesPerBuilding);
+      expect(stats.triangles).toBeGreaterThan(0);
+    } finally {
+      layer.dispose();
+    }
+  });
+
+  it('regroupe tous les arrêts en passage dans un seul lot léger', () => {
+    const map = makeMap(64, 64, (fixture) => {
+      for (let y = 14; y < 16; y += 1) {
+        fillRect(fixture, 8, y, 40, 1, TILE_KIND_INDEX.station);
+      }
+    });
+    const stations: StationSnapshot[] = [];
+    for (let index = 0; index < 16; index += 1) {
+      stations.push({
+        id: index,
+        company: 0,
+        name: `Arrêt ${index}`,
+        kind: 'road',
+        x: 10 + index * 2 + 0.5,
+        y: index % 2 === 0 ? 14.5 : 15.5,
+        width: 1,
+        height: 1,
+        waiting: [],
+        driveThrough: true,
+        roadAxis: index % 4 < 2 ? 'x' : 'y',
+      });
+    }
+    const layer = new CityLayer();
+    layer.setStations(stations, map);
+    try {
+      // Aucune halle ni plateforme : un seul InstancedMesh pour les 16 abris.
+      expect(layer.drawCallCount).toBe(1);
+      const stats = groupStats(layer.group);
+      expect(stats.drawCalls).toBe(1);
+      expect(stats.instances).toBe(16);
+      expect(stats.triangles).toBeLessThanOrEqual(16 * BUDGETS.busStopTriangles);
       expect(stats.triangles).toBeGreaterThan(0);
     } finally {
       layer.dispose();

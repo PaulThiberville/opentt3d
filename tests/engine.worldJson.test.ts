@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { COMPANY_NONE, PROTOCOL_VERSION } from '../src/engine/protocol';
-import { WorldJsonError, parseWorldJson } from '../src/engine/worldJson';
+import { WorldJsonError, parseStation, parseWorldJson } from '../src/engine/worldJson';
 
 /** JSON minimal tel que le produit `ottd_snapshot_json` pour une partie neuve. */
 function engineJson(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -44,6 +44,21 @@ describe('mapping JSON → WorldSnapshot', () => {
       speed: 1,
       paused: false,
     });
+  });
+
+  it('lit les champs d’un arrêt de bus en passage (#218)', () => {
+    expect(parseStation({ kind: 'road', drive_through: true, roadAxis: 'y' })).toMatchObject({
+      kind: 'road',
+      driveThrough: true,
+      roadAxis: 'y',
+    });
+    expect(parseStation({ kind: 'road', driveThrough: true, roadAxis: 'x' })).toMatchObject({
+      kind: 'road',
+      driveThrough: true,
+      roadAxis: 'x',
+    });
+    // Une gare routière normale ne porte pas les champs de passage.
+    expect(parseStation({ kind: 'road' })).not.toHaveProperty('driveThrough');
   });
 
   it('accepte la chaîne JSON brute', () => {

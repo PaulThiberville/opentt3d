@@ -8,6 +8,8 @@ import {
   planBridge,
   planLinkedRoute,
   planTunnel,
+  resolveTunnelSpan,
+  structureDragTarget,
   type BridgeMaterial,
 } from '../src/game/buildRules';
 import { tileIndex } from '../src/game/mapGrid';
@@ -143,6 +145,43 @@ describe('planBridge', () => {
     });
     expect(floodedPlan.valid).toBe(false);
     expect(floodedPlan.reason).toContain('rampe');
+  });
+
+  it('accepte une rive en pente d’un niveau, refuse une falaise de deux niveaux', () => {
+    const slope = makeMap();
+    setTile(slope, 4, 4, TILE_KIND_INDEX.water, 0);
+    setTile(slope, 5, 4, TILE_KIND_INDEX.water, 0);
+    setTile(slope, 2, 4, TILE_KIND_INDEX.grass, 5);
+    setTile(slope, 7, 4, TILE_KIND_INDEX.grass, 5);
+    // Les approches descendent d'un niveau : la rampe du tablier les rejoint.
+    setTile(slope, 1, 4, TILE_KIND_INDEX.grass, 4);
+    setTile(slope, 8, 4, TILE_KIND_INDEX.grass, 4);
+    const gentle = planBridge({
+      map: slope,
+      from: { x: 2, y: 4 },
+      to: { x: 7, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(gentle.valid).toBe(true);
+    expect(gentle.reason).toBeNull();
+
+    const cliff = makeMap();
+    setTile(cliff, 4, 4, TILE_KIND_INDEX.water, 0);
+    setTile(cliff, 5, 4, TILE_KIND_INDEX.water, 0);
+    setTile(cliff, 2, 4, TILE_KIND_INDEX.grass, 5);
+    setTile(cliff, 7, 4, TILE_KIND_INDEX.grass, 5);
+    setTile(cliff, 1, 4, TILE_KIND_INDEX.grass, 2);
+    setTile(cliff, 8, 4, TILE_KIND_INDEX.grass, 2);
+    const tooSteep = planBridge({
+      map: cliff,
+      from: { x: 2, y: 4 },
+      to: { x: 7, y: 4 },
+      settings: { kind: 'road', material: 'wood' },
+      budget: 1_000_000,
+    });
+    expect(tooSteep.valid).toBe(false);
+    expect(tooSteep.reason).toContain('trop raide');
   });
 
   it('refuse une diagonale, des culées à des hauteurs différentes et une portée trop longue', () => {
@@ -324,6 +363,21 @@ describe('planLinkedRoute', () => {
   });
 });
 
+describe('structureDragTarget', () => {
+  const map = { width: 24, height: 12 };
+
+  it('cale un drag diagonal sur l’axe dominant sans changer la distance', () => {
+    expect(structureDragTarget({ x: 2, y: 2 }, { x: 7, y: 5 }, map)).toEqual({ x: 7, y: 2 });
+    expect(structureDragTarget({ x: 6, y: 6 }, { x: 3, y: 2 }, map)).toEqual({ x: 6, y: 2 });
+    expect(structureDragTarget({ x: 5, y: 5 }, { x: 5, y: 9 }, map)).toEqual({ x: 5, y: 9 });
+  });
+
+  it('borne la destination à la carte et conserve un drag nul', () => {
+    expect(structureDragTarget({ x: 2, y: 2 }, { x: 30, y: 2 }, map)).toEqual({ x: 23, y: 2 });
+    expect(structureDragTarget({ x: 2, y: 2 }, { x: 2, y: 2 }, map)).toEqual({ x: 2, y: 2 });
+  });
+});
+
 describe('planTunnel', () => {
   function moundMap(): MapSnapshot {
     const map = makeMap(24, 12);
@@ -345,6 +399,45 @@ describe('planTunnel', () => {
     expect(plan.tunnel).toMatchObject({ kind: 'rail', length: 7, depth: 3 });
     expect(plan.cost).toBe(7 * TUNNEL_COST_PER_TILE.rail + 3 * 120);
     expect(plan.tunnel?.maintenance).toBe(Math.round(7 * 34));
+  });
+
+  it('trouve la sortie au même niveau quand le drag s’arrête sur la colline', () => {
+    const map = moundMap();
+    const span = resolveTunnelSpan(
+      map,
+      { x: 2, y: 5 },
+      { x: 5, y: 5 },
+      { settings: { kind: 'rail' } },
+    );
+    expect(span).toEqual({ from: { x: 2, y: 5 }, to: { x: 7, y: 5 } });
+
+    const explicit = resolveTunnelSpan(
+      map,
+      { x: 2, y: 5 },
+      { x: 8, y: 5 },
+      { settings: { kind: 'rail' } },
+    );
+    expect(explicit?.to).toEqual({ x: 7, y: 5 });
+  });
+
+  it('ne fabrique pas de sortie sans relief ou hors de portée', () => {
+    const flat = resolveTunnelSpan(
+      makeMap(),
+      { x: 2, y: 5 },
+      { x: 8, y: 5 },
+      { settings: { kind: 'rail' } },
+    );
+    expect(flat).toBeNull();
+
+    const map = makeMap(12, 10);
+    for (let x = 4; x <= 11; x += 1) setTile(map, x, 5, TILE_KIND_INDEX.grass, 7);
+    const blocked = resolveTunnelSpan(
+      map,
+      { x: 2, y: 5 },
+      { x: 9, y: 5 },
+      { settings: { kind: 'rail' } },
+    );
+    expect(blocked).toBeNull();
   });
 
   it('refuse un terrain plat, une diagonale et des portails décalés', () => {

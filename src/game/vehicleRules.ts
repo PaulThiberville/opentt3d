@@ -281,13 +281,20 @@ export function inferVehicleModel(
 }
 
 /**
+ * Tous les modèles du type de dépôt, y compris ceux incompatibles avec le rail
+ * posé. Le panneau les affiche désactivés avec la raison (#219), plutôt que de
+ * les masquer, pour que le catalogue reste compréhensible.
+ */
+export function depotModels(kind: DepotKind): VehicleModel[] {
+  return VEHICLE_MODELS.filter((model) => model.depot === kind);
+}
+
+/**
  * Modèles achetables dans un dépôt route ou rail. Pour un dépôt ferroviaire
  * dont le type est connu, seuls les matériels compatibles sont proposés.
  */
 export function modelsForDepot(kind: DepotKind, railType?: RailType | null): VehicleModel[] {
-  return VEHICLE_MODELS.filter(
-    (model) => model.depot === kind && modelCompatibleWithRail(model, railType),
-  );
+  return depotModels(kind).filter((model) => modelCompatibleWithRail(model, railType));
 }
 
 /** Cargaisons proposées au refit pour un modèle (#160). */

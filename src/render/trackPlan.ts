@@ -200,7 +200,7 @@ export function buildTrackMasks(
 
   for (const station of stations) {
     if (station.kind !== 'train' && station.kind !== 'road') continue;
-    const axis = station.width >= station.height ? 1 : 2;
+    const axis = station.roadAxis === 'y' ? 2 : station.width >= station.height ? 1 : 2;
     const left = Math.round(station.x - station.width / 2);
     const top = Math.round(station.y - station.height / 2);
     for (let dy = 0; dy < station.height; dy += 1) {
