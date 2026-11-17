@@ -159,7 +159,7 @@ describe('modèles de gares et dépôts', () => {
     }
   });
 
-  it('pose l’arrêt en passage sur le trottoir, sans bloquer la chaussée', () => {
+  it('pose un arrêt compact sur le trottoir, sans bloquer la chaussée', () => {
     for (const detail of DETAILS) {
       const geometry = createBusStopGeometry(detail);
       const box = bounds(geometry);
@@ -169,10 +169,14 @@ describe('modèles de gares et dépôts', () => {
       expect(box.max.z).toBeLessThanOrEqual(0.5);
       expect(box.min.y).toBeGreaterThanOrEqual(-1e-6);
       expect(box.max.y).toBeGreaterThan(0.3);
-      // L'axe local de la route est X : tout le modèle reste sur le bord +Z.
-      // La bande centrale (|z| < 0,17) doit rester entièrement vide.
-      expect(box.min.z).toBeGreaterThan(0.17);
-      expect((box.min.z + box.max.z) / 2).toBeGreaterThan(0.1);
+      // L'axe local de la route est X : tout le modèle est groupé sur la bande
+      // de trottoir +Z (le trottoir de la route occupe |z| ∈ [0,39 ; 0,5]).
+      expect(box.min.z).toBeGreaterThan(0.37);
+      expect((box.min.z + box.max.z) / 2).toBeGreaterThan(0.42);
+      // Abri compact (#245) : environ 0,35 tuile de large, 0,1 de profondeur.
+      expect(box.max.x - box.min.x).toBeLessThanOrEqual(0.36);
+      expect(box.max.x - box.min.x).toBeGreaterThan(0.25);
+      expect(box.max.z - box.min.z).toBeLessThanOrEqual(0.12);
       expect(geometryTriangleCount(geometry)).toBeLessThan(400);
       geometry.dispose();
     }

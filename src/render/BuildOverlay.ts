@@ -18,12 +18,20 @@ import {
   type BuildPlan,
 } from '../game/buildRules';
 import { sampleHeightWorld } from '../game/mapGrid';
+import {
+  ONEWAY_ARROW_HEAD,
+  ONEWAY_ARROW_LENGTH,
+  ONEWAY_ARROW_WIDTH,
+  ROAD_LANE_OFFSET,
+} from './TrackLayer';
 
 const VALID_COLOUR = 0x6ee7a0;
 const INVALID_COLOUR = 0xf07a72;
 const TILE_LIFT = 0.09;
 const LINE_LIFT = 0.22;
 const OUTLINE_LIFT = 0.3;
+/** Les flèches du fantôme reposent au-dessus de la surbrillance translucide. */
+const ARROW_LIFT = TILE_LIFT + 0.05;
 
 const DIRECTION_VECTORS: Record<BuildDirection, { x: number; z: number }> = {
   ne: { x: 1, z: -1 },
@@ -51,6 +59,8 @@ export class BuildOverlay {
   private signalPole: THREE.Mesh;
   private signalLight: THREE.Mesh;
   private signalMaterial: THREE.MeshBasicMaterial;
+  private oneWayArrows: THREE.InstancedMesh;
+  private oneWayMaterial: THREE.MeshBasicMaterial;
   private colour = new THREE.Color(VALID_COLOUR);
   private matrix = new THREE.Matrix4();
   private position = new THREE.Vector3();
@@ -150,6 +160,28 @@ export class BuildOverlay {
     this.signalLight.visible = false;
     this.signalLight.renderOrder = 13;
 
+    // Flèches blanches du fantôme de route à sens unique (#246) : même
+    // proportions que les flèches peintes sur la chaussée, une par voie.
+    this.oneWayMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    });
+    this.oneWayArrows = new THREE.InstancedMesh(
+      createOneWayArrowGeometry(),
+      this.oneWayMaterial,
+      MAX_BUILD_TILES * 2,
+    );
+    this.oneWayArrows.name = 'build-oneway-arrows';
+    this.oneWayArrows.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.oneWayArrows.count = 0;
+    this.oneWayArrows.frustumCulled = false;
+    this.oneWayArrows.renderOrder = 13;
+    this.oneWayArrows.visible = false;
+
     this.group.add(
       this.tiles,
       this.line,
@@ -158,6 +190,7 @@ export class BuildOverlay {
       this.marker,
       this.signalPole,
       this.signalLight,
+      this.oneWayArrows,
     );
   }
 
@@ -216,6 +249,7 @@ export class BuildOverlay {
     this.updatePlatforms(plan, map, rect);
     this.updateMarker(plan, map, rect);
     this.updateSignal(plan, map);
+    this.updateOneWayArrows(plan, map, count);
     this.group.visible = true;
   }
 
@@ -325,6 +359,12 @@ export class BuildOverlay {
       this.marker.visible = false;
       return;
     }
+    // Un fantôme à sens unique porte déjà ses flèches blanches sur la
+    // chaussée : le cône d'orientation du dernier tronçon ferait doublon.
+    if (plan.tool === 'road' && plan.road?.oneWay) {
+      this.marker.visible = false;
+      return;
+    }
     const count = Math.min(plan.tiles.length, MAX_BUILD_TILES);
     const last = plan.tiles[count - 1];
     const previous = plan.tiles[count - 2];
@@ -356,6 +396,47 @@ export class BuildOverlay {
     this.signalLight.visible = true;
   }
 
+  /**
+   * Flèches blanches du fantôme de route à sens unique (#246).
+   *
+   * Le sens vient de `plan.road.oneWay` (y compris une conversion d'un tronçon
+   * déjà posé). Deux instances par tuile, une par voie, avec le même écart et
+   * les mêmes proportions que le marquage définitif de `TrackLayer`.
+   */
+  private updateOneWayArrows(plan: BuildPlan, map: MapSnapshot, count: number): void {
+    const oneWay = plan.tool === 'road' ? (plan.road?.oneWay ?? null) : null;
+    if (!oneWay || count <= 0) {
+      this.oneWayArrows.count = 0;
+      this.oneWayArrows.visible = false;
+      return;
+    }
+    const axis = plan.axis ?? (oneWay === 'east' || oneWay === 'west' ? 'x' : 'y');
+    const positive = oneWay === 'east' || oneWay === 'south';
+    const yaw = axis === 'x' ? (positive ? 0 : Math.PI) : positive ? -Math.PI / 2 : Math.PI / 2;
+    let instance = 0;
+    this.scale.set(1, 1, 1);
+    for (let index = 0; index < count; index += 1) {
+      const tile = plan.tiles[index];
+      if (!tile) continue;
+      const ground = tile.elevation ?? sampleHeightWorld(map, tile.x + 0.5, tile.y + 0.5);
+      this.quaternion.setFromAxisAngle(this.up, yaw);
+      for (const lane of [-ROAD_LANE_OFFSET, ROAD_LANE_OFFSET]) {
+        this.position.set(
+          tile.x + 0.5 + (axis === 'y' ? lane : 0),
+          ground + ARROW_LIFT,
+          tile.y + 0.5 + (axis === 'x' ? lane : 0),
+        );
+        this.matrix.compose(this.position, this.quaternion, this.scale);
+        this.oneWayArrows.setMatrixAt(instance, this.matrix);
+        instance += 1;
+      }
+    }
+    this.oneWayArrows.count = instance;
+    this.oneWayArrows.instanceMatrix.needsUpdate = true;
+    this.oneWayArrows.computeBoundingSphere();
+    this.oneWayArrows.visible = instance > 0;
+  }
+
   clear(): void {
     this.tiles.count = 0;
     this.tiles.instanceMatrix.needsUpdate = true;
@@ -365,6 +446,8 @@ export class BuildOverlay {
     this.marker.visible = false;
     this.signalPole.visible = false;
     this.signalLight.visible = false;
+    this.oneWayArrows.count = 0;
+    this.oneWayArrows.visible = false;
     this.group.visible = false;
   }
 
@@ -377,6 +460,7 @@ export class BuildOverlay {
       this.marker,
       this.signalPole,
       this.signalLight,
+      this.oneWayArrows,
     );
     this.tiles.dispose();
     this.tiles.geometry.dispose();
@@ -392,8 +476,57 @@ export class BuildOverlay {
     this.signalPole.geometry.dispose();
     this.signalLight.geometry.dispose();
     this.signalMaterial.dispose();
+    this.oneWayArrows.geometry.dispose();
+    this.oneWayArrows.dispose();
+    this.oneWayMaterial.dispose();
     this.group.clear();
   }
+}
+
+/**
+ * Flèche plate orientée vers +X, centrée sur l'origine. Elle reprend les
+ * dimensions exactes du marquage de `TrackLayer` : hampe fine et pointe large.
+ */
+function createOneWayArrowGeometry(): THREE.BufferGeometry {
+  const half = ONEWAY_ARROW_LENGTH / 2;
+  const halfWidth = ONEWAY_ARROW_WIDTH / 2;
+  const head = ONEWAY_ARROW_HEAD;
+  const tail = half - head;
+  const vertices = new Float32Array([
+    // Hampe
+    -half,
+    0,
+    -halfWidth,
+    half,
+    0,
+    -halfWidth,
+    half,
+    0,
+    halfWidth,
+    -half,
+    0,
+    -halfWidth,
+    half,
+    0,
+    halfWidth,
+    -half,
+    0,
+    halfWidth,
+    // Pointe
+    half,
+    0,
+    0,
+    tail,
+    0,
+    -head,
+    tail,
+    0,
+    head,
+  ]);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+  geometry.computeBoundingSphere();
+  return geometry;
 }
 
 function rectOf(plan: BuildPlan): {

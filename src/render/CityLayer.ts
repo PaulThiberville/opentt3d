@@ -27,6 +27,7 @@ import { Prng, hashUnit2d } from '../game/prng';
 import { companyColour, hexToRgb } from './tileVisuals';
 import { qualitySettings, type QualityLevel } from './quality';
 import { createModelMaterial } from './models/materials';
+import { SIDEWALK_LIFT } from './TrackLayer';
 import {
   buildingVariantCount,
   chooseBuildingArchetype,
@@ -43,6 +44,8 @@ import {
 const MAX_RADIUS = 10;
 const MAX_STATION_TILES = 2048;
 const LOD_HYSTERESIS_RATIO = 1.18;
+/** Centre de la bande de trottoir dans l'espace local de l'abri (#245). */
+const STOP_CURB_OFFSET = 0.44;
 
 /** Cible de picking résolue depuis une instance de la couche ville. */
 export type CityPickInfo =
@@ -605,13 +608,18 @@ export class CityLayer {
         // Arrêt en passage : un abri de trottoir orienté par la route. Aucune
         // halle, aucun quai, aucun socle : la chaussée reste libre et plane.
         const axis = stationRoadAxis(station, map);
+        // L'abri est posé sur le trottoir : on échantillonne la hauteur au
+        // point de bord de chaussée, pas au centre de la tuile, puis on ajoute
+        // la surépaisseur du trottoir pour éviter d'enfoncer le mobilier.
+        const curbX = axis === 'x' ? hallX : hallX + STOP_CURB_OFFSET;
+        const curbZ = axis === 'x' ? hallZ + STOP_CURB_OFFSET : hallZ;
         stops.push({
           stationId: station.id,
           x: hallX,
           z: hallZ,
           tileX: hallTileX,
           tileY: hallTileY,
-          ground: hallGround,
+          ground: sampleHeightWorld(map, curbX, curbZ) + SIDEWALK_LIFT,
           yaw: axis === 'x' ? 0 : Math.PI / 2,
           width: 0.98,
           height: 0.98,

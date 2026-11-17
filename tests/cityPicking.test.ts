@@ -159,7 +159,7 @@ describe('picking ville et gares', () => {
       () => 0,
     );
     // Clic sur l'abri (bord sud de la tuile), pas au milieu de la chaussée.
-    const result = picking.pickWithCamera({ x: 0, y: 0 }, cameraAbove(12.5, 12.8));
+    const result = picking.pickWithCamera({ x: 0, y: 0 }, cameraAbove(12.5, 12.94));
     expect(result?.kind).toBe('station');
     if (result?.kind === 'station') {
       expect(result.stationId).toBe(9);

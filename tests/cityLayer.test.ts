@@ -4,6 +4,7 @@ import type { MapSnapshot, StationSnapshot, TownSnapshot } from '../src/engine/p
 import { TILE_KIND_INDEX } from '../src/engine/protocol';
 import { CityLayer } from '../src/render/CityLayer';
 import { cornerHeightWorld, sampleHeightWorld } from '../src/game/mapGrid';
+import { SIDEWALK_LIFT } from '../src/render/TrackLayer';
 
 function makeMap(width = 64, height = 64): MapSnapshot {
   const size = width * height;
@@ -296,6 +297,9 @@ describe('CityLayer : gares', () => {
     matrix.decompose(position, quaternion, scale);
     expect(position.x).toBeCloseTo(20.5, 5);
     expect(position.z).toBeCloseTo(20.5, 5);
+    // L'abri est calé sur la hauteur du trottoir au bord de chaussée, pas sur
+    // le centre de la tuile : il ne s'enfonce pas dans le revêtement.
+    expect(position.y).toBeCloseTo(sampleHeightWorld(map, 20.94, 20.5) + SIDEWALK_LIFT, 5);
     // Route selon Y : l'abri est tourné d'un quart de tour.
     expect(Math.abs(quaternionToYaw(quaternion))).toBeCloseTo(Math.PI / 2, 5);
     expect(scale.x).toBeLessThanOrEqual(1);
