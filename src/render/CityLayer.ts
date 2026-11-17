@@ -22,6 +22,7 @@ import * as THREE from 'three';
 import type { CompanyId, MapSnapshot, StationSnapshot, TownSnapshot } from '../engine/protocol';
 import { COMPANY_NONE, TILE_KIND_INDEX } from '../engine/protocol';
 import { cornerHeightWorld, sampleHeightWorld, tileKindFromIndex } from '../game/mapGrid';
+import { CONNECT_EAST, CONNECT_NORTH, CONNECT_SOUTH, CONNECT_WEST } from '../game/buildRules';
 import { Prng, hashUnit2d } from '../game/prng';
 import { companyColour, hexToRgb } from './tileVisuals';
 import { qualitySettings, type QualityLevel } from './quality';
@@ -30,6 +31,7 @@ import {
   buildingVariantCount,
   chooseBuildingArchetype,
   createBuildingGeometry,
+  createBusStopGeometry,
   createDistantBuildingGeometry,
   createStationBaseGeometry,
   createStationHallGeometry,
@@ -126,8 +128,10 @@ export class CityLayer {
   private distantGeometry: THREE.BufferGeometry | null = null;
   private hallGeometry: THREE.BufferGeometry | null = null;
   private platformGeometry: THREE.BufferGeometry | null = null;
+  private stopGeometry: THREE.BufferGeometry | null = null;
   private stationHalls: THREE.InstancedMesh | null = null;
   private stationPlatforms: THREE.InstancedMesh | null = null;
+  private stationStops: THREE.InstancedMesh | null = null;
   private stationBases: THREE.InstancedMesh | null = null;
   private stationBaseGeometry: THREE.BufferGeometry;
   private stationBaseMaterial: THREE.MeshLambertMaterial;
@@ -369,6 +373,8 @@ export class CityLayer {
       this.hallGeometry = null;
       this.platformGeometry?.dispose();
       this.platformGeometry = null;
+      this.stopGeometry?.dispose();
+      this.stopGeometry = null;
       this.stationSignature = 0;
       this.setStations(this.stationStations, this.map);
     }
@@ -565,19 +571,24 @@ export class CityLayer {
     if (visible.length === 0) return;
 
     const detail: BuildingDetail = this.detail >= 2 ? 2 : 1;
+    const hasDriveThrough = visible.some((station) => isDriveThroughStation(station, map));
     if (!this.hallGeometry) this.hallGeometry = createStationHallGeometry(detail);
     if (!this.platformGeometry) this.platformGeometry = createStationPlatformGeometry(detail);
+    if (hasDriveThrough && !this.stopGeometry) {
+      this.stopGeometry = createBusStopGeometry(detail);
+    }
     const hallGeometry = this.hallGeometry;
     const platformGeometry = this.platformGeometry;
+    const stopGeometry = this.stopGeometry;
     if (!hallGeometry || !platformGeometry) return;
 
     const halls: StationPlacement[] = [];
     const platforms: StationPlacement[] = [];
+    const stops: StationPlacement[] = [];
     const bases: StationPlacement[] = [];
     for (const station of visible) {
       const width = Math.max(1, Math.round(station.width));
       const height = Math.max(1, Math.round(station.height));
-      const yaw = width >= height ? 0 : Math.PI / 2;
       const colour = stationColour(station.company);
       // `station.x/y` est le CENTRE de l'emprise (contrat du snapshot) : la
       // tuile nord-ouest se déduit de la moitié de l'emprise, jamais de x/y.
@@ -590,6 +601,25 @@ export class CityLayer {
       const hallX = hallTileX + 0.5;
       const hallZ = hallTileY + 0.5;
       const hallGround = sampleHeightWorld(map, hallX, hallZ);
+      if (isDriveThroughStation(station, map)) {
+        // Arrêt en passage : un abri de trottoir orienté par la route. Aucune
+        // halle, aucun quai, aucun socle : la chaussée reste libre et plane.
+        const axis = stationRoadAxis(station, map);
+        stops.push({
+          stationId: station.id,
+          x: hallX,
+          z: hallZ,
+          tileX: hallTileX,
+          tileY: hallTileY,
+          ground: hallGround,
+          yaw: axis === 'x' ? 0 : Math.PI / 2,
+          width: 0.98,
+          height: 0.98,
+          colour,
+        });
+        continue;
+      }
+      const yaw = width >= height ? 0 : Math.PI / 2;
       halls.push({
         stationId: station.id,
         x: hallX,
@@ -651,7 +681,12 @@ export class CityLayer {
       }
     }
 
-    this.stationHalls = this.createStationMesh(hallGeometry, halls, 'station-halls');
+    if (halls.length > 0) {
+      this.stationHalls = this.createStationMesh(hallGeometry, halls, 'station-halls');
+    }
+    if (stops.length > 0 && stopGeometry) {
+      this.stationStops = this.createStationMesh(stopGeometry, stops, 'station-stops');
+    }
     if (platforms.length > 0) {
       this.stationPlatforms = this.createStationMesh(
         platformGeometry,
@@ -770,6 +805,7 @@ export class CityLayer {
     }
     if (this.stationHalls) this.stationHalls.castShadow = enabled;
     if (this.stationPlatforms) this.stationPlatforms.castShadow = enabled;
+    if (this.stationStops) this.stationStops.castShadow = enabled;
     if (this.stationBases) this.stationBases.castShadow = enabled;
     if (this.plinths) this.plinths.castShadow = enabled;
   }
@@ -799,6 +835,7 @@ export class CityLayer {
       this.buckets.length +
       (this.stationHalls ? 1 : 0) +
       (this.stationPlatforms ? 1 : 0) +
+      (this.stationStops ? 1 : 0) +
       (this.stationBases ? 1 : 0)
     );
   }
@@ -835,7 +872,12 @@ export class CityLayer {
         return { kind: 'building', townId, x: tile.x, y: tile.y };
       },
     }));
-    for (const mesh of [this.stationHalls, this.stationPlatforms, this.stationBases]) {
+    for (const mesh of [
+      this.stationHalls,
+      this.stationPlatforms,
+      this.stationStops,
+      this.stationBases,
+    ]) {
       if (!mesh) continue;
       targets.push({
         mesh,
@@ -870,6 +912,12 @@ export class CityLayer {
       this.stationPlatforms.dispose();
       this.stationPlatforms = null;
     }
+    if (this.stationStops) {
+      this.group.remove(this.stationStops);
+      this.stationPickInfo.delete(this.stationStops);
+      this.stationStops.dispose();
+      this.stationStops = null;
+    }
     if (this.stationBases) {
       this.group.remove(this.stationBases);
       this.stationPickInfo.delete(this.stationBases);
@@ -897,6 +945,8 @@ export class CityLayer {
     this.hallGeometry = null;
     this.platformGeometry?.dispose();
     this.platformGeometry = null;
+    this.stopGeometry?.dispose();
+    this.stopGeometry = null;
     this.plinthGeometry.dispose();
     this.plinthMaterial.dispose();
     this.stationBaseGeometry.dispose();
@@ -1031,6 +1081,8 @@ function computeStationSignature(
     mix(station.y);
     mix(station.width);
     mix(station.height);
+    mix(station.driveThrough ? 1 : 0);
+    mix(station.roadAxis === 'y' ? 1 : 0);
     for (let index = 0; index < station.kind.length; index += 1) {
       mix(station.kind.charCodeAt(index));
     }
@@ -1045,12 +1097,67 @@ function computeStationSignature(
           const x = left + dx;
           const y = top + dy;
           if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
-          mix(map.heightMap[y * map.width + x] ?? 0);
+          const index = y * map.width + x;
+          mix(map.heightMap[index] ?? 0);
+          // L'orientation d'un arrêt en passage peut être déduite de la route
+          // voisine quand le snapshot est antérieur au champ `roadAxis`.
+          mix(map.kind[index] ?? 0);
+          mix(map.trackBits[index] ?? 0);
         }
       }
     }
   }
   return hash >>> 0;
+}
+
+/** Vrai si la tuile porte une route (pour l'orientation d'un arrêt en passage). */
+function isRoadTile(map: MapSnapshot, x: number, y: number): boolean {
+  if (x < 0 || y < 0 || x >= map.width || y >= map.height) return false;
+  return (map.kind[y * map.width + x] ?? 0) === TILE_KIND_INDEX.road;
+}
+
+/**
+ * Détecte un arrêt de bus en passage. Les snapshots récents portent
+ * `driveThrough` ; les anciens (et le pont WASM non reconstruit) sont déduits
+ * de la tuile de gare : connexions routières dans la tuile ou routes de part
+ * et d'autre. Une gare routière normale, posée à côté de la route, ne doit
+ * jamais être confondue avec un arrêt traversant.
+ */
+function isDriveThroughStation(station: StationSnapshot, map: MapSnapshot): boolean {
+  if (station.kind !== 'road') return false;
+  if (station.driveThrough !== undefined) return station.driveThrough;
+  if (Math.round(station.width) !== 1 || Math.round(station.height) !== 1) return false;
+  const x = Math.floor(station.x);
+  const y = Math.floor(station.y);
+  const index = y * map.width + x;
+  const bits = map.trackBits[index] ?? 0;
+  if (
+    (bits & (CONNECT_EAST | CONNECT_WEST)) !== 0 ||
+    (bits & (CONNECT_NORTH | CONNECT_SOUTH)) !== 0
+  ) {
+    return true;
+  }
+  return (
+    (isRoadTile(map, x - 1, y) && isRoadTile(map, x + 1, y)) ||
+    (isRoadTile(map, x, y - 1) && isRoadTile(map, x, y + 1))
+  );
+}
+
+/** Axe de la route d'un arrêt en passage, explicite ou déduit de la carte. */
+function stationRoadAxis(station: StationSnapshot, map: MapSnapshot): 'x' | 'y' {
+  if (station.roadAxis) return station.roadAxis;
+  const x = Math.floor(station.x);
+  const y = Math.floor(station.y);
+  const index = y * map.width + x;
+  const bits = map.trackBits[index] ?? 0;
+  const alongX = (bits & (CONNECT_EAST | CONNECT_WEST)) !== 0;
+  const alongY = (bits & (CONNECT_NORTH | CONNECT_SOUTH)) !== 0;
+  if (alongX !== alongY) return alongX ? 'x' : 'y';
+
+  const horizontal = Number(isRoadTile(map, x - 1, y)) + Number(isRoadTile(map, x + 1, y));
+  const vertical = Number(isRoadTile(map, x, y - 1)) + Number(isRoadTile(map, x, y + 1));
+  if (horizontal !== vertical) return horizontal > vertical ? 'x' : 'y';
+  return station.width >= station.height ? 'x' : 'y';
 }
 
 /** Couleur de livrée d'une gare, atténuée pour rester lisible en plein jour. */

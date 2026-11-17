@@ -198,6 +198,25 @@ describe('inférence d’orientation des voies', () => {
     const roadMasks = buildTrackMasks(map, [station, roadStation]);
     expect(roadMasks.road[8 * 12 + 8]).toBe(1);
     expect(roadMasks.stationAxis[8 * 12 + 8]).toBe(1);
+
+    // Arrêt en passage 1×1 : l'axe vient du snapshot, pas d'une emprise 1×1.
+    setKind(map, 6, 11, TILE_KIND_INDEX.station);
+    const throughStop: StationSnapshot = {
+      ...station,
+      id: 3,
+      kind: 'road',
+      x: 6.5,
+      y: 11.5,
+      width: 1,
+      height: 1,
+      driveThrough: true,
+      roadAxis: 'y',
+    };
+    const stopMasks = buildTrackMasks(map, [throughStop]);
+    expect(stopMasks.stationAxis[11 * 12 + 6]).toBe(2);
+    const stopPlan = inferTilePlan(map, stopMasks, 6, 11, 'road');
+    expect(stopPlan.station).toBe(true);
+    expect(stopPlan.axis).toBe('y');
   });
 
   it('classe tout un tablier de pont long, pas seulement ses extrémités', () => {

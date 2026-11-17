@@ -263,6 +263,119 @@ describe('CityLayer : gares', () => {
     layer.dispose();
   });
 
+  it('rend un arrêt en passage comme abri de trottoir, sans halle ni quai', () => {
+    const { map } = makeTownMap();
+    const layer = new CityLayer();
+    const stop = station({
+      id: 4,
+      kind: 'road',
+      x: 20.5,
+      y: 20.5,
+      width: 1,
+      height: 1,
+      driveThrough: true,
+      roadAxis: 'y',
+    });
+    layer.setStations([stop], map);
+    expect(layer.stationCountValue).toBe(1);
+    expect(layer.group.children.find((child) => child.name === 'station-halls')).toBeUndefined();
+    expect(
+      layer.group.children.find((child) => child.name === 'station-platforms'),
+    ).toBeUndefined();
+    const stops = layer.group.children.find(
+      (child) => child.name === 'station-stops',
+    ) as THREE.InstancedMesh;
+    expect(stops).toBeDefined();
+    expect(stops.count).toBe(1);
+
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    stops.getMatrixAt(0, matrix);
+    matrix.decompose(position, quaternion, scale);
+    expect(position.x).toBeCloseTo(20.5, 5);
+    expect(position.z).toBeCloseTo(20.5, 5);
+    // Route selon Y : l'abri est tourné d'un quart de tour.
+    expect(Math.abs(quaternionToYaw(quaternion))).toBeCloseTo(Math.PI / 2, 5);
+    expect(scale.x).toBeLessThanOrEqual(1);
+    expect(scale.z).toBeLessThanOrEqual(1);
+
+    const pick = layer.pickTargets().find((target) => target.mesh.name === 'station-stops');
+    expect(pick?.infoForInstance(0)).toEqual({ kind: 'station', stationId: 4, x: 20, y: 20 });
+    layer.dispose();
+  });
+
+  it('conserve halle et quai pour une gare routière normale', () => {
+    const { map } = makeTownMap();
+    const layer = new CityLayer();
+    const normal = station({
+      id: 5,
+      kind: 'road',
+      x: 20.5,
+      y: 20.5,
+      width: 1,
+      height: 1,
+      driveThrough: false,
+    });
+    layer.setStations([normal], map);
+    const halls = layer.group.children.find(
+      (child) => child.name === 'station-halls',
+    ) as THREE.InstancedMesh;
+    const platforms = layer.group.children.find(
+      (child) => child.name === 'station-platforms',
+    ) as THREE.InstancedMesh;
+    expect(halls.count).toBe(1);
+    expect(platforms.count).toBe(1);
+    expect(layer.group.children.find((child) => child.name === 'station-stops')).toBeUndefined();
+    layer.dispose();
+  });
+
+  it('déduit un arrêt en passage traversant de la route, sans confondre un arrêt normal', () => {
+    const { map } = makeTownMap();
+    const x = 20;
+    const y = 20;
+    const index = y * map.width + x;
+    map.kind[index] = TILE_KIND_INDEX.station;
+    // Ancien snapshot sans `driveThrough` : la route traverse sur l'axe Y.
+    map.kind[(y - 1) * map.width + x] = TILE_KIND_INDEX.road;
+    map.kind[(y + 1) * map.width + x] = TILE_KIND_INDEX.road;
+    const through = station({
+      id: 6,
+      kind: 'road',
+      x: 20.5,
+      y: 20.5,
+      width: 1,
+      height: 1,
+    });
+    const layer = new CityLayer();
+    layer.setStations([through], map);
+    const stops = layer.group.children.find(
+      (child) => child.name === 'station-stops',
+    ) as THREE.InstancedMesh;
+    expect(stops.count).toBe(1);
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    stops.getMatrixAt(0, matrix);
+    matrix.decompose(position, quaternion, scale);
+    expect(Math.abs(quaternionToYaw(quaternion))).toBeCloseTo(Math.PI / 2, 5);
+    layer.dispose();
+
+    // Un arrêt normal n'a qu'un seul accès routier : il garde sa halle.
+    map.kind[(y + 1) * map.width + x] = TILE_KIND_INDEX.grass;
+    const normalLayer = new CityLayer();
+    normalLayer.setStations([{ ...through, id: 7 }], map);
+    expect(
+      normalLayer.group.children.find((child) => child.name === 'station-halls'),
+    ).toBeDefined();
+    expect(
+      normalLayer.group.children.find((child) => child.name === 'station-stops'),
+    ).toBeUndefined();
+    normalLayer.dispose();
+  });
+
   it('tourne la halle pour une gare plus haute que large', () => {
     const { map } = makeTownMap();
     const layer = new CityLayer();

@@ -131,6 +131,45 @@ describe('picking ville et gares', () => {
     city.dispose();
   });
 
+  it('sélectionne l’abri d’un arrêt en passage sur sa tuile de gare', () => {
+    const map = makeMap();
+    const town = makeTown(map);
+    const city = new CityLayer();
+    city.build([town], map);
+    const stop: StationSnapshot = {
+      id: 9,
+      company: 0,
+      name: 'Arrêt',
+      kind: 'road',
+      x: 12.5,
+      y: 12.5,
+      width: 1,
+      height: 1,
+      waiting: [],
+      driveThrough: true,
+      roadAxis: 'x',
+    };
+    city.setStations([stop], map);
+    const target = city.pickTargets().find((entry) => entry.mesh.name === 'station-stops');
+    expect(target).toBeDefined();
+    expect(target?.infoForInstance(0)).toEqual({ kind: 'station', stationId: 9, x: 12, y: 12 });
+
+    const picking = new Picking(
+      { vehicles: () => [], buildings: () => city.pickTargets(), terrain: () => [] },
+      () => 0,
+    );
+    // Clic sur l'abri (bord sud de la tuile), pas au milieu de la chaussée.
+    const result = picking.pickWithCamera({ x: 0, y: 0 }, cameraAbove(12.5, 12.8));
+    expect(result?.kind).toBe('station');
+    if (result?.kind === 'station') {
+      expect(result.stationId).toBe(9);
+      expect(result.x).toBe(12);
+      expect(result.y).toBe(12);
+    }
+    picking.dispose();
+    city.dispose();
+  });
+
   it('ne rend jamais un prop décoratif pickable', () => {
     const map = makeMap();
     const town = makeTown(map);

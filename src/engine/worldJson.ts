@@ -398,6 +398,8 @@ export function parseIndustry(value: unknown): IndustrySnapshot {
 
 export function parseStation(value: unknown): StationSnapshot {
   const raw = record(value);
+  const driveThrough = raw.driveThrough === true || raw.drive_through === true;
+  const roadAxis = raw.roadAxis === 'x' || raw.roadAxis === 'y' ? raw.roadAxis : undefined;
   return {
     id: Math.max(0, int(raw.id, 0)),
     company: companyId(raw.company),
@@ -408,6 +410,8 @@ export function parseStation(value: unknown): StationSnapshot {
     width: Math.max(1, int(raw.width, 1)),
     height: Math.max(1, int(raw.height, 1)),
     waiting: cargoList(raw.waiting),
+    ...(driveThrough ? { driveThrough: true } : {}),
+    ...(roadAxis ? { roadAxis } : {}),
   };
 }
 

@@ -5,6 +5,7 @@ import {
   BUILDING_VARIANTS,
   chooseBuildingArchetype,
   createBuildingGeometry,
+  createBusStopGeometry,
   createDepotBodyGeometry,
   createDepotLiveryGeometry,
   createDistantBuildingGeometry,
@@ -156,6 +157,42 @@ describe('modèles de gares et dépôts', () => {
       expect(geometryTriangleCount(geometry)).toBeLessThan(300);
       geometry.dispose();
     }
+  });
+
+  it('pose l’arrêt en passage sur le trottoir, sans bloquer la chaussée', () => {
+    for (const detail of DETAILS) {
+      const geometry = createBusStopGeometry(detail);
+      const box = bounds(geometry);
+      expect(box.min.x).toBeGreaterThanOrEqual(-0.5);
+      expect(box.max.x).toBeLessThanOrEqual(0.5);
+      expect(box.min.z).toBeGreaterThanOrEqual(-0.5);
+      expect(box.max.z).toBeLessThanOrEqual(0.5);
+      expect(box.min.y).toBeGreaterThanOrEqual(-1e-6);
+      expect(box.max.y).toBeGreaterThan(0.3);
+      // L'axe local de la route est X : tout le modèle reste sur le bord +Z.
+      // La bande centrale (|z| < 0,17) doit rester entièrement vide.
+      expect(box.min.z).toBeGreaterThan(0.17);
+      expect((box.min.z + box.max.z) / 2).toBeGreaterThan(0.1);
+      expect(geometryTriangleCount(geometry)).toBeLessThan(400);
+      geometry.dispose();
+    }
+  });
+
+  it('allume le vitrage et le luminaire de l’arrêt la nuit', () => {
+    const geometry = createBusStopGeometry(2);
+    const windows = geometry.getAttribute('aWindow');
+    const glows = geometry.getAttribute('aGlow');
+    expect(windows).toBeDefined();
+    expect(glows).toBeDefined();
+    let lit = 0;
+    let glowing = 0;
+    for (let index = 0; index < windows.count; index += 1) {
+      if (windows.getX(index) > 0) lit += 1;
+      if (glows.getX(index) > 0) glowing += 1;
+    }
+    expect(lit).toBeGreaterThan(0);
+    expect(glowing).toBeGreaterThan(0);
+    geometry.dispose();
   });
 
   it('distingue dépôt route et rail, corps et livrée', () => {
