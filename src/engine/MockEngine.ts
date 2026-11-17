@@ -606,12 +606,16 @@ function directionFromVector(dx: number, dy: number): number {
 }
 
 /**
- * Direction de sortie d'un dépôt (#232) : `direction` est un DiagDirection
- * mock (0 = NE, 1 = SE, 2 = SW, 3 = NW), converti dans la convention 0..255
- * des véhicules. Un véhicule au dépôt fait face à la sortie, pas au nord.
+ * Direction de sortie d'un dépôt (#232/#247) : `direction` est un
+ * DiagDirection mock (0 = NE, 1 = SE, 2 = SW, 3 = NW) qui désigne la **tuile
+ * voisine** de la porte. La porte est donc toujours cardinale (est, sud,
+ * ouest, nord) ; un véhicule garé fait face à cette sortie, pas à la diagonale
+ * du nom de l'orientation (l'ancien calcul ajoutait 45° et faisait pivoter le
+ * bus dans le mur au démarrage).
  */
-function depotDirection(direction: number): number {
-  return (((Math.round(direction) & 3) * 64 + 32) % 256) & 255;
+export function depotDirection(direction: number): number {
+  const offset = directionOffset(directionFromIndex(direction));
+  return directionFromVector(offset.dx, offset.dy);
 }
 
 /** Trace un chemin en L (horizontal puis vertical) le long des tuiles. */
@@ -717,6 +721,16 @@ function stationAtMapTile(world: RouteWorld, x: number, y: number): MockStation 
   return null;
 }
 
+/** Dépôt occupant une tuile de la carte (même logique que `depotAtTile`). */
+function depotAtMapTile(world: RouteWorld, x: number, y: number): MockDepot | null {
+  for (const depot of world.depots) {
+    if (x >= depot.x && x < depot.x + depot.width && y >= depot.y && y < depot.y + depot.height) {
+      return depot;
+    }
+  }
+  return null;
+}
+
 function structureTransportAt(world: RouteWorld, index: number): BuildTransport | null {
   for (const structure of world.structures) {
     if (structure.underlay.some((entry) => entry.index === index)) return structure.transport;
@@ -742,6 +756,19 @@ function surfaceCost(
   const index = y * world.width + x;
   const tile = world.kind[index] ?? K.void;
 
+  // Un dépôt n'est jamais une route traversante : un véhicule ne peut y
+  // entrer que par sa porte, et seulement s'il s'agit de sa destination. Sans
+  // cette règle, A* empruntait le bâtiment comme raccourci, la tuile du dépôt
+  // apparaissait au milieu du tracé et déclenchait une arrivée fantôme juste
+  // après la sortie (#247).
+  const depot = depotAtMapTile(world, x, y);
+  if (depot) {
+    if (!isGoal) return Infinity;
+    if (kind === 'road' && depot.kind === 'road') return SURFACE_GOAL;
+    if (kind === 'train' && depot.kind === 'rail') return SURFACE_GOAL;
+    return Infinity;
+  }
+
   if (isGoal) {
     if (tile === K.void) return Infinity;
     if (kind === 'aircraft') return SURFACE_GOAL;
@@ -749,6 +776,15 @@ function surfaceCost(
   }
 
   if (kind === 'aircraft') return SURFACE_GOAL;
+
+  // Un pont ou un tunnel porte une voie au-dessus/en dessous du terrain : les
+  // tuiles intermédiaires gardent leur type d'origine (herbe, eau…) et ne sont
+  // reconnues que par les drapeaux de l'ouvrage (#244).
+  const structureTransport = structureTransportAt(world, index);
+  if (structureTransport !== null) {
+    if (kind === 'road') return structureTransport === 'road' ? SURFACE_ROUTE : Infinity;
+    if (kind === 'train') return structureTransport === 'rail' ? SURFACE_ROUTE : Infinity;
+  }
 
   switch (tile) {
     case K.road:
@@ -990,7 +1026,9 @@ function routeOriginForVehicle(
   world: MockWorld,
   vehicle: MockVehicle,
 ): { origin: RouteOrigin | null; error: string | null } {
-  if (vehicle.status !== 3) return { origin: null, error: null };
+  // Un véhicule en dépôt (garé ou à l'arrêt) doit sortir par sa porte, même
+  // si un changement de tournée survient pendant l'attente (#247).
+  if (vehicle.status !== 3 && vehicle.status !== 2) return { origin: null, error: null };
   const depot = depotAtTile(world, Math.floor(vehicle.x), Math.floor(vehicle.y));
   if (!depot || depot.company !== vehicle.company) return { origin: null, error: null };
   const door = depotDoorTile(world, depot, vehicle.kind);
@@ -1034,16 +1072,36 @@ function buildRoutePath(
   for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
     const target = targets[targetIndex];
     if (!target) continue;
-    let goal = { x: Math.floor(target.x), y: Math.floor(target.y) };
-    const isOriginDepot = origin !== null && goal.x === origin.depot.x && goal.y === origin.depot.y;
+    const targetTile = { x: Math.floor(target.x), y: Math.floor(target.y) };
+    const targetDepot = depotAtMapTile(world, targetTile.x, targetTile.y);
+    const isOriginDepot =
+      origin !== null &&
+      targetDepot !== null &&
+      targetDepot.x === origin.depot.x &&
+      targetDepot.y === origin.depot.y;
     const isLastTarget = targetIndex === targets.length - 1;
-    if (isOriginDepot && origin) goal = { ...origin.door };
+    let goal = targetTile;
+    if (isOriginDepot && origin) {
+      goal = { ...origin.door };
+    } else if (targetDepot) {
+      // Un dépôt visité en cours de tournée s'aborde aussi par sa porte : le
+      // véhicule ne doit jamais traverser le bâtiment (#247).
+      const door = depotDoorTile(world, targetDepot, kind);
+      if (door) goal = door;
+    }
     if (goal.x === cursor.x && goal.y === cursor.y) {
       // Un ordre de dépôt déjà satisfait ne crée pas un aller-retour sur la
       // tuile du dépôt.
       if (isOriginDepot && isLastTarget && origin) {
         tiles.push({ ...origin.depot });
         endsAtOriginDepot = true;
+      } else if (targetDepot && !isOriginDepot) {
+        const depotTile = { x: targetDepot.x, y: targetDepot.y };
+        if (cursor.x !== depotTile.x || cursor.y !== depotTile.y) {
+          // Entrée puis ressortie immédiate par la même porte : le tracé reste
+          // continu pour les cibles suivantes.
+          tiles.push(depotTile, { ...goal });
+        }
       }
       continue;
     }
@@ -1067,6 +1125,10 @@ function buildRoutePath(
       // par l'entrée au lieu de repartir en sens inverse.
       tiles.push({ ...origin.depot });
       endsAtOriginDepot = true;
+    } else if (targetDepot) {
+      // Cible dépôt : entrée par la porte, puis sortie par la même porte pour
+      // poursuivre la tournée. L'arrêt est marqué sur la tuile du dépôt.
+      tiles.push({ x: targetDepot.x, y: targetDepot.y }, { ...goal });
     }
   }
   // Une tournée qui se termine au dépôt est déjà fermée : inutile de retracer
@@ -1134,7 +1196,13 @@ interface StopPoint {
 /** Marque les segments dont le nœud de départ est la tuile d'un arrêt. */
 function segmentsForStopsOnPath(path: P2[], stops: StopPoint[]): (MockStop | null)[] {
   const result = new Array<MockStop | null>(path.length).fill(null);
-  for (let i = 0; i < path.length; i += 1) {
+  const count = path.length;
+  const distanceSquared = (point: P2, x: number, y: number): number => {
+    const dx = point.x - x;
+    const dy = point.y - y;
+    return dx * dx + dy * dy;
+  };
+  for (let i = 0; i < count; i += 1) {
     const point = path[i];
     if (!point) continue;
     for (const stop of stops) {
@@ -1147,11 +1215,25 @@ function segmentsForStopsOnPath(path: P2[], stops: StopPoint[]): (MockStop | nul
         }
         continue;
       }
-      const dx = point.x - (stop.x + 0.5);
-      const dy = point.y - (stop.y + 0.5);
-      if (dx * dx + dy * dy <= 1.1) {
-        result[i] = { kind: stop.kind, id: stop.id, order: stop.order };
-      }
+      // Gare/industrie : on ne marque que le point le plus proche de chaque
+      // passage. Marquer toutes les tuiles du rayon provoquait plusieurs
+      // arrivées consécutives au même arrêt, avec des demi-tours et une
+      // rotation incohérente (#247).
+      const centreX = stop.x + 0.5;
+      const centreY = stop.y + 0.5;
+      const distance = distanceSquared(point, centreX, centreY);
+      if (distance > 1.1) continue;
+      const previous = path[(i - 1 + count) % count];
+      const next = path[(i + 1) % count];
+      const previousDistance = previous
+        ? distanceSquared(previous, centreX, centreY)
+        : Number.POSITIVE_INFINITY;
+      const nextDistance = next
+        ? distanceSquared(next, centreX, centreY)
+        : Number.POSITIVE_INFINITY;
+      if (distance > previousDistance || distance > nextDistance) continue;
+      if (distance === previousDistance && distance === nextDistance) continue;
+      result[i] = { kind: stop.kind, id: stop.id, order: stop.order };
     }
   }
   return result;
@@ -3046,6 +3128,25 @@ function updateVehiclesTransforms(world: MockWorld): void {
       vehicle.direction = directionFromVector(position.dx, position.dy);
     }
     const ground = sampleHeightWorld(map, vehicle.x, vehicle.y);
+    const tileX = Math.floor(vehicle.x);
+    const tileY = Math.floor(vehicle.y);
+    const tileIndexNow =
+      tileX >= 0 && tileY >= 0 && tileX < world.width && tileY < world.height
+        ? tileIndex(tileX, tileY, world.width)
+        : -1;
+    // Ne cherche l'ouvrage que sur une tuile de tunnel : les véhicules en
+    // surface sont la grande majorité et cette lecture est sur le chemin chaud
+    // du tick (#244).
+    const tunnelFlag =
+      tileIndexNow >= 0 && ((world.flags[tileIndexNow] ?? 0) & TILE_FLAG.TUNNEL) !== 0;
+    const structure = tunnelFlag ? structureAtTile(world, tileIndexNow) : null;
+    // Dans une galerie, le véhicule roule au niveau du radier du tunnel, pas
+    // sur la colline au-dessus (#244). Le z du snapshot ne doit donc pas suivre
+    // le terrain traversé.
+    const tunnelFloor =
+      structure?.type === 'tunnel' && structure.portalHeight !== undefined
+        ? structure.portalHeight * 0.5
+        : null;
     if (vehicle.kind === 'aircraft') {
       vehicle.z = ground + 6.5 + Math.sin(world.tick * 0.02 + vehicle.id) * 0.4;
       vehicle.pitch = 0;
@@ -3053,9 +3154,11 @@ function updateVehiclesTransforms(world: MockWorld): void {
       vehicle.z = 0.12;
       vehicle.pitch = 0;
     } else {
-      vehicle.z = ground + 0.08;
+      vehicle.z = (tunnelFloor ?? ground) + 0.08;
       const horizontal = Math.hypot(position.dx, position.dy);
-      if (horizontal > 1e-6) {
+      if (tunnelFloor !== null) {
+        vehicle.pitch = 0;
+      } else if (horizontal > 1e-6) {
         const ahead = sampleHeightWorld(map, position.x + position.dx, position.y + position.dy);
         vehicle.pitch = Math.atan2(ahead - ground, horizontal);
       } else {
@@ -5215,7 +5318,7 @@ function vehicleArrive(world: MockWorld, vehicle: MockVehicle, stop: MockStop): 
   if (orderIndex >= 0) vehicle.currentOrder = orderIndex;
   const action = stopAction(vehicle, vehicle.currentOrder);
 
-  if (vehicle.cargoAmount > 0) {
+  if (vehicle.cargoAmount > 0 && (stop.kind === 'station' || stop.kind === 'industry')) {
     const amount = vehicle.cargoAmount;
     if (stop.kind === 'station') {
       const station = world.stations.find((item) => item.id === stop.id);
@@ -5261,6 +5364,12 @@ function vehicleArrive(world: MockWorld, vehicle: MockVehicle, stop: MockStop): 
       loadFromStation(world, vehicle, station);
       if (vehicle.cargoAmount >= vehicle.cargoCapacity) vehicle.waitTicks = 0;
     }
+  }
+  // Un véhicule garé au dépôt regarde sa porte : il repartira dans cette
+  // direction, sans demi-tour visible au moment du départ (#247).
+  if (stop.kind === 'depot') {
+    const depot = world.depots.find((item) => item.id === stop.id);
+    if (depot) vehicle.direction = depotDirection(depot.direction);
   }
   vehicle.status = 2;
   addEvent(world, {

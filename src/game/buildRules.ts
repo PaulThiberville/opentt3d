@@ -2455,6 +2455,17 @@ export const BRIDGE_APPROACH_TILES = 1;
  */
 export const BRIDGE_MAX_APPROACH_LAND = 1;
 
+/** Écart de hauteur maximal (demi-niveaux) toléré entre deux berges. */
+export const BRIDGE_MAX_HEIGHT_DIFFERENCE = 1;
+
+/**
+ * Nombre de tuiles examinées au-delà du drag pour retrouver les berges. Un
+ * geste humain s'arrête rarement exactement sur la rive : on accepte donc de
+ * déborder de deux tuiles de chaque côté, sans jamais aller chercher un lac
+ * entier que le joueur n'a pas traversé.
+ */
+export const BRIDGE_SNAP_TILES = 2;
+
 /** Nature réelle de l'obstacle franchi par une tuile de tablier. */
 export type BridgeObstacle = 'water' | 'valley' | 'crossing';
 
@@ -2555,18 +2566,157 @@ export interface TunnelPlanOptions extends InfrastructureOptions {
   to: BuildPoint;
 }
 
-/** Plan d'un pont rectiligne entre deux culées (#154). */
+/** Suite d'indices contigus satisfaisant un prédicat le long d'un tracé. */
+function contiguousRuns(
+  points: readonly BuildPoint[],
+  test: (point: BuildPoint, index: number) => boolean,
+): { start: number; end: number }[] {
+  const runs: { start: number; end: number }[] = [];
+  let start = -1;
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index];
+    const matches = point ? test(point, index) : false;
+    if (matches && start < 0) start = index;
+    if (!matches && start >= 0) {
+      runs.push({ start, end: index - 1 });
+      start = -1;
+    }
+  }
+  if (start >= 0) runs.push({ start, end: points.length - 1 });
+  return runs;
+}
+
+/**
+ * Recale les culées sur les bords réels de l'obstacle traversé par le drag.
+ *
+ * Un joueur vise rarement la rive au pixel près : il glisse « à peu près » en
+ * travers d'une rivière, d'une route ou d'une voie. Le plan doit alors se
+ * resserrer sur l'obstacle au lieu de refuser parce que le tablier déborde de
+ * quelques tuiles de terre ferme (#243). On n'étend la recherche que de deux
+ * tuiles hors du drag : un petit geste au milieu d'un lac ne fabrique jamais
+ * un pont démesuré.
+ *
+ * Si aucun obstacle réel n'est traversé, la fonction renvoie `null` et
+ * `planBridge` conserve le tracé saisi pour expliquer le refus.
+ */
+export function resolveBridgeSpan(
+  map: MapSnapshot,
+  from: BuildPoint,
+  to: BuildPoint,
+): { from: BuildPoint; to: BuildPoint } | null {
+  const traced = straightStructurePoints(from, to);
+  if (!traced || traced.points.length < 2) return null;
+  const axis = traced.axis;
+  const stepX = axis === 'x' ? Math.sign(to.x - from.x) : 0;
+  const stepY = axis === 'y' ? Math.sign(to.y - from.y) : 0;
+  if (stepX === 0 && stepY === 0) return null;
+
+  let extendedFrom = { ...from };
+  let lead = 0;
+  for (let distance = 1; distance <= BRIDGE_SNAP_TILES; distance += 1) {
+    const x = from.x - stepX * distance;
+    const y = from.y - stepY * distance;
+    if (!inBounds(map, x, y)) break;
+    extendedFrom = { x, y };
+    lead = distance;
+  }
+  let extendedTo = { ...to };
+  let trail = 0;
+  for (let distance = 1; distance <= BRIDGE_SNAP_TILES; distance += 1) {
+    const x = to.x + stepX * distance;
+    const y = to.y + stepY * distance;
+    if (!inBounds(map, x, y)) break;
+    extendedTo = { x, y };
+    trail = distance;
+  }
+
+  const extended = straightStructurePoints(extendedFrom, extendedTo);
+  if (!extended) return null;
+  const points = extended.points;
+  if (points.length < 3) return null;
+  const dragStart = lead;
+  const dragEnd = points.length - 1 - trail;
+  if (dragEnd <= dragStart) return null;
+
+  const heights = points.map((point) => map.heightMap[tileIndex(point.x, point.y, map.width)] ?? 0);
+  const strongRuns = contiguousRuns(points, (point) => {
+    const kind = TILE_KINDS[map.kind[tileIndex(point.x, point.y, map.width)] ?? 0] ?? 'void';
+    return BRIDGE_WATER_KINDS.includes(kind) || BRIDGE_TRACK_KINDS.includes(kind);
+  });
+
+  let runs = strongRuns;
+  if (runs.length === 0) {
+    // Vallée : les deux berges doivent dominer le creux d'au moins deux
+    // demi-niveaux, sinon un simple faux-plat deviendrait un viaduc inutile.
+    const baseline = Math.max(...heights.slice(dragStart, dragEnd + 1));
+    const low = heights.map((height) => height <= baseline - BRIDGE_MIN_VALLEY_DROP);
+    runs = contiguousRuns(points, (_point, index) => low[index] === true).filter((run) => {
+      const before = heights[run.start - 1];
+      const after = heights[run.end + 1];
+      return (
+        before !== undefined &&
+        after !== undefined &&
+        before >= baseline - 1 &&
+        after >= baseline - 1
+      );
+    });
+  }
+
+  // L'obstacle doit être réellement traversé par le geste : un obstacle juste
+  // derrière le point de départ ne doit pas être construit par surprise.
+  const viable = runs.filter(
+    (run) =>
+      run.start > 0 && run.end < points.length - 1 && run.start <= dragEnd && run.end >= dragStart,
+  );
+  if (viable.length === 0) return null;
+
+  // Priorité aux obstacles dont les deux berges tombent déjà dans le drag :
+  // un tracé valide ne doit pas être déplacé vers un autre ouvrage plus loin.
+  const contained = viable.filter((run) => run.start - 1 >= dragStart && run.end + 1 <= dragEnd);
+  const candidates = contained.length > 0 ? contained : viable;
+
+  const midpoint = (dragStart + dragEnd) / 2;
+  candidates.sort((a, b) => {
+    const lengthDelta = b.end - b.start - (a.end - a.start);
+    if (lengthDelta !== 0) return lengthDelta;
+    const distanceDelta =
+      Math.abs((a.start + a.end) / 2 - midpoint) - Math.abs((b.start + b.end) / 2 - midpoint);
+    if (distanceDelta !== 0) return distanceDelta;
+    return a.start - b.start;
+  });
+  const chosen = candidates[0];
+  if (!chosen) return null;
+  return { from: points[chosen.start - 1]!, to: points[chosen.end + 1]! };
+}
+
+/**
+ * Plan d'un pont rectiligne entre deux culées (#154).
+ *
+ * Les extrémités saisies sont d'abord recalées sur les berges de l'obstacle
+ * (#243) : le drag peut déborder, l'ouvrage reste posé au bon endroit. Les
+ * berges peuvent ensuite différer d'un niveau, comme OpenTTD.
+ */
 export function planBridge(options: BridgePlanOptions): BuildPlan {
   const map = options.map;
   const from = buildTile(options.from);
   const to = buildTile(options.to);
-  const traced = straightStructurePoints(from, to);
-  const axis = traced?.axis ?? 'x';
+  const inputTrace = straightStructurePoints(from, to);
+  const samePoint = from.x === to.x && from.y === to.y;
+  const snapped = inputTrace && !samePoint ? resolveBridgeSpan(map, from, to) : null;
+  const start = snapped?.from ?? from;
+  const end = snapped?.to ?? to;
+  const traced = straightStructurePoints(start, end);
+  const axis = traced?.axis ?? inputTrace?.axis ?? 'x';
   const spec = BRIDGE_MATERIALS[options.settings.material] ?? BRIDGE_MATERIALS.wood;
-  const plan = emptyInfrastructurePlan('bridge', from, to, axis);
-  const span = Math.abs(to.x - from.x) + Math.abs(to.y - from.y);
+  const plan = emptyInfrastructurePlan('bridge', start, end, axis);
+  const span = Math.abs(end.x - start.x) + Math.abs(end.y - start.y);
   const length = span + 1;
-  const deckHeight = (map.heightMap[tileIndex(from.x, from.y, map.width)] ?? 0) + spec.deckLift;
+  const startHeight = map.heightMap[tileIndex(start.x, start.y, map.width)] ?? 0;
+  const endHeight = map.heightMap[tileIndex(end.x, end.y, map.width)] ?? 0;
+  const bankHeight = Math.max(startHeight, endHeight);
+  // Le tablier doit rester au-dessus de la berge la plus haute, sinon il
+  // traverse le relief quand les deux rives ne sont pas au même niveau.
+  const deckHeight = bankHeight + spec.deckLift;
   const maintenancePerTile =
     options.settings.kind === 'rail' ? spec.railMaintenance : spec.roadMaintenance;
   plan.bridge = {
@@ -2578,11 +2728,14 @@ export function planBridge(options: BridgePlanOptions): BuildPlan {
     maintenance: Math.round(length * maintenancePerTile),
   };
 
-  if (!traced) {
+  if (!inputTrace) {
     return { ...plan, reason: 'Un pont doit être droit, sur un axe X ou Y.' };
   }
-  if (span === 0) {
+  if (samePoint) {
     return { ...plan, reason: 'Glissez d’une culée à l’autre pour tracer le pont.' };
+  }
+  if (!traced) {
+    return { ...plan, reason: 'Un pont doit être droit, sur un axe X ou Y.' };
   }
   if (length > MAX_BRIDGE_TILES) {
     return {
@@ -2602,32 +2755,35 @@ export function planBridge(options: BridgePlanOptions): BuildPlan {
       reason: `Le pont ${BRIDGE_MATERIAL_LABELS[spec.id]} ne dépasse pas ${spec.maxSpan} tuiles de portée.`,
     };
   }
-  if (!inBounds(map, from.x, from.y) || !inBounds(map, to.x, to.y)) {
+  if (!inBounds(map, start.x, start.y) || !inBounds(map, end.x, end.y)) {
     return { ...plan, reason: 'Pont hors de la carte.' };
   }
 
-  const fromHeight = map.heightMap[tileIndex(from.x, from.y, map.width)] ?? 0;
-  const toHeight = map.heightMap[tileIndex(to.x, to.y, map.width)] ?? 0;
   let reason: string | null = null;
-  if (fromHeight !== toHeight) {
-    reason = 'Les deux culées d’un pont doivent être à la même hauteur.';
+  if (Math.abs(startHeight - endHeight) > BRIDGE_MAX_HEIGHT_DIFFERENCE) {
+    reason = `Les deux berges sont trop dénivelées (${startHeight} ≠ ${endHeight}) : un pont tolère un niveau d’écart maximum.`;
   }
   const endReason =
-    structureEndReason(map, from.x, from.y, options.settings.kind, 'culée', options.company) ??
-    structureEndReason(map, to.x, to.y, options.settings.kind, 'culée', options.company);
+    structureEndReason(map, start.x, start.y, options.settings.kind, 'culée', options.company) ??
+    structureEndReason(map, end.x, end.y, options.settings.kind, 'culée', options.company);
   reason = reason ?? endReason;
 
   // Les deux rampes doivent rejoindre une tuile de terre ferme au même
   // niveau, puis disposer d'une approche plane. Sans cela, la culée est posée
   // sur une falaise ou au bord de l'eau et le tablier flotte sans accès.
-  const stepX = Math.sign(to.x - from.x);
-  const stepY = Math.sign(to.y - from.y);
+  const stepX = Math.sign(end.x - start.x);
+  const stepY = Math.sign(end.y - start.y);
   let approachReason: string | null = null;
   for (let distance = 1; distance <= BRIDGE_APPROACH_TILES; distance += 1) {
     approachReason =
       approachReason ??
-      bridgeApproachReason(map, from.x - stepX * distance, from.y - stepY * distance, fromHeight) ??
-      bridgeApproachReason(map, to.x + stepX * distance, to.y + stepY * distance, toHeight);
+      bridgeApproachReason(
+        map,
+        start.x - stepX * distance,
+        start.y - stepY * distance,
+        startHeight,
+      ) ??
+      bridgeApproachReason(map, end.x + stepX * distance, end.y + stepY * distance, endHeight);
   }
   reason = reason ?? approachReason;
 
@@ -2644,18 +2800,18 @@ export function planBridge(options: BridgePlanOptions): BuildPlan {
     if (middle) {
       reason = reason ?? bridgeMiddleReason(map, point.x, point.y);
       const ground = map.heightMap[index] ?? 0;
-      if (!reason && ground > fromHeight) {
+      if (!reason && ground > bankHeight) {
         reason = 'Terrain trop haut sous le tablier : rehaussez le pont ou changez de tracé.';
       }
-      obstacles.push(bridgeObstacleAt(map, index, fromHeight));
+      obstacles.push(bridgeObstacleAt(map, index, bankHeight));
       cost += costPerTile;
     }
     plan.tiles.push(structureTile(map, point, kind, 0, deckElevation));
   }
 
   // Un pont doit franchir quelque chose : eau, vallée marquée, route ou voie.
-  // Sur du terrain plat, une route ou une voie suffit et le tablier serait
-  // une structure massive inutile.
+  // Sans obstacle réel (et sans berges recalées), le tablier serait une
+  // structure massive inutile au-dessus d'un champ.
   if (!reason) {
     const firstObstacle = obstacles.findIndex((obstacle) => obstacle !== null);
     if (firstObstacle < 0) {
@@ -2671,6 +2827,9 @@ export function planBridge(options: BridgePlanOptions): BuildPlan {
       }
       const leadingLand = firstObstacle;
       const trailingLand = obstacles.length - 1 - lastObstacle;
+      // Les culées recalées ne laissent normalement aucune tuile de terre sous
+      // le tablier. Le garde-fou reste utile aux plans transmis directement au
+      // moteur sans passer par le recalage du contrôleur.
       if (leadingLand > BRIDGE_MAX_APPROACH_LAND || trailingLand > BRIDGE_MAX_APPROACH_LAND) {
         reason = `Portée incohérente : ${leadingLand + trailingLand} tuile(s) de terre ferme sous le tablier. Placez les culées au bord de l’obstacle.`;
       }
@@ -2727,9 +2886,12 @@ function linkBridgeMaterial(kind: BuildTransport, span: number): BridgeMaterial 
 
 /**
  * Découpe une liaison en approches terrestres et ponts. Un pont n'est planifié
- * que si le trajet droit rencontre un cours d'eau étroit, avec deux berges au
- * même niveau et des rampes valides. Un lac trop large, une berge en falaise ou
- * un tablier qui déborde rendent la liaison impossible (#201).
+ * que si le trajet droit rencontre un cours d'eau étroit, avec deux berges
+ * constructibles et des rampes valides. Un lac trop large, une berge en falaise
+ * ou un tablier qui déborde rendent la liaison impossible (#201).
+ *
+ * Les berges peuvent être décalées d'un niveau (#243) : `planBridge` applique
+ * la même tolérance que le moteur.
  */
 export function planLinkedRoute(options: LinkedRouteOptions): LinkedRoutePlan | null {
   const map = options.map;
@@ -2776,15 +2938,9 @@ export function planLinkedRoute(options: LinkedRouteOptions): LinkedRoutePlan | 
   for (const run of runs) {
     if (run.start < 2 || run.end > path.length - 3) return null;
     if (run.end - run.start + 1 > maxBridgeSpan) return null;
-    const bankA = path[run.start - 1];
-    const bankB = path[run.end + 1];
-    if (!bankA || !bankB) return null;
-    if (
-      (map.heightMap[tileIndex(bankA.x, bankA.y, map.width)] ?? 0) !==
-      (map.heightMap[tileIndex(bankB.x, bankB.y, map.width)] ?? 0)
-    ) {
-      return null;
-    }
+    // Les hauteurs de berges sont validées par `planBridge`, qui tolère un
+    // niveau d'écart entre les deux rives (#243).
+    if (!path[run.start - 1] || !path[run.end + 1]) return null;
   }
 
   const pieces: LinkedRoutePiece[] = [];

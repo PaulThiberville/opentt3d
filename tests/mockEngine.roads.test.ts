@@ -232,8 +232,10 @@ describe('MockEngine : orientation des véhicules (#232)', () => {
       .snapshot()
       .vehicles.find((item) => item.kind === 'road' && item.status === 3);
     if (!vehicle) throw new Error('bus au dépôt absent');
-    // DiagDirection 0 = NE (32), 1 = SE (96), 2 = SW (160), 3 = NW (224).
-    expect(vehicle.direction).toBe((depot.direction & 3) * 64 + 32);
+    // La porte est une tuile voisine cardinale : ne=est (64), se=sud (128),
+    // sw=ouest (192), nw=nord (0). L'ancien calcul ajoutait 45° (#247).
+    const doorDirection = [64, 128, 192, 0][depot.direction & 3] ?? 0;
+    expect(vehicle.direction).toBe(doorDirection);
     expect(vehicle.pitch ?? 0).toBe(0);
   });
 

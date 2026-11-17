@@ -133,7 +133,9 @@ describe('MockEngine : construction', () => {
             budget: 10_000_000,
           });
           if (plan.valid) {
-            spot = { from: { x, y }, to: { x: x + span, y } };
+            // `planBridge` recale les culées sur les berges (#243) : la
+            // commande doit utiliser les extrémités réellement planifiées.
+            spot = { from: { ...plan.from }, to: { ...plan.to } };
           }
         }
       }

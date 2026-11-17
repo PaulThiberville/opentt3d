@@ -31,43 +31,63 @@ export interface WaterComponent {
   tiles: number[];
 }
 
+/**
+ * Découpage compact de la carte en composantes d'eau libres.
+ *
+ * `ids[index]` vaut l'identifiant de la composante pour une tuile d'eau
+ * 4-connexe sans écluse, et `-1` partout ailleurs (terre, vide, écluse). Le
+ * rendu s'en sert pour plaquer **toutes** les tuiles d'une composante sur son
+ * niveau minimal, sans copier une liste de tuiles par composante.
+ */
+export interface WaterComponentIndex {
+  /** Niveau minimal de chaque composante, indexé par identifiant. */
+  levels: number[];
+  /** Identifiant de composante par tuile, `-1` hors eau libre. */
+  ids: Int32Array;
+  /** Nombre de composantes. */
+  count: number;
+}
+
 const LOCK = TILE_KIND_INDEX.lock;
 const VOID = TILE_KIND_INDEX.void;
+const NO_COMPONENT = -1;
 
 /**
  * Découpe la carte en composantes d'eau connexes (4-voisinage).
  *
  * Les écluses sont des **barrières** : elles appartiennent à leur propre
  * bief et ne sont pas traversées, ce qui autorise deux niveaux légitimes de
- * part et d'autre. Les tuiles vides et sèches ne sont jamais incluses.
+ * part et de l'autre. Les tuiles vides et sèches ne sont jamais incluses.
+ *
+ * Les nappes qui ne se touchent que par un coin restent deux composantes :
+ * la règle est explicitement 4-connexe, comme le maillage des berges.
  */
-export function waterComponents(map: WaterLevelMap): WaterComponent[] {
+export function waterComponentIndex(map: WaterLevelMap): WaterComponentIndex {
   const { width, height, kind, heightMap } = map;
   const size = width * height;
   const visited = new Uint8Array(size);
+  const ids = new Int32Array(size).fill(NO_COMPONENT);
   const queue = new Int32Array(size);
-  const components: WaterComponent[] = [];
+  const levels: number[] = [];
 
   for (let start = 0; start < size; start += 1) {
     if (visited[start] === 1) continue;
     const kindIndex = kind[start] ?? VOID;
     if (kindIndex === LOCK || !isWaterKind(tileKindFromIndex(kindIndex))) continue;
+    const id = levels.length;
     visited[start] = 1;
     let head = 0;
     let tail = 0;
     queue[tail] = start;
     tail += 1;
-    const tiles: number[] = [];
-    const levels = new Set<number>();
     let level = Number.POSITIVE_INFINITY;
 
     while (head < tail) {
       const index = queue[head] ?? 0;
       head += 1;
+      ids[index] = id;
       const tileLevel = heightMap[index] ?? 0;
-      levels.add(tileLevel);
       if (tileLevel < level) level = tileLevel;
-      tiles.push(index);
 
       const x = index % width;
       const y = (index - x) / width;
@@ -88,13 +108,54 @@ export function waterComponents(map: WaterLevelMap): WaterComponent[] {
       visit(x, y + 1);
     }
 
-    components.push({
-      level: Number.isFinite(level) ? level : 0,
-      levels: [...levels].sort((a, b) => a - b),
-      tiles,
-    });
+    levels.push(Number.isFinite(level) ? level : 0);
   }
-  return components;
+  return { levels, ids, count: levels.length };
+}
+
+/** Liste détaillée des composantes (tests et diagnostic). */
+export function waterComponents(map: WaterLevelMap): WaterComponent[] {
+  const { ids, levels } = waterComponentIndex(map);
+  const tiles: number[][] = levels.map(() => []);
+  const distinctLevels: Set<number>[] = levels.map(() => new Set<number>());
+  const { heightMap } = map;
+  for (let index = 0; index < ids.length; index += 1) {
+    const id = ids[index] ?? NO_COMPONENT;
+    if (id < 0) continue;
+    tiles[id]?.push(index);
+    distinctLevels[id]?.add(heightMap[index] ?? 0);
+  }
+  return levels.map((level, id) => ({
+    level,
+    levels: [...(distinctLevels[id] ?? [])].sort((a, b) => a - b),
+    tiles: tiles[id] ?? [],
+  }));
+}
+
+/**
+ * Niveau de rendu de chaque tuile.
+ *
+ * Toutes les tuiles d'une même composante 4-connexe sans écluse reçoivent le
+ * niveau minimal de la composante. Une écluse conserve son propre niveau : elle
+ * reste la seule dénivellation légitime, matérialisée par un bajoyer de pierre.
+ * Les tuiles sèches et le vide gardent leur hauteur d'origine.
+ *
+ * Cette passe est pure et ne modifie pas la carte : le moteur OpenTTD (WASM)
+ * garde son état, seul le rendu aplanit les nappes. Le mock applique en plus
+ * `normalizeWaterLevels` à son monde, si bien que les deux moteurs convergent.
+ */
+export function waterRenderLevels(map: WaterLevelMap): Uint8Array {
+  const { width, height, heightMap } = map;
+  const size = width * height;
+  const levels = new Uint8Array(size);
+  for (let index = 0; index < size; index += 1) levels[index] = heightMap[index] ?? 0;
+  const { ids, levels: componentLevels } = waterComponentIndex(map);
+  for (let index = 0; index < size; index += 1) {
+    const id = ids[index] ?? NO_COMPONENT;
+    if (id < 0) continue;
+    levels[index] = componentLevels[id] ?? levels[index] ?? 0;
+  }
+  return levels;
 }
 
 /**

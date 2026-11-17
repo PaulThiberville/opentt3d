@@ -12,6 +12,7 @@ import {
   planBridge,
   planBuild,
   planTunnel,
+  resolveBridgeSpan,
   type BuildPlan,
   type BuildPoint,
 } from '../src/game/buildRules';
@@ -207,8 +208,12 @@ describe('UI → plan → MockEngine : ouvrages (#216/#217)', () => {
 
     const plan = lastPlan(plans);
     expect(plan.valid).toBe(true);
-    expect(plan.from).toEqual(site.from);
-    expect(plan.to).toEqual(site.to);
+    // Le drag s'arrête parfois sur l'eau : les culées sont recalées sur les
+    // berges réelles (#243).
+    const snapped = resolveBridgeSpan(map, site.from, site.to);
+    expect(snapped).not.toBeNull();
+    expect(plan.from).toEqual(snapped?.from);
+    expect(plan.to).toEqual(snapped?.to);
 
     const structuresBefore = engine.snapshot().structures?.length ?? 0;
     engine.send(commandFromPlan(plan, 0));

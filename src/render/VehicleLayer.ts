@@ -13,7 +13,12 @@
 
 import * as THREE from 'three';
 import type { RenderVehicle } from '../game/vehicleInterpolation';
-import { TILE_KIND_INDEX, type MapSnapshot } from '../engine/protocol';
+import {
+  TILE_FLAG,
+  TILE_KIND_INDEX,
+  type MapSnapshot,
+  type StructureSnapshot,
+} from '../engine/protocol';
 import { sampleHeightWorld } from '../game/mapGrid';
 import { companyColour, hexToRgb } from './tileVisuals';
 import { createModelMaterial } from './models/materials';
@@ -48,6 +53,52 @@ export const SHIP_WATERLINE_OFFSET = -0.19;
 /** Décalage vertical d'un archétype au-dessus de `vehicle.z`. */
 export function vehicleGroundOffset(variant: VehicleVariant, modelOffset: number): number {
   return variant === 'ship' ? SHIP_WATERLINE_OFFSET : modelOffset;
+}
+
+/**
+ * Vrai si le véhicule est engagé dans la galerie d'un tunnel, entre les deux
+ * portails. Les portails eux-mêmes restent visibles : le véhicule disparaît
+ * seulement quand son centre franchit le cadre, comme dans OpenTTD (#244).
+ */
+export function vehicleInsideTunnel(
+  vehicle: Pick<RenderVehicle, 'x' | 'y'>,
+  tunnels: readonly Extract<StructureSnapshot, { kind: 'tunnel' }>[],
+): boolean {
+  for (const tunnel of tunnels) {
+    const alongX = tunnel.from.y === tunnel.to.y;
+    const total = alongX
+      ? Math.abs(tunnel.to.x - tunnel.from.x)
+      : Math.abs(tunnel.to.y - tunnel.from.y);
+    if (total < 1) continue;
+    if (alongX) {
+      const direction = Math.sign(tunnel.to.x - tunnel.from.x);
+      const along = (vehicle.x - (tunnel.from.x + 0.5)) * direction;
+      if (Math.abs(vehicle.y - (tunnel.from.y + 0.5)) > 0.65) continue;
+      if (along > 0.55 && along < total - 0.55) return true;
+    } else {
+      const direction = Math.sign(tunnel.to.y - tunnel.from.y);
+      const along = (vehicle.y - (tunnel.from.y + 0.5)) * direction;
+      if (Math.abs(vehicle.x - (tunnel.from.x + 0.5)) > 0.65) continue;
+      if (along > 0.55 && along < total - 0.55) return true;
+    }
+  }
+  return false;
+}
+
+/** Repli sans `structures[]` : le mock marque les tuiles intérieures du tunnel. */
+function vehicleHiddenByMap(
+  vehicle: Pick<RenderVehicle, 'x' | 'y'>,
+  map: MapSnapshot | null,
+): boolean {
+  if (!map) return false;
+  const tileX = Math.floor(vehicle.x);
+  const tileY = Math.floor(vehicle.y);
+  if (tileX < 0 || tileY < 0 || tileX >= map.width || tileY >= map.height) return false;
+  const index = tileY * map.width + tileX;
+  if (((map.flags[index] ?? 0) & TILE_FLAG.TUNNEL) === 0) return false;
+  // Les portails du mock portent le type `tunnel` ; les tuiles intermédiaires
+  // gardent leur terrain d'origine avec le drapeau TUNNEL.
+  return (map.kind[index] ?? 0) !== TILE_KIND_INDEX.tunnel;
 }
 
 interface ModelSlot {
@@ -192,14 +243,28 @@ export class VehicleLayer {
   }
 
   /** Met à jour toutes les instances à partir des véhicules interpolés. */
-  update(vehicles: readonly RenderVehicle[], map: MapSnapshot | null = null): void {
+  update(
+    vehicles: readonly RenderVehicle[],
+    map: MapSnapshot | null = null,
+    structures: readonly StructureSnapshot[] = [],
+  ): void {
     this.map = map;
-    const signature = vehicleSignature(vehicles);
-    const colourSignature = vehicleColourSignature(vehicles);
+    // Les véhicules engagés dans une galerie ne sont pas rendus : sans cela,
+    // ils traverseraient le relief au-dessus du tunnel (#244). Les convois
+    // restent visibles sur les portails, puis réapparaissent à la sortie.
+    const tunnels = structures.filter(
+      (structure): structure is Extract<StructureSnapshot, { kind: 'tunnel' }> =>
+        structure.kind === 'tunnel',
+    );
+    const visibleVehicles = vehicles.filter(
+      (vehicle) => !vehicleInsideTunnel(vehicle, tunnels) && !vehicleHiddenByMap(vehicle, map),
+    );
+    const signature = vehicleSignature(visibleVehicles);
+    const colourSignature = vehicleColourSignature(visibleVehicles);
     if (this.hasSignature && signature === this.lastSignature) {
       // Position, orientation, statut et livrée inchangés (pause, gare…) :
       // aucun buffer GPU n'est réuploadé.
-      this.updateHalo(vehicles);
+      this.updateHalo(visibleVehicles);
       return;
     }
     const coloursChanged = !this.hasSignature || colourSignature !== this.lastColourSignature;
@@ -211,7 +276,7 @@ export class VehicleLayer {
     for (const slot of this.slots.values()) slot.used = 0;
 
     this.modelCounts.clear();
-    for (const vehicle of vehicles) {
+    for (const vehicle of visibleVehicles) {
       const variant = variantFor(vehicle.model, vehicle.id);
       this.modelCounts.set(variant, (this.modelCounts.get(variant) ?? 0) + 1);
     }
@@ -221,7 +286,7 @@ export class VehicleLayer {
     // livrée globale n'a pas changé.
     const mustUploadColours = coloursChanged || this.slotsCreated > 0;
 
-    for (const vehicle of vehicles) {
+    for (const vehicle of visibleVehicles) {
       const variant = variantFor(vehicle.model, vehicle.id);
       const slot = this.slots.get(variant);
       if (!slot) continue;
@@ -264,9 +329,9 @@ export class VehicleLayer {
       slot.mesh.visible = slot.used > 0;
     }
 
-    this.collectRailSources(vehicles);
+    this.collectRailSources(visibleVehicles);
     this.slotsCreated = 0;
-    this.updateHalo(vehicles);
+    this.updateHalo(visibleVehicles);
   }
 
   /**
@@ -284,10 +349,18 @@ export class VehicleLayer {
     const tileY = Math.floor(vehicle.y);
     if (tileX < 0 || tileY < 0 || tileX >= map.width || tileY >= map.height) return 0;
     const kind = map.kind[tileY * map.width + tileX] ?? 0;
+    const flags = map.flags[tileY * map.width + tileX] ?? 0;
     // Sur un pont/tunnel, le terrain sous le tablier ne donne pas la pente
     // réelle : horizontal vaut mieux qu'un tangage faux quand le moteur ne
-    // fournit pas `pitch`.
-    if (kind === TILE_KIND_INDEX.bridge || kind === TILE_KIND_INDEX.tunnel) return 0;
+    // fournit pas `pitch`. Le drapeau couvre aussi les tuiles intérieures du
+    // tunnel, dont le type reste celui du terrain dans le mock (#244).
+    if (
+      kind === TILE_KIND_INDEX.bridge ||
+      kind === TILE_KIND_INDEX.tunnel ||
+      (flags & (TILE_FLAG.BRIDGE | TILE_FLAG.TUNNEL)) !== 0
+    ) {
+      return 0;
+    }
     const yaw = directionToYaw(vehicle.direction);
     const forwardX = Math.cos(yaw);
     const forwardZ = -Math.sin(yaw);

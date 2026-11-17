@@ -5,6 +5,7 @@ import {
   SHIP_WATERLINE_OFFSET,
   VehicleLayer,
   vehicleGroundOffset,
+  vehicleInsideTunnel,
 } from '../src/render/VehicleLayer';
 import { waterSurfaceHeight } from '../src/render/waterSurface';
 
@@ -109,6 +110,31 @@ describe('VehicleLayer : uploads conditionnels', () => {
     expect(matrix[0]).toBeCloseTo(Math.cos(0.3), 4);
     expect(matrix[1]).toBeCloseTo(Math.sin(0.3), 4);
     expect(matrix[2]).toBeCloseTo(0, 4);
+    layer.dispose();
+  });
+
+  it('masque le véhicule entre les portails d’un tunnel (#244)', () => {
+    const tunnel = {
+      id: 9,
+      kind: 'tunnel' as const,
+      company: 0,
+      transport: 'rail' as const,
+      from: { x: 3, y: 8 },
+      to: { x: 8, y: 8 },
+      length: 6,
+      portalHeight: 4,
+    };
+    expect(vehicleInsideTunnel({ x: 3.5, y: 8.5 }, [tunnel])).toBe(false);
+    expect(vehicleInsideTunnel({ x: 5.5, y: 8.5 }, [tunnel])).toBe(true);
+    expect(vehicleInsideTunnel({ x: 8.5, y: 8.5 }, [tunnel])).toBe(false);
+    // Un véhicule sur la voie voisine, à côté du tunnel, reste visible.
+    expect(vehicleInsideTunnel({ x: 5.5, y: 9.6 }, [tunnel])).toBe(false);
+
+    const layer = new VehicleLayer();
+    layer.update([vehicle({ id: 4, x: 5.5, y: 8.5 })], null, [tunnel]);
+    expect(layer.instanceCount).toBe(0);
+    layer.update([vehicle({ id: 4, x: 3.5, y: 8.5 })], null, [tunnel]);
+    expect(layer.instanceCount).toBe(1);
     layer.dispose();
   });
 

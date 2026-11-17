@@ -21,6 +21,38 @@ function parseMoney(text) {
   return digits ? Number(digits) : null;
 }
 
+/**
+ * Trésorerie autoritaire du snapshot moteur. Le HUD peut afficher un snapshot
+ * antérieur à la commande de pause : comparer deux lectures du HUD juste après
+ * la pause donne donc des écarts de revenus fantômes.
+ */
+function readCompanyMoney(state) {
+  const companies = state.debug?.companies ?? [];
+  const local = companies.find((company) => company.isLocal) ?? companies[0] ?? null;
+  return {
+    money: typeof local?.money === 'number' ? local.money : null,
+    paused: state.debug?.economy?.paused === true,
+    tick: state.debug?.engineTick ?? null,
+  };
+}
+
+/**
+ * Le moteur ne publie plus de snapshot une fois en pause : le dernier snapshot
+ * peut avoir quelques ticks de retard (revenus déjà acquis mais pas encore
+ * affichés). On confirme donc la pause sur `engine.status()` puis on force un
+ * snapshot de lecture avant de relever la trésorerie.
+ */
+async function settlePausedMoney(page) {
+  await page.waitFor(() => window.__opentt3d?.engine?.status?.()?.paused === true, {
+    timeout: 5_000,
+    label: 'la simulation en pause côté moteur',
+  });
+  await page.evaluate(() => window.__opentt3d?.game?.refresh?.());
+  const current = readCompanyMoney(await readState(page));
+  if (current.money === null) throw new Error('Trésorerie illisible après la pause');
+  return current;
+}
+
 export const soloMock = {
   id: 'solo-mock',
   title: 'Solo mock : menu, chargement, HUD, carte et route',
@@ -116,19 +148,19 @@ export const soloMock = {
       timeout: 5_000,
       label: 'la simulation en pause',
     });
-    const beforeBuild = await readState(page);
+    const beforeBuild = await settlePausedMoney(page);
     const built = await buildRoad(page);
     ctx.check(
       `route construite (${built.before} → ${built.after} tuiles, mode ${built.mode})`,
       built,
     );
-    const afterBuild = await readState(page);
-    const beforeMoney = parseMoney(beforeBuild.hud.money);
-    const afterMoney = parseMoney(afterBuild.hud.money);
+    const afterBuild = readCompanyMoney(await readState(page));
     ctx.assert(
-      beforeMoney !== null && afterMoney !== null && afterMoney < beforeMoney,
+      beforeBuild.money !== null &&
+        afterBuild.money !== null &&
+        afterBuild.money < beforeBuild.money,
       'la trésorerie a diminué après la construction',
-      { before: beforeBuild.hud.money, after: afterBuild.hud.money },
+      { before: beforeBuild.money, after: afterBuild.money },
     );
     await page.focusBody();
     await page.press('Space');
