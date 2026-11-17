@@ -186,7 +186,19 @@ describe('buildRules : gare routière', () => {
     });
   });
 
-  it('refuse une route perpendiculaire en passage', () => {
+  it('refuse un arrêt normal sur une tuile route sans « en passage »', () => {
+    const map = makeMap();
+    setTile(map, 4, 4, TILE_KIND_INDEX.road, CONNECT_EAST | CONNECT_WEST, 0);
+    const plan = planStation({
+      map,
+      from: { x: 4, y: 4 },
+      settings: railStation({ kind: 'road', driveThrough: false }),
+    });
+    expect(plan.valid).toBe(false);
+    expect(plan.reason).toContain('en passage');
+  });
+
+  it('aligne un arrêt en passage sur une route verticale, sans rotation manuelle', () => {
     const map = makeMap();
     setTile(map, 4, 4, TILE_KIND_INDEX.road, CONNECT_NORTH | CONNECT_SOUTH, 0);
     const plan = planStation({
@@ -194,8 +206,63 @@ describe('buildRules : gare routière', () => {
       from: { x: 4, y: 4 },
       settings: railStation({ kind: 'road', driveThrough: true, direction: 'ne' }),
     });
-    expect(plan.valid).toBe(false);
-    expect(plan.reason).toContain('mal orientée');
+    expect(plan.valid).toBe(true);
+    expect(plan.axis).toBe('y');
+    expect(plan.station?.direction).toBe('nw');
+    expect(plan.tiles[0]?.connections).toBe(CONNECT_NORTH | CONNECT_SOUTH);
+    expect(commandFromPlan(plan, 0).options).toMatchObject({
+      kind: 'road',
+      direction: 'nw',
+      axis: 'y',
+      drive_through: true,
+    });
+  });
+
+  it('aligne un arrêt en passage sur une route horizontale', () => {
+    const map = makeMap();
+    setTile(map, 4, 4, TILE_KIND_INDEX.road, CONNECT_EAST | CONNECT_WEST, 0);
+    const plan = planStation({
+      map,
+      from: { x: 4, y: 4 },
+      settings: railStation({ kind: 'road', driveThrough: true, direction: 'nw' }),
+    });
+    expect(plan.valid).toBe(true);
+    expect(plan.axis).toBe('x');
+    expect(plan.station?.direction).toBe('ne');
+    expect(plan.tiles[0]?.connections).toBe(CONNECT_EAST | CONNECT_WEST);
+  });
+
+  it('détecte l’axe via les routes voisines quand les bits sont muets (WASM)', () => {
+    const map = makeMap();
+    setTile(map, 4, 4, TILE_KIND_INDEX.road, 0, 0);
+    setTile(map, 4, 3, TILE_KIND_INDEX.road, CONNECT_NORTH | CONNECT_SOUTH, 0);
+    setTile(map, 4, 5, TILE_KIND_INDEX.road, CONNECT_NORTH | CONNECT_SOUTH, 0);
+    const plan = planStation({
+      map,
+      from: { x: 4, y: 4 },
+      settings: railStation({ kind: 'road', driveThrough: true, direction: 'ne' }),
+    });
+    expect(plan.valid).toBe(true);
+    expect(plan.axis).toBe('y');
+    expect(plan.station?.direction).toBe('nw');
+  });
+
+  it('refuse un carrefour ou une courbe pour une gare en passage', () => {
+    for (const bits of [
+      CONNECT_NORTH | CONNECT_EAST | CONNECT_SOUTH | CONNECT_WEST,
+      CONNECT_EAST | CONNECT_SOUTH,
+    ]) {
+      const map = makeMap();
+      setTile(map, 4, 4, TILE_KIND_INDEX.road, bits, 0);
+      const plan = planStation({
+        map,
+        from: { x: 4, y: 4 },
+        settings: railStation({ kind: 'road', driveThrough: true, direction: 'ne' }),
+      });
+      expect(plan.valid).toBe(false);
+      expect(plan.reason).toContain('route droite');
+      expect(plan.tiles).toHaveLength(1);
+    }
   });
 });
 

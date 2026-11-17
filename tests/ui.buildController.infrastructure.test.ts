@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { BuildController } from '../src/ui/buildController';
 import { describeBuildPlan } from '../src/ui/buildHint';
-import { createBuildSettings, type BuildPlan, type BuildSettings } from '../src/game/buildRules';
+import {
+  commandFromPlan,
+  createBuildSettings,
+  type BuildPlan,
+  type BuildSettings,
+} from '../src/game/buildRules';
 import { TILE_KIND_INDEX, type MapSnapshot } from '../src/engine/protocol';
 
 function makeMap(width = 16, height = 16): MapSnapshot {
@@ -125,6 +130,51 @@ describe('BuildController : gares', () => {
     expect(plan?.tiles).toHaveLength(1);
     expect(plan?.station?.driveThrough).toBe(true);
     expect(plan?.tiles[0]?.connections).toBe(1 | 4);
+  });
+
+  it('pose un arrêt en passage sur une route verticale en l’alignant seul', () => {
+    const map = makeMap();
+    setTile(map, 4, 4, TILE_KIND_INDEX.road, 1 | 4, 0);
+    const { controller, previews, commits, settings } = harness(map);
+    settings.station = { ...settings.station, kind: 'road', driveThrough: true, direction: 'ne' };
+    controller.setSettings(settings);
+    controller.setTool('station');
+    controller.handleHover({ x: 4, y: 4 });
+    controller.handleBegin({ x: 4, y: 4 });
+
+    const plan = lastPlan(previews);
+    expect(plan?.valid).toBe(true);
+    expect(plan?.axis).toBe('y');
+    expect(plan?.station?.direction).toBe('nw');
+    expect(plan?.tiles[0]?.connections).toBe(1 | 4);
+    controller.handleEnd({ x: 4, y: 4 });
+    expect(commits).toHaveLength(1);
+    expect(commandFromPlan(commits[0]!, 0).options).toMatchObject({
+      kind: 'road',
+      direction: 'nw',
+      axis: 'y',
+      drive_through: true,
+    });
+  });
+
+  it('revalide l’aperçu quand « en passage » est coché sur une route', () => {
+    const map = makeMap();
+    setTile(map, 4, 4, TILE_KIND_INDEX.road, 2 | 8, 0);
+    const { controller, previews, settings } = harness(map);
+    settings.station = { ...settings.station, kind: 'road', driveThrough: false, direction: 'ne' };
+    controller.setSettings(settings);
+    controller.setTool('station');
+    controller.handleHover({ x: 4, y: 4 });
+
+    expect(lastPlan(previews)?.valid).toBe(false);
+    expect(lastPlan(previews)?.reason).toContain('en passage');
+
+    settings.station = { ...settings.station, kind: 'road', driveThrough: true, direction: 'ne' };
+    controller.setSettings(settings);
+    const plan = lastPlan(previews);
+    expect(plan?.valid).toBe(true);
+    expect(plan?.station?.driveThrough).toBe(true);
+    expect(plan?.tiles[0]?.connections).toBe(2 | 8);
   });
 
   it('annule le survol au clic droit sans désarmer l’outil', () => {

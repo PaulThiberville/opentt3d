@@ -1020,6 +1020,59 @@ export function depotConnections(direction: BuildDirection): number {
     : CONNECT_NORTH | CONNECT_SOUTH;
 }
 
+/** Direction la plus proche de `preferred` qui suit l'axe demandé. */
+export function directionOnAxis(axis: BuildAxis, preferred: BuildDirection): BuildDirection {
+  if (directionAxis(preferred) === axis) return preferred;
+  return axis === 'x' ? 'ne' : 'nw';
+}
+
+/** Vrai si la tuile porte une route (voisinage d'une gare en passage). */
+function isRoadTile(map: MapSnapshot, x: number, y: number): boolean {
+  if (!inBounds(map, x, y)) return false;
+  return (TILE_KINDS[map.kind[tileIndex(x, y, map.width)] ?? 0] ?? 'void') === 'road';
+}
+
+interface RoadOrientation {
+  /** `null` quand la chaussée n'est ni clairement X ni clairement Y. */
+  axis: BuildAxis | null;
+  /** Carrefour, courbe ou bifurcation : pas de gare en passage droite. */
+  junction: boolean;
+  /** Faux pour une impasse (une seule extrémité routière). */
+  through: boolean;
+}
+
+/**
+ * Orientation de la chaussée sous un arrêt en passage.
+ *
+ * `trackBits` suit la convention des connexions du frontend pour les routes
+ * posées par le mock, mais le snapshot WASM y laisse le type de route (nibble
+ * bas à zéro). On retombe alors sur les routes voisines, comme le rendu (#218),
+ * afin de ne jamais refuser une route droite ni accepter un carrefour.
+ */
+function roadOrientationAt(map: MapSnapshot, x: number, y: number, index: number): RoadOrientation {
+  const nibble = (map.trackBits[index] ?? 0) & 0x0f;
+  const alongX = (nibble & (CONNECT_EAST | CONNECT_WEST)) !== 0;
+  const alongY = (nibble & (CONNECT_NORTH | CONNECT_SOUTH)) !== 0;
+  if (alongX || alongY) {
+    if (alongX && alongY) return { axis: null, junction: true, through: false };
+    const through = alongX
+      ? (nibble & (CONNECT_EAST | CONNECT_WEST)) === (CONNECT_EAST | CONNECT_WEST)
+      : (nibble & (CONNECT_NORTH | CONNECT_SOUTH)) === (CONNECT_NORTH | CONNECT_SOUTH);
+    return { axis: alongX ? 'x' : 'y', junction: false, through };
+  }
+
+  const east = isRoadTile(map, x + 1, y);
+  const west = isRoadTile(map, x - 1, y);
+  const south = isRoadTile(map, x, y + 1);
+  const north = isRoadTile(map, x, y - 1);
+  const horizontal = east || west;
+  const vertical = north || south;
+  if (horizontal && vertical) return { axis: null, junction: true, through: false };
+  if (horizontal) return { axis: 'x', junction: false, through: east && west };
+  if (vertical) return { axis: 'y', junction: false, through: north && south };
+  return { axis: null, junction: false, through: false };
+}
+
 function overbuildReason(
   map: MapSnapshot,
   kind: TileKind,
@@ -1040,14 +1093,9 @@ function overbuildReason(
   }
   if (kind === 'road') {
     if (settings.kind !== 'road') return 'Une route occupe cette tuile.';
+    // L'alignement sur la chaussée est résolu par `planStation` : une tuile
+    // route reste constructible dès que « en passage » est coché.
     if (!settings.driveThrough) return 'Une route occupe cette tuile (cochez « en passage »).';
-    const bits = map.trackBits[index] ?? 0;
-    const axis = directionAxis(settings.direction);
-    const alongX = (bits & (CONNECT_EAST | CONNECT_WEST)) !== 0;
-    const alongY = (bits & (CONNECT_NORTH | CONNECT_SOUTH)) !== 0;
-    if ((axis === 'x' && !alongX && alongY) || (axis === 'y' && !alongY && alongX)) {
-      return 'Route mal orientée pour une gare en passage : pivotez avec R.';
-    }
   }
   return null;
 }
@@ -1086,12 +1134,12 @@ function emptyInfrastructurePlan(
 export function planStation(options: StationPlanOptions): BuildPlan {
   const map = options.map;
   const from = buildTile(options.from);
-  const settings: StationSettings = {
+  let settings: StationSettings = {
     ...options.settings,
     platforms: Math.max(1, Math.min(STATION_MAX_PLATFORMS, Math.round(options.settings.platforms))),
     length: Math.max(1, Math.min(STATION_MAX_LENGTH, Math.round(options.settings.length))),
   };
-  const axis = directionAxis(settings.direction);
+  let axis = directionAxis(settings.direction);
   const footprint = stationFootprint(settings);
   const plan = emptyInfrastructurePlan('station', from, from, axis);
   plan.station = settings;
@@ -1104,9 +1152,27 @@ export function planStation(options: StationPlanOptions): BuildPlan {
     return { ...plan, reason: 'Gare hors de la carte.' };
   }
 
+  // Un arrêt en passage suit la chaussée : on aligne la direction sur la route
+  // au lieu d'exiger que le joueur devine le bon R. Les bits de route peuvent
+  // être muets selon le moteur (WASM), d'où la détection par voisinage.
+  const anchorKind = TILE_KINDS[map.kind[tileIndex(left, top, map.width)] ?? 0] ?? 'void';
+  let orientationReason: string | null = null;
+  if (settings.kind === 'road' && settings.driveThrough && anchorKind === 'road') {
+    const orientation = roadOrientationAt(map, left, top, tileIndex(left, top, map.width));
+    if (orientation.junction || (orientation.axis !== null && !orientation.through)) {
+      orientationReason =
+        'Une gare en passage exige une route droite et traversante (pas un carrefour, une courbe ni une impasse).';
+    } else if (orientation.axis) {
+      settings = { ...settings, direction: directionOnAxis(orientation.axis, settings.direction) };
+      axis = orientation.axis;
+      plan.station = settings;
+      plan.axis = axis;
+    }
+  }
+
   const anchorHeight = map.heightMap[tileIndex(left, top, map.width)] ?? 0;
   const costPerTile = STATION_COST_PER_TILE[settings.kind];
-  let reason: string | null = null;
+  let reason: string | null = orientationReason;
   let cost = 0;
 
   for (let y = top; y <= bottom; y += 1) {
