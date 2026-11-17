@@ -15,6 +15,7 @@
 import * as THREE from 'three';
 import type { DepotSnapshot, MapSnapshot } from '../engine/protocol';
 import { COMPANY_NONE } from '../engine/protocol';
+import { directionFromIndex, directionOffset } from '../game/buildRules';
 import { sampleHeightWorld } from '../game/mapGrid';
 import { companyColour, hexToRgb } from './tileVisuals';
 import { createModelMaterial } from './models/materials';
@@ -26,6 +27,13 @@ import {
 
 const MAX_DEPOTS = 512;
 const UP = new THREE.Vector3(0, 1, 0);
+
+/** Lacet Three.js qui aligne la porte locale (+Z) sur l’entrée du dépôt. */
+export function depotYawForDirection(direction: number): number {
+  const offset = directionOffset(directionFromIndex(direction));
+  const angle = Math.atan2(offset.dx, offset.dy);
+  return ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+}
 
 interface DepotPlacement {
   id: number;
@@ -123,7 +131,7 @@ export class DepotLayer {
         ground: map ? sampleHeightWorld(map, x, z) : 0,
         owner: depot.company,
         kind: depot.kind,
-        rotation: (((depot.direction % 4) + 4) % 4) * (Math.PI / 2),
+        rotation: depotYawForDirection(depot.direction),
       });
     }
 

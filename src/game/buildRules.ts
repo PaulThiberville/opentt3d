@@ -443,6 +443,21 @@ export function directionAxis(direction: BuildDirection): BuildAxis {
   return direction === 'ne' || direction === 'sw' ? 'x' : 'y';
 }
 
+/** Décalage de tuile de l’entrée d’une infrastructure, dans l’ordre ne, se, sw, nw. */
+export function directionOffset(direction: BuildDirection): { dx: number; dy: number } {
+  switch (direction) {
+    case 'ne':
+      return { dx: 1, dy: 0 };
+    case 'se':
+      return { dx: 0, dy: 1 };
+    case 'sw':
+      return { dx: -1, dy: 0 };
+    case 'nw':
+    default:
+      return { dx: 0, dy: -1 };
+  }
+}
+
 export function nextDirection(direction: BuildDirection): BuildDirection {
   return DIRECTION_ORDER[(directionToIndex(direction) + 1) % DIRECTION_ORDER.length] ?? 'ne';
 }
@@ -1292,24 +1307,31 @@ export function planStation(options: StationPlanOptions): BuildPlan {
   return { ...plan, cost, valid: reason === null, reason };
 }
 
-function neighbourDirection(
+/**
+ * Directions des tuiles voisines du type demandé, dans l’ordre déterministe
+ * est, ouest, sud, nord. Une entrée de dépôt doit pointer vers l’une d’elles.
+ */
+function neighbourDirections(
   map: MapSnapshot,
   x: number,
   y: number,
   kind: TileKind,
-): BuildDirection | null {
+): BuildDirection[] {
   const neighbours: { dx: number; dy: number; direction: BuildDirection }[] = [
     { dx: 1, dy: 0, direction: 'ne' },
     { dx: -1, dy: 0, direction: 'sw' },
     { dx: 0, dy: 1, direction: 'se' },
     { dx: 0, dy: -1, direction: 'nw' },
   ];
+  const directions: BuildDirection[] = [];
   for (const neighbour of neighbours) {
     if (!inBounds(map, x + neighbour.dx, y + neighbour.dy)) continue;
     const index = tileIndex(x + neighbour.dx, y + neighbour.dy, map.width);
-    if ((TILE_KINDS[map.kind[index] ?? 0] ?? 'void') === kind) return neighbour.direction;
+    if ((TILE_KINDS[map.kind[index] ?? 0] ?? 'void') === kind) {
+      directions.push(neighbour.direction);
+    }
   }
-  return null;
+  return directions;
 }
 
 /** Plan d'un dépôt route/rail ; l'orientation suit la voie voisine si possible. */
@@ -1317,8 +1339,14 @@ export function planDepot(options: DepotPlanOptions): BuildPlan {
   const map = options.map;
   const from = buildTile(options.from);
   const kind: TileKind = options.settings.kind === 'rail' ? 'rail' : 'road';
-  const detected = neighbourDirection(map, from.x, from.y, kind);
-  const direction = options.settings.direction ?? detected ?? 'se';
+  const adjacent = neighbourDirections(map, from.x, from.y, kind);
+  const requested = options.settings.direction;
+  // L'entrée doit donner sur la voie adjacente : une rotation explicite ne
+  // l'emporte que si elle pointe effectivement vers une voie du bon type.
+  const direction =
+    requested !== null && adjacent.includes(requested)
+      ? requested
+      : (adjacent[0] ?? requested ?? 'se');
   const plan = emptyInfrastructurePlan('depot', from, from, directionAxis(direction));
   plan.depot = { kind: options.settings.kind, direction };
 
@@ -1887,7 +1915,8 @@ export interface LockPlanOptions extends InfrastructureOptions {
   settings: LockSettings;
 }
 
-function directionToNeighbour(dx: number, dy: number): BuildDirection {
+/** Direction nommée correspondant à un décalage de tuile (ne=+x, se=+y…). */
+export function directionFromOffset(dx: number, dy: number): BuildDirection {
   if (dx > 0) return 'ne';
   if (dx < 0) return 'sw';
   if (dy > 0) return 'se';
@@ -1937,7 +1966,7 @@ export function planLock(options: LockPlanOptions): BuildPlan {
   if (!best) {
     return { ...plan, reason: 'Une écluse exige un bief voisin (canal ou eau).' };
   }
-  const direction = options.settings.direction ?? directionToNeighbour(best.dx, best.dy);
+  const direction = options.settings.direction ?? directionFromOffset(best.dx, best.dy);
   const upper = Math.max(height, best.height);
   const lower = Math.min(height, best.height);
   const axis = directionAxis(direction);
