@@ -6,20 +6,22 @@
  * catalogue partagé (`vehicleRules`), l'état du snapshot.
  */
 
-import type { MapSnapshot, OrderOptions, WorldSnapshot } from '../engine/protocol';
+import type { MapSnapshot, OrderOptions, RailType, WorldSnapshot } from '../engine/protocol';
 import {
   ORDER_ACTION_LABELS,
   cloneOrderOptions,
   depotById,
   depotKindLabel,
+  depotModels,
   inferVehicleModel,
-  modelsForDepot,
+  modelCompatibleWithRail,
   orderConditionLabel,
   orderTargetLabel,
   ordersFromSnapshot,
   refitCost,
   refitOptions,
   vehicleModel,
+  type VehicleModel,
 } from '../game/vehicleRules';
 import { RAIL_TYPE_LABELS } from '../game/railRules';
 import { modelKindFor } from '../game/vehicleInterpolation';
@@ -56,6 +58,22 @@ function catalogueVariant(modelId: string, kind: string): VehicleVariant {
   return CATALOGUE_VARIANTS[modelId] ?? (kind === 'train' ? 'train-coach' : 'truck-flat');
 }
 
+/**
+ * Raison pour laquelle un modèle ne peut pas être acheté dans ce dépôt (#219).
+ *
+ * L'incompatibilité de rail est la seule cause structurelle : le budget et la
+ * trésorerie sont évalués séparément par `affordable` pour rester dynamiques.
+ */
+function depotModelBlockedReason(
+  model: VehicleModel,
+  railType: RailType | null | undefined,
+): string | null {
+  if (modelCompatibleWithRail(model, railType)) return null;
+  const required = (model.railTypes ?? []).map((type) => RAIL_TYPE_LABELS[type]).join(' ou ');
+  const current = railType ? RAIL_TYPE_LABELS[railType] : 'voie inconnue';
+  return `Voie incompatible : ${required || 'matériel adapté'} requis, dépôt en ${current}.`;
+}
+
 /** Panneau d'un dépôt : modèles achetables et véhicules sur place. */
 export function describeDepotPanel(
   snapshot: WorldSnapshot | null,
@@ -70,19 +88,24 @@ export function describeDepotPanel(
   // Livrée des vignettes : couleur d'entreprise, ou bleu par défaut.
   const colour = companyColour(company?.colour ?? 8);
   const kindLabel = depotKindLabel(depot.kind);
-  const models = modelsForDepot(depot.kind, depot.railType).map((model) => ({
-    id: model.id,
-    name: model.name,
-    cargo: cargoLabel(model.cargo),
-    capacity: model.capacity,
-    speed: model.speed,
-    cost: model.cost,
-    maintenance: model.maintenance,
-    description: model.description,
-    affordable: money >= model.cost,
-    variant: catalogueVariant(model.id, model.kind),
-    colour,
-  }));
+  const models = depotModels(depot.kind).map((model) => {
+    const blockedReason = depotModelBlockedReason(model, depot.railType);
+    return {
+      id: model.id,
+      name: model.name,
+      cargo: cargoLabel(model.cargo),
+      capacity: model.capacity,
+      speed: model.speed,
+      cost: model.cost,
+      maintenance: model.maintenance,
+      description: model.description,
+      affordable: money >= model.cost,
+      available: blockedReason === null,
+      blockedReason,
+      variant: catalogueVariant(model.id, model.kind),
+      colour,
+    };
+  });
   const centreX = depot.x + depot.width / 2;
   const centreY = depot.y + depot.height / 2;
   const vehicles = snapshot.vehicles

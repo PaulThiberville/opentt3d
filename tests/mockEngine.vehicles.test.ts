@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { MockEngine } from '../src/engine/MockEngine';
 import { TILE_KIND_INDEX, type DepotSnapshot, type MapSnapshot } from '../src/engine/protocol';
-import { depotOrder, stationOrder } from '../src/game/vehicleRules';
+import {
+  depotModels,
+  depotOrder,
+  modelCompatibleWithRail,
+  stationOrder,
+} from '../src/game/vehicleRules';
 import { tileIndex } from '../src/game/mapGrid';
 
 async function createEngine(seed = 2024, size = 128): Promise<MockEngine> {
@@ -93,6 +98,71 @@ describe('MockEngine : achat et vente de véhicules', () => {
     expect((after.companies[0]?.money ?? 0) - moneyBefore).toBe(-24_000);
     expect(engine.hash()).not.toBe(hashBefore);
     expect(after.news.some((item) => item.text.includes('Bus urbain acheté'))).toBe(true);
+  });
+
+  it('achète tous les modèles proposés par le panneau dépôt (#219)', async () => {
+    const engine = await createEngine(219);
+    const roadDepot = findDepot(engine, 'road');
+    const railDepot = findDepot(engine, 'rail');
+    const roadModels = depotModels('road');
+    const railModels = depotModels('rail').filter((model) =>
+      modelCompatibleWithRail(model, railDepot.railType),
+    );
+    expect(roadModels.length).toBeGreaterThan(0);
+    expect(railModels.length).toBeGreaterThan(0);
+
+    for (const model of roadModels) {
+      engine.send({
+        type: 'vehicle',
+        action: 'buy',
+        company: 0,
+        depotId: roadDepot.id,
+        model: model.id,
+      });
+    }
+    for (const model of railModels) {
+      engine.send({
+        type: 'vehicle',
+        action: 'buy',
+        company: 0,
+        depotId: railDepot.id,
+        model: model.id,
+      });
+    }
+
+    const after = engine.snapshot();
+    const bought = new Set(
+      after.vehicles.filter((item) => item.company === 0).map((item) => item.model),
+    );
+    for (const model of [...roadModels, ...railModels]) {
+      expect(bought.has(model.id), `${model.id} devrait être acheté`).toBe(true);
+    }
+    expect(after.news.some((item) => item.kind === 'error')).toBe(false);
+
+    // Après refit et clone, un nouvel achat du catalogue reste accepté (#219).
+    const source = after.vehicles.find(
+      (item) => item.company === 0 && item.model === 'truck_flatbed',
+    );
+    if (source) {
+      engine.send({
+        type: 'vehicle',
+        action: 'refit',
+        company: 0,
+        vehicle: source.id,
+        cargo: 'coal',
+      });
+      engine.send({ type: 'vehicle', action: 'clone', company: 0, vehicle: source.id });
+      engine.send({
+        type: 'vehicle',
+        action: 'buy',
+        company: 0,
+        depotId: roadDepot.id,
+        model: 'bus_intercity',
+      });
+      const post = engine.snapshot();
+      expect(post.news.some((item) => item.kind === 'error')).toBe(false);
+      expect(post.vehicles.filter((item) => item.model === 'bus_intercity')).toHaveLength(2);
+    }
   });
 
   it('accepte encore la tuile depot {x,y} pour compatibilité', async () => {

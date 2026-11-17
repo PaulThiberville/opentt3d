@@ -96,6 +96,10 @@ export interface DepotModelView {
   maintenance: number;
   description: string;
   affordable: boolean;
+  /** `false` si le rail du dépôt ne permet pas ce matériel (#219). */
+  available: boolean;
+  /** Explication affichée quand `available` est faux, sinon `null`. */
+  blockedReason: string | null;
   /** Archétype visuel utilisé pour la vignette. */
   variant: VehicleVariant;
   /** Couleur d'entreprise 0xRRGGBB de la livrée de la vignette. */
